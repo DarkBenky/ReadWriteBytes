@@ -23,4 +23,6 @@ This experiment tests the performance of writing and reading frame data as binar
 The results show that writing frames is faster than reading them, with write operations capable of handling ~442 FPS while read operations can handle ~269 FPS. This suggests that the system could theoretically handle real-time frame processing for applications requiring up to 60 FPS.
 
 ## TODO
+
+- [ ] rework it to work based on grid
 - [ ] particle grid based on the Sebastian's video https://m.youtube.com/watch?v=pLwYMecqOxY
