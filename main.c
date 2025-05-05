@@ -391,8 +391,8 @@ void update_particles(struct PointSOA *particles, float dt) {
     for (int i = 0; i < NUM_PARTICLES; i++) {
         add_gravity(particles, i);
         update_particle(particles, i, dt);
-        move_to_box(particles, particles->bBoxMin, particles->bBoxMax);
     }
+    move_to_box(particles, particles->bBoxMin, particles->bBoxMax);
     // printf("Finished update_particles\n");
 }
 
