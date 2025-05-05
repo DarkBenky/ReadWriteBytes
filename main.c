@@ -4,9 +4,10 @@
 #include <unistd.h>     // for usleep()
 #include <math.h>       // for sqrtf()
 #include <time.h>      // for time()
+#include <string.h>     // for memset()
 
-#define NUM_PARTICLES 15000
-#define GRAVITY 1.0f
+#define NUM_PARTICLES 200000
+#define GRAVITY 10.0f
 #define DAMPING 0.9f
 #define ScreenWidth 800
 #define ScreenHeight 600
@@ -15,7 +16,7 @@
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
 #define temperature 1.0f
-#define pressure  temperature * 0.1f
+#define pressure  temperature * 0.01f
 #define FrameCount 30
 
 struct PointSOA {
@@ -206,83 +207,123 @@ void ApplyPressure(struct PointSOA *particles) {
     }
 }
 
+// First, optimize the move_to_grid function for direct calculation
 void move_to_grid(struct PointSOA *particles, int index) {
     float xStep = (particles->bBoxMax[0] - particles->bBoxMin[0]) / gridResolutionAxis;
     float yStep = (particles->bBoxMax[1] - particles->bBoxMin[1]) / gridResolutionAxis;
     float zStep = (particles->bBoxMax[2] - particles->bBoxMin[2]) / gridResolutionAxis;
     
-    int xIndex = 0, yIndex = 0, zIndex = 0;
+    // Calculate grid positions directly with clamping
+    int xIndex = (int)((particles->x[index] - particles->bBoxMin[0]) / xStep);
+    int yIndex = (int)((particles->y[index] - particles->bBoxMin[1]) / yStep);
+    int zIndex = (int)((particles->z[index] - particles->bBoxMin[2]) / zStep);
     
-    // Find x grid position
-    for (int i = 0; i < gridResolutionAxis; i++) {
-        if (particles->x[index] < particles->bBoxMin[0] + xStep * (i + 1)) {
-            xIndex = i;
-            break;
-        }
-    }
-    
-    // Find y grid position
-    for (int i = 0; i < gridResolutionAxis; i++) {
-        if (particles->y[index] < particles->bBoxMin[1] + yStep * (i + 1)) {
-            yIndex = i;
-            break;
-        }
-    }
-    
-    // Find z grid position
-    for (int i = 0; i < gridResolutionAxis; i++) {
-        if (particles->z[index] < particles->bBoxMin[2] + zStep * (i + 1)) {
-            zIndex = i;
-            break;
-        }
-    }
+    // Clamp indices
+    xIndex = (xIndex < 0) ? 0 : ((xIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : xIndex);
+    yIndex = (yIndex < 0) ? 0 : ((yIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : yIndex);
+    zIndex = (zIndex < 0) ? 0 : ((zIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : zIndex);
     
     // Convert 3D coordinates to a single index
     particles->gridID[index] = xIndex + yIndex * gridResolutionAxis + zIndex * gridResolutionAxis * gridResolutionAxis;
 }
 
-void updateGridData(struct PointSOA *particles) {
+// Use radix sort for better performance with integer keys
+void radixSortParticles(struct PointSOA *particles, int n) {
+    // Find the maximum number to know the number of digits
+    int maxVal = 0;
+    for (int i = 0; i < n; i++) {
+        if (particles->gridID[i] > maxVal) {
+            maxVal = particles->gridID[i];
+        }
+    }
+    
+    // Temporary arrays for sorting
+    float* tempX = (float*)malloc(n * sizeof(float));
+    float* tempY = (float*)malloc(n * sizeof(float));
+    float* tempZ = (float*)malloc(n * sizeof(float));
+    float* tempVX = (float*)malloc(n * sizeof(float));
+    float* tempVY = (float*)malloc(n * sizeof(float));
+    float* tempVZ = (float*)malloc(n * sizeof(float));
+    int* tempGridID = (int*)malloc(n * sizeof(int));
+    
+    // Do counting sort for every digit
+    for (int exp = 1; maxVal / exp > 0; exp *= 10) {
+        int count[10] = {0};
+        
+        // Count occurrences of each digit at current place value
+        for (int i = 0; i < n; i++) {
+            count[(particles->gridID[i] / exp) % 10]++;
+        }
+        
+        // Compute cumulative count (positions)
+        for (int i = 1; i < 10; i++) {
+            count[i] += count[i - 1];
+        }
+        
+        // Build the output array in reverse order to maintain stability
+        for (int i = n - 1; i >= 0; i--) {
+            int digit = (particles->gridID[i] / exp) % 10;
+            int pos = --count[digit];
+            
+            // Copy the data to temporary arrays
+            tempX[pos] = particles->x[i];
+            tempY[pos] = particles->y[i];
+            tempZ[pos] = particles->z[i];
+            tempVX[pos] = particles->xVelocity[i];
+            tempVY[pos] = particles->yVelocity[i];
+            tempVZ[pos] = particles->zVelocity[i];
+            tempGridID[pos] = particles->gridID[i];
+        }
+        
+        // Copy back to original arrays
+        for (int i = 0; i < n; i++) {
+            particles->x[i] = tempX[i];
+            particles->y[i] = tempY[i];
+            particles->z[i] = tempZ[i];
+            particles->xVelocity[i] = tempVX[i];
+            particles->yVelocity[i] = tempVY[i];
+            particles->zVelocity[i] = tempVZ[i];
+            particles->gridID[i] = tempGridID[i];
+        }
+    }
+    
+    // Free temporary arrays
+    free(tempX);
+    free(tempY);
+    free(tempZ);
+    free(tempVX);
+    free(tempVY);
+    free(tempVZ);
+    free(tempGridID);
+}
 
+void updateGridData(struct PointSOA *particles) {
+    // Assign each particle to its grid cell
     for (int i = 0; i < NUM_PARTICLES; i++) {
         move_to_grid(particles, i);
     }
     
-
-    for (int i = 0; i < gridResolution; i++) {
-        particles->startIndex[i] = -1;
-    }
+    // Reset grid cell start indices
+    memset(particles->startIndex, -1, sizeof(int) * gridResolution);
+    memset(particles->numberOfParticle, 0, sizeof(int) * gridResolution);
     
-
-    for (int i = 1; i < NUM_PARTICLES; i++) {
-        int j = i;
-        while (j > 0 && particles->gridID[j-1] > particles->gridID[j]) {
-            swapParticles(particles, j, j-1);
-            j--;
-        }
-    }
-
+    // Sort particles by grid ID using radix sort (much faster than insertion sort)
+    radixSortParticles(particles, NUM_PARTICLES);
+    
+    // Update start indices and count particles in a single pass
+    int currentGridID = -1;
+    
     for (int i = 0; i < NUM_PARTICLES; i++) {
         int gridID = particles->gridID[i];
-        if (i == 0 || particles->gridID[i-1] != gridID) {
+        
+        // When we encounter a new grid ID, mark its start index
+        if (gridID != currentGridID) {
             particles->startIndex[gridID] = i;
+            currentGridID = gridID;
         }
-    }
-
-    // calculate number of particles in each grid cell
-    for (int i = 0; i < gridResolution; i++) {
-        if (particles->startIndex[i] != -1) {
-            int startIdx = particles->startIndex[i];
-            int endIdx = NUM_PARTICLES;
-            for (int j = i + 1; j < gridResolution; j++) {
-                if (particles->startIndex[j] != -1) {
-                    endIdx = particles->startIndex[j];
-                    break;
-                }
-            }
-            particles->numberOfParticle[i] = endIdx - startIdx;
-        } else {
-            particles->numberOfParticle[i] = 0;
-        }
+        
+        // Increment count for this grid cell
+        particles->numberOfParticle[gridID]++;
     }
 }
 
@@ -540,14 +581,27 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
 
 void update_particles(struct PointSOA *particles, float dt) {
     // printf("Starting update_particles with dt=%f\n", dt);
+    // clock_t start, collideParticlesTime, applyPressureTime, updateParticlesTime, moveToBoxTime;
+    
+    // start = clock();
     CollideParticlesInGrid(particles);
+    // collideParticlesTime = clock();
+    // printf("CollideParticlesInGrid took %d ms\n", (int)((collideParticlesTime - start) * 1000.0f / CLOCKS_PER_SEC));
+    
     ApplyPressure(particles);
+    // applyPressureTime = clock();
+    // printf("ApplyPressure took %d ms\n", (int)((applyPressureTime - collideParticlesTime) * 1000.0f / CLOCKS_PER_SEC));
+    
     for (int i = 0; i < NUM_PARTICLES; i++) {
         add_gravity(particles, i);
         update_particle(particles, i, dt);
     }
+    // updateParticlesTime = clock();
+    // printf("update_particle took %d ms\n", (int)((updateParticlesTime - applyPressureTime) * 1000.0f / CLOCKS_PER_SEC));
+    
     move_to_box(particles, particles->bBoxMin, particles->bBoxMax);
-    // printf("Finished update_particles\n");
+    // moveToBoxTime = clock();
+    // printf("move_to_box took %d ms\n", (int)((moveToBoxTime - updateParticlesTime) * 1000.0f / CLOCKS_PER_SEC));
 }
 
 
@@ -619,7 +673,11 @@ int main() {
             readCameraData(&camera);
     
             // Update The Grid Data
+            int startGridTime = clock();
             updateGridData(particles);
+            int endGridTime = clock();
+            printf("Grid update took %d ms\n", (int)((endGridTime - startGridTime) * 1000.0f / CLOCKS_PER_SEC));
+        
             
             // update particles
             update_particles(particles, dt);
