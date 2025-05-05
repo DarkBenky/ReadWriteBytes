@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"image/color"
 	"math"
 	"os"
 	"time"
@@ -37,6 +38,74 @@ type Game struct {
 	img        *ebiten.Image
 	lastUpdate time.Time
 	camera     Camera
+}
+
+func PlotFPS(screen *ebiten.Image) {
+	// Plot parameters
+	const (
+		samples     = 30                 // Number of samples to plot
+		graphX      = 50                 // Left margin
+		graphY      = screenHeight - 110 // Bottom margin
+		graphWidth  = 180                // Width of graph
+		graphHeight = 100                // Height of graph
+	)
+
+	// read binary data containing FPS data
+	fpsData, err := os.ReadFile("average_fps.bin")
+	if err != nil {
+		fmt.Println("Error reading average_fps.bin:", err)
+		return
+	}
+	if len(fpsData) < samples*4 {
+		fmt.Println("average_fps.bin does not contain enough data")
+		return
+	}
+
+	// find min and max
+	minFPS := float32(1e6)
+	maxFPS := float32(-1e6)
+	fps := make([]float32, samples)
+
+	for i := 0; i < samples; i++ {
+		fps[i] = math.Float32frombits(binary.LittleEndian.Uint32(fpsData[i*4 : (i+1)*4]))
+		if fps[i] < minFPS {
+			minFPS = fps[i]
+		}
+		if fps[i] > maxFPS {
+			maxFPS = fps[i]
+		}
+	}
+
+	// Ensure we have reasonable min/max values
+	if maxFPS <= minFPS {
+		maxFPS = minFPS + 10
+	}
+
+	// Draw axis
+	ebitenutil.DrawLine(screen, graphX, graphY, graphX+graphWidth, graphY, color.RGBA{100, 100, 100, 255})  // X axis
+	ebitenutil.DrawLine(screen, graphX, graphY-graphHeight, graphX, graphY, color.RGBA{100, 100, 100, 255}) // Y axis
+
+	// Calculate step size to fill the entire graph width
+	stepWidth := float64(graphWidth) / float64(samples-1)
+
+	// Draw FPS values
+	for i := 0; i < len(fps)-1; i++ {
+		x1 := float64(graphX) + float64(i)*stepWidth
+		x2 := float64(graphX) + float64(i+1)*stepWidth
+
+		// Calculate normalized heights
+		y1 := float64(graphY - (fps[i]-minFPS)/(maxFPS-minFPS)*float32(graphHeight))
+		y2 := float64(graphY - (fps[i+1]-minFPS)/(maxFPS-minFPS)*float32(graphHeight))
+
+		// Color based on FPS value (green for high, yellow for medium, red for low)
+		r := uint8(255 * (1 - (fps[i]-minFPS)/(maxFPS-minFPS)))
+		g := uint8(255 * (fps[i] - minFPS) / (maxFPS - minFPS))
+		ebitenutil.DrawLine(screen, x1, y1, x2, y2, color.RGBA{r, g, 0, 255})
+	}
+
+	// Draw min/max labels
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.1f", maxFPS), graphX-30, int(graphY-graphHeight))
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.1f", minFPS), graphX-30, int(graphY))
 }
 
 func (g *Game) UpdatePixels() error {
@@ -228,6 +297,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.img != nil {
 		screen.DrawImage(g.img, nil)
 	}
+	PlotFPS(screen) // Add this line to draw the FPS graph
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("FPS: %.1f\nCamera: (%.1f, %.1f, %.1f) Dir: (%.1f, %.1f, %.1f)\nControls: WASD/Arrows - Move, QE - Up/Down, IJKL - Rotate, Mouse Drag - Look",
 		ebiten.CurrentFPS(), g.camera.PosX, g.camera.PosY, g.camera.PosZ, g.camera.DirX, g.camera.DirY, g.camera.DirZ))
 }

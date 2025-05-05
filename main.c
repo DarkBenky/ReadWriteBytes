@@ -3,16 +3,20 @@
 #include <stdlib.h>     // for rand()
 #include <unistd.h>     // for usleep()
 #include <math.h>       // for sqrtf()
+#include <time.h>      // for time()
 
-#define NUM_PARTICLES 1000
-#define GRAVITY 9.81f
+#define NUM_PARTICLES 15000
+#define GRAVITY 1.0f
 #define DAMPING 0.9f
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define PARTICLE_RADIUS 3
-#define MAX_SPEED 35.0f
-#define gridResolutionAxis 240
+#define MAX_SPEED 100.0f
+#define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
+#define temperature 1.0f
+#define pressure  temperature * 0.1f
+#define FrameCount 30
 
 struct PointSOA {
     float   x[NUM_PARTICLES];
@@ -21,10 +25,12 @@ struct PointSOA {
     float   xVelocity[NUM_PARTICLES];
     float   yVelocity[NUM_PARTICLES];
     float   zVelocity[NUM_PARTICLES];
+    float   distance[NUM_PARTICLES];
     float   bBoxMin[3];
     float   bBoxMax[3];
     int     gridID[NUM_PARTICLES];
     int     startIndex[gridResolution];
+    int     numberOfParticle[gridResolution];
 };
 
 struct Screen {
@@ -40,6 +46,78 @@ struct Camera {
     struct Ray ray;
     float fov;
 };
+
+
+void CollideParticlesInGrid(struct PointSOA *particles) {
+    for (int gridId = 0; gridId < gridResolution; gridId++) {
+        int startIdx = particles->startIndex[gridId];
+        if (startIdx == -1) continue; // No particles in this grid cell
+        int endIdx = startIdx + particles->numberOfParticle[gridId];
+        
+        // Check collisions between all particles in this cell
+        for (int i = startIdx; i < endIdx; i++) {
+            for (int j = i + 1; j < endIdx; j++) {
+                // Calculate distance between particles
+                float dx = particles->x[j] - particles->x[i];
+                float dy = particles->y[j] - particles->y[i];
+                float dz = particles->z[j] - particles->z[i];
+                
+                float distSquared = dx*dx + dy*dy + dz*dz;
+                float minDist = 2.0f * PARTICLE_RADIUS;
+                
+                // If particles are colliding (distance < 2*radius)
+                if (distSquared < minDist * minDist) {
+                    // Calculate collision normal
+                    float dist = sqrtf(distSquared);
+                    float nx = dx / dist;
+                    float ny = dy / dist;
+                    float nz = dz / dist;
+                    
+                    // Calculate relative velocity along normal
+                    float vx = particles->xVelocity[j] - particles->xVelocity[i];
+                    float vy = particles->yVelocity[j] - particles->yVelocity[i];
+                    float vz = particles->zVelocity[j] - particles->zVelocity[i];
+                    
+                    float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
+                    
+                    // Only collide if particles are moving toward each other
+                    if (velocityAlongNormal < 0) {
+                        // Calculate impulse scalar (assuming equal mass)
+                        float impulse = -2.0f * velocityAlongNormal;
+                        
+                        // Apply impulse
+                        particles->xVelocity[i] -= impulse * nx * 0.5f;
+                        particles->yVelocity[i] -= impulse * ny * 0.5f;
+                        particles->zVelocity[i] -= impulse * nz * 0.5f;
+                        
+                        particles->xVelocity[j] += impulse * nx * 0.5f;
+                        particles->yVelocity[j] += impulse * ny * 0.5f;
+                        particles->zVelocity[j] += impulse * nz * 0.5f;
+                        
+                        // Add some damping to collision
+                        particles->xVelocity[i] *= DAMPING;
+                        particles->yVelocity[i] *= DAMPING;
+                        particles->zVelocity[i] *= DAMPING;
+                        
+                        particles->xVelocity[j] *= DAMPING;
+                        particles->yVelocity[j] *= DAMPING;
+                        particles->zVelocity[j] *= DAMPING;
+                        
+                        // Push particles apart to avoid sticking
+                        float correction = (minDist - dist) * 0.5f;
+                        particles->x[i] -= nx * correction;
+                        particles->y[i] -= ny * correction;
+                        particles->z[i] -= nz * correction;
+                        
+                        particles->x[j] += nx * correction;
+                        particles->y[j] += ny * correction;
+                        particles->z[j] += nz * correction;
+                    }
+                }
+            }
+        }
+    }
+}
 
 
 void swapParticles(struct PointSOA *particles, int i, int j) {
@@ -69,6 +147,63 @@ void swapParticles(struct PointSOA *particles, int i, int j) {
     int tempID = particles->gridID[i];
     particles->gridID[i] = particles->gridID[j];
     particles->gridID[j] = tempID;
+}
+
+int positionToGridId(struct PointSOA *particles, float position[3]) {
+    // Calculate grid ID based on position
+    int xIndex = (int)((position[0] - particles->bBoxMin[0]) / (particles->bBoxMax[0] - particles->bBoxMin[0]) * gridResolutionAxis);
+    int yIndex = (int)((position[1] - particles->bBoxMin[1]) / (particles->bBoxMax[1] - particles->bBoxMin[1]) * gridResolutionAxis);
+    int zIndex = (int)((position[2] - particles->bBoxMin[2]) / (particles->bBoxMax[2] - particles->bBoxMin[2]) * gridResolutionAxis);
+    
+    // Clamp indices to grid resolution
+    if (xIndex < 0) xIndex = 0;
+    if (xIndex >= gridResolutionAxis) xIndex = gridResolutionAxis - 1;
+    if (yIndex < 0) yIndex = 0;
+    if (yIndex >= gridResolutionAxis) yIndex = gridResolutionAxis - 1;
+    if (zIndex < 0) zIndex = 0;
+    if (zIndex >= gridResolutionAxis) zIndex = gridResolutionAxis - 1;
+    // Convert 3D indices to 1D grid ID
+    return xIndex + yIndex * gridResolutionAxis + zIndex * gridResolutionAxis * gridResolutionAxis;
+}
+
+void CalculateCenterOfCell(struct PointSOA *particles, int index, float centerOfCell[3]) {
+    int xIndex = index % gridResolutionAxis;
+    int yIndex = (index / gridResolutionAxis) % gridResolutionAxis;
+    int zIndex = index / (gridResolutionAxis * gridResolutionAxis);
+    
+    float xStep = (particles->bBoxMax[0] - particles->bBoxMin[0]) / gridResolutionAxis;
+    float yStep = (particles->bBoxMax[1] - particles->bBoxMin[1]) / gridResolutionAxis;
+    float zStep = (particles->bBoxMax[2] - particles->bBoxMin[2]) / gridResolutionAxis;
+    
+    centerOfCell[0] = particles->bBoxMin[0] + (xIndex + 0.5f) * xStep;
+    centerOfCell[1] = particles->bBoxMin[1] + (yIndex + 0.5f) * yStep;
+    centerOfCell[2] = particles->bBoxMin[2] + (zIndex + 0.5f) * zStep;
+}
+
+void ApplyPressure(struct PointSOA *particles) {
+    for (int gridId = 0; gridId < gridResolution; gridId++) {
+        int startIdx = particles->startIndex[gridId];
+        if (startIdx == -1) continue; // No particles in this grid cell
+        int endIdx = startIdx + particles->numberOfParticle[gridId];
+        // calculate center of the given cell
+        float centerOfCell[3];
+        CalculateCenterOfCell(particles, gridId, centerOfCell);
+        float baselineForce = pressure * particles->numberOfParticle[gridId];
+        for (int i = startIdx; i < endIdx; i++) {
+            // calculate distance from center of cell
+            float dx = particles->x[i] - centerOfCell[0];
+            float dy = particles->y[i] - centerOfCell[1];
+            float dz = particles->z[i] - centerOfCell[2];
+            float distSquared = dx*dx + dy*dy + dz*dz;
+            float dist = sqrtf(distSquared);
+            if (dist > 0) {
+                // apply force in the direction of the center of the cell
+                particles->xVelocity[i] += baselineForce * dx / dist;
+                particles->yVelocity[i] += baselineForce * dy / dist;
+                particles->zVelocity[i] += baselineForce * dz / dist;
+            }
+        }
+    }
 }
 
 void move_to_grid(struct PointSOA *particles, int index) {
@@ -130,6 +265,23 @@ void updateGridData(struct PointSOA *particles) {
         int gridID = particles->gridID[i];
         if (i == 0 || particles->gridID[i-1] != gridID) {
             particles->startIndex[gridID] = i;
+        }
+    }
+
+    // calculate number of particles in each grid cell
+    for (int i = 0; i < gridResolution; i++) {
+        if (particles->startIndex[i] != -1) {
+            int startIdx = particles->startIndex[i];
+            int endIdx = NUM_PARTICLES;
+            for (int j = i + 1; j < gridResolution; j++) {
+                if (particles->startIndex[j] != -1) {
+                    endIdx = particles->startIndex[j];
+                    break;
+                }
+            }
+            particles->numberOfParticle[i] = endIdx - startIdx;
+        } else {
+            particles->numberOfParticle[i] = 0;
         }
     }
 }
@@ -203,144 +355,144 @@ int readCameraData(struct Camera *camera) {
     return 1;  // Successfully read camera data
 }
 
+// Add this quick sort helper function
+void quickSortParticles(struct PointSOA *particles, int low, int high, float *distances) {
+    if (low < high) {
+        float pivot = distances[high];
+        int i = low - 1;
+        
+        for (int j = low; j < high; j++) {
+            if (distances[j] <= pivot) {
+                i++;
+                swapParticles(particles, i, j);
+                float temp = distances[i];
+                distances[i] = distances[j];
+                distances[j] = temp;
+            }
+        }
+        swapParticles(particles, i + 1, high);
+        float temp = distances[i + 1];
+        distances[i + 1] = distances[high];
+        distances[high] = temp;
+        
+        int partition = i + 1;
+        quickSortParticles(particles, low, partition - 1, distances);
+        quickSortParticles(particles, partition + 1, high, distances);
+    }
+}
+
+
+
 void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen) {
-    // printf("Starting projectParticles\n");
+    // Pre-calculate camera vectors and constants
+    const float halfWidth = ScreenWidth * 0.5f;
+    const float halfHeight = ScreenHeight * 0.5f;
+    
+    // Calculate view matrix vectors
+    float right[3], trueUp[3];
+    float up[3] = {0, 1, 0};
+    
+    // Calculate right vector using cross product
+    right[0] = camera->ray.direction[1] * up[2] - camera->ray.direction[2] * up[1];
+    right[1] = camera->ray.direction[2] * up[0] - camera->ray.direction[0] * up[2];
+    right[2] = camera->ray.direction[0] * up[1] - camera->ray.direction[1] * up[0];
+    
+    // Calculate true up vector
+    trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
+    trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
+    trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
+
+    
+    // Calculate distances once
+    int validParticles = 0;
     for (int i = 0; i < NUM_PARTICLES; i++) {
         float x = particles->x[i] - camera->ray.origin[0];
         float y = particles->y[i] - camera->ray.origin[1];
         float z = particles->z[i] - camera->ray.origin[2];
-
-        // Project along the camera direction vector
+        
         float dotProduct = x * camera->ray.direction[0] + 
-                          y * camera->ray.direction[1] + 
-                          z * camera->ray.direction[2];
-                          
-        // Skip particles behind the camera
-        if (dotProduct <= 0) continue;
+                         y * camera->ray.direction[1] + 
+                         z * camera->ray.direction[2];
+                         
+        if (dotProduct > 0) { // Only include particles in front of camera
+            particles->distance[validParticles] = x*x + y*y + z*z;
+            if (validParticles != i) {
+                swapParticles(particles, validParticles, i);
+            }
+            validParticles++;
+        }
+    }
+    
+    // Sort particles using quick sort
+    quickSortParticles(particles, 0, validParticles - 1, particles->distance);
+    
+    for (int i = 0; i < validParticles; i++) {
+        float x = particles->x[i] - camera->ray.origin[0];
+        float y = particles->y[i] - camera->ray.origin[1];
+        float z = particles->z[i] - camera->ray.origin[2];
 
-        // Apply perspective projection
+        float dotProduct = x * camera->ray.direction[0] + 
+                         y * camera->ray.direction[1] + 
+                         z * camera->ray.direction[2];
+        
         float fovScale = 1.0f / (dotProduct * camera->fov);
         
-        // Calculate screen coordinates based on camera orientation
-        // Create a simple projection plane perpendicular to camera direction
-        float up[3] = {0, 1, 0};  // Simplified up vector
+        // Project onto screen
+        float screenRight = (x * right[0] + y * right[1] + z * right[2]) * fovScale;
+        float screenUp = (x * trueUp[0] + y * trueUp[1] + z * trueUp[2]) * fovScale;
         
-        // Calculate right vector (cross product of direction and up)
-        float right[3];
-        right[0] = camera->ray.direction[1] * up[2] - camera->ray.direction[2] * up[1];
-        right[1] = camera->ray.direction[2] * up[0] - camera->ray.direction[0] * up[2];
-        right[2] = camera->ray.direction[0] * up[1] - camera->ray.direction[1] * up[0];
-        
-        // Recalculate up vector to be perpendicular to right and direction
-        float trueUp[3];
-        trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
-        trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
-        trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
-        
-        // Project onto right and up vectors to get screen coordinates
-        float screenRight = x * right[0] + y * right[1] + z * right[2];
-        float screenUp = x * trueUp[0] + y * trueUp[1] + z * trueUp[2];
-        
-        int screenX = (int)((screenRight * fovScale) * 0.5f * ScreenWidth + ScreenWidth / 2);
-        int screenY = (int)((-screenUp * fovScale) * 0.5f * ScreenHeight + ScreenHeight / 2);
+        int screenX = (int)(screenRight * halfWidth + halfWidth);
+        int screenY = (int)(-screenUp * halfHeight + halfHeight);
 
-        if (i % 100 == 0) {
-            // printf("Particle %d: screenX=%d, screenY=%d\n", i, screenX, screenY);
+        // Fast distance approximation using squared distance
+        float distSquared = particles->distance[i];
+        int particleRadius = (int)(PARTICLE_RADIUS * (100.0f / (sqrtf(distSquared) + 10.0f)));
+        particleRadius = particleRadius < 1 ? 1 : (particleRadius > PARTICLE_RADIUS * 3 ? PARTICLE_RADIUS * 3 : particleRadius);
+
+        // Calculate particle color once
+        float sumVelocity = sqrtf(particles->xVelocity[i] * particles->xVelocity[i] +
+                                particles->yVelocity[i] * particles->yVelocity[i] +
+                                particles->zVelocity[i] * particles->zVelocity[i]);
+        
+        float normalizedVelocity = sumVelocity / MAX_SPEED;
+        if (normalizedVelocity > 1.0f) normalizedVelocity = 1.0f;
+        
+        uint8_t r, g, b;
+        if (normalizedVelocity < 0.5f) {
+            float t = normalizedVelocity * 2.0f;
+            r = (uint8_t)(128 * (1.0f - t));
+            g = 0;
+            b = 255;
+        } else {
+            float t = (normalizedVelocity - 0.5f) * 2.0f;
+            r = (uint8_t)(255 * t);
+            g = (uint8_t)(64 * t);
+            b = (uint8_t)(255 * (1.0f - t));
         }
 
-        // Calculate particle size based on distance
-        float distance = sqrtf(x*x + y*y + z*z);
-        int particleRadius = (int)(PARTICLE_RADIUS * (100.0f / (distance + 10.0f)));
+        // Draw particle
+        int minX = screenX - particleRadius;
+        int maxX = screenX + particleRadius;
+        int minY = screenY - particleRadius;
+        int maxY = screenY + particleRadius;
         
-        // Ensure a minimum and maximum size
-        if (particleRadius < 1) particleRadius = 1;
-        if (particleRadius > PARTICLE_RADIUS * 3) particleRadius = PARTICLE_RADIUS * 3;
+        // Clamp to screen bounds
+        minX = minX < 0 ? 0 : minX;
+        maxX = maxX >= ScreenWidth ? ScreenWidth - 1 : maxX;
+        minY = minY < 0 ? 0 : minY;
+        maxY = maxY >= ScreenHeight ? ScreenHeight - 1 : maxY;
 
-        // Draw particle based on radius and the velocity
-        for (int dx = -particleRadius; dx <= particleRadius; dx++) {
-            for (int dy = -particleRadius; dy <= particleRadius; dy++) {
-                int px = screenX + dx;
-                int py = screenY + dy;
-                if (px >= 0 && px < ScreenWidth && py >= 0 && py < ScreenHeight) {
-                    // Calculate the total velocity (speed) of the particle
-                    float sumVelocity = sqrtf(particles->xVelocity[i] * particles->xVelocity[i] +
-                                            particles->yVelocity[i] * particles->yVelocity[i] +
-                                            particles->zVelocity[i] * particles->zVelocity[i]);
-                    
-                    // Normalize velocity to MAX_SPEED for color calculations
-                    float normalizedVelocity = sumVelocity / MAX_SPEED;
-                    if (normalizedVelocity > 1.0f) normalizedVelocity = 1.0f;
-                    
-                    // Create a color gradient based on velocity:
-                    // Slow: Blue -> Medium: Green -> Fast: Red
-                    uint8_t r, g, b;
-                    
-                    if (normalizedVelocity < 0.5f) {
-                        // Blue to Green transition (slow to medium)
-                        float t = normalizedVelocity * 2.0f; // Scale to 0-1 range
-                        r = 0;
-                        g = (uint8_t)(255 * t);
-                        b = (uint8_t)(255 * (1.0f - t));
-                    } else {
-                        // Green to Red transition (medium to fast)
-                        float t = (normalizedVelocity - 0.5f) * 2.0f; // Scale to 0-1 range
-                        r = (uint8_t)(255 * t);
-                        g = (uint8_t)(255 * (1.0f - t));
-                        b = 0;
-                    }
-                    
-                    // Add velocity direction influence
-                    // X velocity affects red, Y affects green, Z affects blue
-                    float dirInfluence = 0.3f; // How much direction affects color
-                    
-                    // Replace fminf with a simple conditional
-                    float temp;
-                    
-                    if (particles->xVelocity[i] > 0) {
-                        temp = r + 255 * dirInfluence * (particles->xVelocity[i] / MAX_SPEED);
-                        r = (temp > 255) ? 255 : (uint8_t)temp;
-                    }
-                    if (particles->yVelocity[i] > 0) {
-                        temp = g + 255 * dirInfluence * (particles->yVelocity[i] / MAX_SPEED);
-                        g = (temp > 255) ? 255 : (uint8_t)temp;
-                    }
-                    if (particles->zVelocity[i] > 0) {
-                        temp = b + 255 * dirInfluence * (particles->zVelocity[i] / MAX_SPEED);
-                        b = (temp > 255) ? 255 : (uint8_t)temp;
-                    }
-                    
-                    // Add distance-based color modulation
-                    float distanceFactor = 1.0f - (distance / 150.0f);
-                    if (distanceFactor < 0.2f) distanceFactor = 0.2f;
-                    
-                    r = (uint8_t)(r * distanceFactor);
-                    g = (uint8_t)(g * distanceFactor);
-                    b = (uint8_t)(b * distanceFactor);
-                    
-                    // Add glow effect for fast particles
-                    if (normalizedVelocity > 0.8f) {
-                        float glowFactor = (normalizedVelocity - 0.8f) * 5.0f; // Scale to 0-1
-                        
-                        temp = r + (255 - r) * glowFactor;
-                        r = (temp > 255) ? 255 : (uint8_t)temp;
-                        
-                        temp = g + (255 - g) * glowFactor * 0.7f;
-                        g = (temp > 255) ? 255 : (uint8_t)temp;
-                        
-                        temp = b + (255 - b) * glowFactor * 0.5f;
-                        b = (temp > 255) ? 255 : (uint8_t)temp;
-                    }
-                    
-                    screen->data[px][py][0] = r;
-                    screen->data[px][py][1] = g;
-                    screen->data[px][py][2] = b;
-                    screen->data[px][py][3] = 255; // Alpha
-                }
+        for (int px = minX; px <= maxX; px++) {
+            for (int py = minY; py <= maxY; py++) {
+                screen->data[px][py][0] = r;
+                screen->data[px][py][1] = g;
+                screen->data[px][py][2] = b;
+                screen->data[px][py][3] = 255;
             }
         }
     }
-    // printf("Finished projectParticles\n");
 }
+
 
 void clearScreen(struct Screen *screen) {
     // printf("Starting clearScreen\n");
@@ -388,6 +540,8 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
 
 void update_particles(struct PointSOA *particles, float dt) {
     // printf("Starting update_particles with dt=%f\n", dt);
+    CollideParticlesInGrid(particles);
+    ApplyPressure(particles);
     for (int i = 0; i < NUM_PARTICLES; i++) {
         add_gravity(particles, i);
         update_particle(particles, i, dt);
@@ -398,8 +552,6 @@ void update_particles(struct PointSOA *particles, float dt) {
 
 
 int main() {
-    // printf("Starting particle simulation\n");
-    
     // Allocate large structures on the heap instead of stack
     struct PointSOA *particles = (struct PointSOA *)malloc(sizeof(struct PointSOA));
     if (!particles) {
@@ -455,27 +607,61 @@ int main() {
     // printf("Initializing screen\n");
     clearScreen(screen);
 
-    // printf("Starting main loop\n");
     float dt = 0.016f; // 60 FPS
+    float averageFPS[FrameCount];
+    int averageUpdateTime = 0;
+    int averageRenderTime = 0;
     int frameCount = 0;
-    int maxFrames = 1000; // Limit frames to avoid infinite loop during testing
+
     
-    while (frameCount < maxFrames) {
-        // printf("Frame %d\n", frameCount);
-        // Update camera from file if available
-        readCameraData(&camera);
-        
-        // update particles
-        update_particles(particles, dt);
+    while (1) {
+            int startTime = clock();
+            readCameraData(&camera);
+    
+            // Update The Grid Data
+            updateGridData(particles);
+            
+            // update particles
+            update_particles(particles, dt);
+    
+            int endTime = clock();
+            averageUpdateTime = (endTime - startTime) * 0.1f + averageUpdateTime * 0.9f;
+    
+            int startRenderTime = clock();
+            render(screen, particles, &camera);
+            int endRenderTime = clock();
+            
+            // Calculate total frame time in seconds
+            float frameTime = (float)(endRenderTime - startTime) / CLOCKS_PER_SEC;
+            float currentFPS = 1.0f / frameTime;
+            
+            // Store FPS before incrementing frameCount
+            if (frameCount < FrameCount) {
+                averageFPS[frameCount] = currentFPS;
+            }
+            
+            averageRenderTime = (endRenderTime - startRenderTime) * 0.25f + averageRenderTime * 0.75f;
+            
+            printf("FPS: %.2f, Update: %d ms, Render: %d ms\n", 
+                   currentFPS, 
+                   (int)(averageUpdateTime * 1000.0f / CLOCKS_PER_SEC),
+                   (int)(averageRenderTime * 1000.0f / CLOCKS_PER_SEC));
+    
+            // Sleep if we have remaining time in the frame
+            int remainingTime = (int)(dt * 1000) - (int)(frameTime * 1000);
+            if (remainingTime > 0) {
+                usleep(remainingTime * 1000);
+            }
 
-        // render particles
-        render(screen, particles, &camera);
-
-        // wait for a short time (simulate frame delay)
-        // printf("Sleeping for 16ms\n");
-        usleep(16000); // 16 ms for 60 FPS
-        
-        frameCount++;
+            if (frameCount >= FrameCount) {
+                frameCount = 0;
+                FILE *fpsFile = fopen("average_fps.bin", "wb");
+                if (fpsFile) {
+                    fwrite(averageFPS, sizeof(float), 300, fpsFile);
+                    fclose(fpsFile);
+                }
+            }
+            frameCount++;
     }
     
     // Clean up
