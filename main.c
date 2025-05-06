@@ -6,12 +6,12 @@
 #include <time.h>      // for time()
 #include <string.h>     // for memset()
 
-#define NUM_PARTICLES 200000
+#define NUM_PARTICLES 100000
 #define GRAVITY 10.0f
 #define DAMPING 0.9f
 #define ScreenWidth 800
 #define ScreenHeight 600
-#define PARTICLE_RADIUS 3
+#define PARTICLE_RADIUS 4
 #define MAX_SPEED 100.0f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
@@ -579,29 +579,35 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     // printf("--- Finished render ---\n");
 }
 
-void update_particles(struct PointSOA *particles, float dt) {
-    // printf("Starting update_particles with dt=%f\n", dt);
-    // clock_t start, collideParticlesTime, applyPressureTime, updateParticlesTime, moveToBoxTime;
-    
-    // start = clock();
+struct TimePartition {
+    int collisionTime;
+    int applyPressureTime;
+    int updateParticlesTime;
+    int moveToBoxTime;
+    int updateGridTime;
+    int renderTime;
+};
+
+void update_particles(struct PointSOA *particles, float dt, struct TimePartition *timePartition) {
+    clock_t start = clock();
     CollideParticlesInGrid(particles);
-    // collideParticlesTime = clock();
-    // printf("CollideParticlesInGrid took %d ms\n", (int)((collideParticlesTime - start) * 1000.0f / CLOCKS_PER_SEC));
+    clock_t collideParticlesTime = clock();
+    timePartition->collisionTime = (int)((collideParticlesTime - start) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->collisionTime * 0.75f;
     
     ApplyPressure(particles);
-    // applyPressureTime = clock();
-    // printf("ApplyPressure took %d ms\n", (int)((applyPressureTime - collideParticlesTime) * 1000.0f / CLOCKS_PER_SEC));
+    clock_t applyPressureTime = clock();
+    timePartition->applyPressureTime = (int)((applyPressureTime - collideParticlesTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25 + timePartition->applyPressureTime * 0.75f;
     
     for (int i = 0; i < NUM_PARTICLES; i++) {
         add_gravity(particles, i);
         update_particle(particles, i, dt);
     }
-    // updateParticlesTime = clock();
-    // printf("update_particle took %d ms\n", (int)((updateParticlesTime - applyPressureTime) * 1000.0f / CLOCKS_PER_SEC));
+    clock_t updateParticlesTime = clock();
+    timePartition->updateParticlesTime = (int)((updateParticlesTime - applyPressureTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->updateParticlesTime * 0.75f;
     
     move_to_box(particles, particles->bBoxMin, particles->bBoxMax);
-    // moveToBoxTime = clock();
-    // printf("move_to_box took %d ms\n", (int)((moveToBoxTime - updateParticlesTime) * 1000.0f / CLOCKS_PER_SEC));
+    clock_t moveToBoxTime = clock();
+    timePartition->moveToBoxTime = (int)((moveToBoxTime - updateParticlesTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->moveToBoxTime * 0.75f;
 }
 
 
@@ -667,6 +673,14 @@ int main() {
     int averageRenderTime = 0;
     int frameCount = 0;
 
+    struct TimePartition *timePartition = (struct TimePartition *)malloc(sizeof(struct TimePartition));
+    if (!timePartition) {
+        perror("Failed to allocate memory for time partition");
+        free(particles);
+        free(screen);
+        return 1;
+    }
+
     
     while (1) {
             int startTime = clock();
@@ -676,11 +690,11 @@ int main() {
             int startGridTime = clock();
             updateGridData(particles);
             int endGridTime = clock();
-            printf("Grid update took %d ms\n", (int)((endGridTime - startGridTime) * 1000.0f / CLOCKS_PER_SEC));
+            timePartition->updateGridTime = (int)((endGridTime - startGridTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->updateGridTime * 0.75f;
         
             
             // update particles
-            update_particles(particles, dt);
+            update_particles(particles, dt, timePartition);
     
             int endTime = clock();
             averageUpdateTime = (endTime - startTime) * 0.1f + averageUpdateTime * 0.9f;
@@ -688,6 +702,7 @@ int main() {
             int startRenderTime = clock();
             render(screen, particles, &camera);
             int endRenderTime = clock();
+            timePartition->renderTime = (int)((endRenderTime - startRenderTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->renderTime * 0.75f;
             
             // Calculate total frame time in seconds
             float frameTime = (float)(endRenderTime - startTime) / CLOCKS_PER_SEC;
@@ -717,6 +732,12 @@ int main() {
                 if (fpsFile) {
                     fwrite(averageFPS, sizeof(float), 300, fpsFile);
                     fclose(fpsFile);
+                }
+                // write time partition data
+                FILE *timeFile = fopen("time_partition.bin", "wb");
+                if (timeFile) {
+                    fwrite(timePartition, sizeof(struct TimePartition), 1, timeFile);
+                    fclose(timeFile);
                 }
             }
             frameCount++;

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"image/color"
@@ -40,12 +41,88 @@ type Game struct {
 	camera     Camera
 }
 
+type TimePartition struct {
+	CollisionTime       int32
+	ApplyPressureTime   int32
+	UpdateParticlesTime int32
+	MoveToBoxTime       int32
+	UpdateGridTime      int32
+	RenderTime          int32
+}
+
+func PlotTimePartition(screen *ebiten.Image) {
+	// Plot parameters
+	const (
+		barHeight   = 20
+		barSpacing  = 5
+		barMaxWidth = 80
+		startX      = 680
+		startY      = screenHeight - 600
+		labelWidth  = 80
+	)
+
+	// Read time partition data
+	data, err := os.ReadFile("time_partition.bin")
+	if err != nil {
+		return
+	}
+
+	var tp TimePartition
+	reader := bytes.NewReader(data)
+	if err := binary.Read(reader, binary.LittleEndian, &tp); err != nil {
+		return
+	}
+
+	// Define time segments with their colors
+	segments := []struct {
+		name  string
+		time  int32
+		color color.RGBA
+	}{
+		{"Collision", tp.CollisionTime, color.RGBA{255, 0, 0, 255}},
+		{"Pressure", tp.ApplyPressureTime, color.RGBA{0, 255, 0, 255}},
+		{"Update", tp.UpdateParticlesTime, color.RGBA{0, 0, 255, 255}},
+		{"Box Bounds", tp.MoveToBoxTime, color.RGBA{255, 255, 0, 255}},
+		{"Grid Update", tp.UpdateGridTime, color.RGBA{255, 0, 255, 255}},
+		{"Render", tp.RenderTime, color.RGBA{0, 255, 255, 255}},
+	}
+
+	// Find maximum time for scaling
+	maxTime := int32(1)
+	for _, s := range segments {
+		if s.time > maxTime {
+			maxTime = s.time
+		}
+	}
+
+	// Draw title
+	ebitenutil.DebugPrintAt(screen, "Time Breakdown (ms):", startX, startY-30)
+
+	// Draw bars
+	for i, seg := range segments {
+		y := startY + i*(barHeight+barSpacing)
+
+		// Draw label
+		ebitenutil.DebugPrintAt(screen, seg.name+":", startX-labelWidth, y+5)
+
+		// Draw bar
+		width := int(float64(seg.time) / float64(maxTime) * float64(barMaxWidth))
+		if width < 2 {
+			width = 2
+		}
+		ebitenutil.DrawRect(screen, float64(startX), float64(y), float64(width), float64(barHeight), seg.color)
+
+		// Draw time value
+		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.1f", float32(seg.time)), int(startX+float64(width)+5), y+5)
+	}
+}
+
 func PlotFPS(screen *ebiten.Image) {
 	// Plot parameters
 	const (
 		samples     = 30                 // Number of samples to plot
-		graphX      = 50                 // Left margin
-		graphY      = screenHeight - 110 // Bottom margin
+		graphX      = 35                 // Left margin
+		graphY      = screenHeight - 20 // Bottom margin
 		graphWidth  = 180                // Width of graph
 		graphHeight = 100                // Height of graph
 	)
@@ -297,7 +374,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.img != nil {
 		screen.DrawImage(g.img, nil)
 	}
-	PlotFPS(screen) // Add this line to draw the FPS graph
+	PlotFPS(screen)
+	PlotTimePartition(screen)
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("FPS: %.1f\nCamera: (%.1f, %.1f, %.1f) Dir: (%.1f, %.1f, %.1f)\nControls: WASD/Arrows - Move, QE - Up/Down, IJKL - Rotate, Mouse Drag - Look",
 		ebiten.CurrentFPS(), g.camera.PosX, g.camera.PosY, g.camera.PosZ, g.camera.DirX, g.camera.DirY, g.camera.DirZ))
 }
