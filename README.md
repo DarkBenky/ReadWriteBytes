@@ -24,5 +24,7 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] rework it to work based on grid
-- [ ] particle grid based on the Sebastian's video https://m.youtube.com/watch?v=pLwYMecqOxY
+- [x] rework it to work based on grid
+- [x] particle grid based on the Sebastian's video https://m.youtube.com/watch?v=pLwYMecqOxY
+- [ ] add screens based fluid rendering
+- [ ] more realistic attraction and repulsion 
