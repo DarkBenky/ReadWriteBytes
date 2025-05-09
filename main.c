@@ -8,16 +8,16 @@
 #include <stdbool.h>    // for bool, true, false
 
 #define NUM_PARTICLES 100000
-#define GRAVITY 10.0f
+#define GRAVITY 20.0f
 #define DAMPING 0.95f
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define PARTICLE_RADIUS 4
-#define MAX_SPEED 100.0f
+#define MAX_SPEED 150.0f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
 #define temperature 1.0f
-#define pressure  temperature * 0.01f
+#define pressure  temperature * 0.1f
 #define FrameCount 30
 
 struct PointSOA {
@@ -913,7 +913,7 @@ int main() {
 
     clearScreen(screen);
 
-    float dt = 0.016f; // 60 FPS
+    float dt = 0.08f; // 60 FPS
     float averageFPS[FrameCount];
     int averageUpdateTime = 0;
     int averageRenderTime = 0;
