@@ -34,11 +34,18 @@ type Camera struct {
 	MouseDragging    bool
 }
 
+const (
+	move   = uint8(iota)
+	cursor = uint8(iota)
+)
+
 type Game struct {
 	pixels     [screenWidth * screenHeight * 4]uint8
 	img        *ebiten.Image
 	lastUpdate time.Time
 	camera     Camera
+	mode       uint8
+	cursor     Cursor
 }
 
 type TimePartition struct {
@@ -120,11 +127,11 @@ func PlotTimePartition(screen *ebiten.Image) {
 func PlotFPS(screen *ebiten.Image) {
 	// Plot parameters
 	const (
-		samples     = 30                 // Number of samples to plot
-		graphX      = 35                 // Left margin
+		samples     = 30                // Number of samples to plot
+		graphX      = 35                // Left margin
 		graphY      = screenHeight - 20 // Bottom margin
-		graphWidth  = 180                // Width of graph
-		graphHeight = 100                // Height of graph
+		graphWidth  = 180               // Width of graph
+		graphHeight = 100               // Height of graph
 	)
 
 	// read binary data containing FPS data
@@ -235,6 +242,123 @@ func (g *Game) writeCameraData() error {
 	binary.Write(file, binary.LittleEndian, g.camera.FOV)
 
 	return nil
+}
+
+type Cursor struct {
+	X, Y, Z float32
+	force   float32
+	active  bool
+}
+
+func (c *Cursor) ReadFileData() error {
+	// Read cursor data from a binary file
+	data, err := os.ReadFile("cursor.bin")
+	if err != nil {
+		// If file doesn't exist, create it with default values
+		if os.IsNotExist(err) {
+			return c.WriteFileData() // Initialize with current values
+		}
+		return fmt.Errorf("failed to read cursor file: %w", err)
+	}
+
+	// Unpack the data into the cursor struct
+	reader := bytes.NewReader(data)
+	if err := binary.Read(reader, binary.LittleEndian, &c.X); err != nil {
+		return fmt.Errorf("failed to read cursor X: %w", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &c.Y); err != nil {
+		return fmt.Errorf("failed to read cursor Y: %w", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &c.Z); err != nil {
+		return fmt.Errorf("failed to read cursor Z: %w", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &c.active); err != nil {
+		return fmt.Errorf("failed to read cursor active: %w", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &c.force); err != nil {
+		return fmt.Errorf("failed to read cursor force: %w", err)
+	}
+
+	return nil
+}
+
+func (c *Cursor) WriteFileData() error {
+	// Create a binary file to share cursor data with the C program
+	file, err := os.Create("cursor.bin")
+	if err != nil {
+		return fmt.Errorf("failed to create cursor file: %w", err)
+	}
+	defer file.Close()
+	// Write cursor data in binary format
+	binary.Write(file, binary.LittleEndian, c.X)
+	binary.Write(file, binary.LittleEndian, c.Y)
+	binary.Write(file, binary.LittleEndian, c.Z)
+	binary.Write(file, binary.LittleEndian, c.active)
+	binary.Write(file, binary.LittleEndian, c.force)
+	return nil
+}
+
+func (c *Cursor) Update(g *Game) {
+	// Force adjustment with scroll wheel
+	_, scrollY := ebiten.Wheel()
+	if scrollY != 0 {
+		// Make force adjustment proportional to current force value for better control
+		adjustment := 7.5
+		if math.Abs(float64(scrollY)) > 1.0 {
+			adjustment = math.Abs(float64(scrollY)) * 7.5
+		}
+
+		if scrollY > 0 {
+			c.force += float32(adjustment)
+		} else {
+			c.force -= float32(adjustment)
+		}
+	}
+
+	if ebiten.IsKeyPressed(ebiten.KeyW) || ebiten.IsKeyPressed(ebiten.KeyUp) {
+		c.Z += moveSpeed * g.camera.DirZ
+		c.X += moveSpeed * g.camera.DirX
+		c.Y += moveSpeed * g.camera.DirY
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyS) || ebiten.IsKeyPressed(ebiten.KeyDown) {
+		c.Z -= moveSpeed * g.camera.DirZ
+		c.X -= moveSpeed * g.camera.DirX
+		c.Y -= moveSpeed * g.camera.DirY
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyA) || ebiten.IsKeyPressed(ebiten.KeyLeft) {
+		// Move left relative to direction (cross product with up vector)
+		rightX := g.camera.DirY
+		rightY := -g.camera.DirX
+		c.X -= moveSpeed * rightX
+		c.Y -= moveSpeed * rightY
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyD) || ebiten.IsKeyPressed(ebiten.KeyRight) {
+		// Move right relative to direction (cross product with up vector)
+		rightX := g.camera.DirY
+		rightY := -g.camera.DirX
+		c.X += moveSpeed * rightX
+		c.Y += moveSpeed * rightY
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyQ) {
+		c.Y -= moveSpeed // Move down
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyE) {
+		c.Y += moveSpeed // Move up
+	}
+
+	// check for left click
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		c.active = true
+	} else if inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft) {
+		c.active = false
+	}
+
+	// Write cursor data after any modifications
+	err := c.WriteFileData()
+	if err != nil {
+		fmt.Printf("Error writing cursor data: %v\n", err)
+		return
+	}
 }
 
 func (g *Game) handleCameraMovement() {
@@ -355,8 +479,17 @@ func (g *Game) handleCameraMovement() {
 }
 
 func (g *Game) Update() error {
-	// Handle camera movement
-	g.handleCameraMovement()
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
+		g.mode = (g.mode + 1) % 2
+	}
+
+	switch g.mode {
+	case move:
+		g.handleCameraMovement()
+	case cursor:
+		g.cursor.Update(g)
+	}
 
 	// Only update at 60 FPS to match the C program
 	now := time.Now()
@@ -378,6 +511,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	PlotTimePartition(screen)
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("FPS: %.1f\nCamera: (%.1f, %.1f, %.1f) Dir: (%.1f, %.1f, %.1f)\nControls: WASD/Arrows - Move, QE - Up/Down, IJKL - Rotate, Mouse Drag - Look",
 		ebiten.CurrentFPS(), g.camera.PosX, g.camera.PosY, g.camera.PosZ, g.camera.DirX, g.camera.DirY, g.camera.DirZ))
+	if g.mode == move {
+		ebitenutil.DebugPrintAt(screen, "Mode: Move", 0, 50)
+	} else {
+		ebitenutil.DebugPrintAt(screen, "Mode: Cursor", 0, 50)
+	}
+	// print force value
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Force: %.1f", g.cursor.force), 0, 70)
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
@@ -392,6 +532,18 @@ func main() {
 			DirX: 0.0, DirY: 0.0, DirZ: 1.0, // Looking forward
 			FOV: 1.0,
 		},
+		mode: move, // Start in movement mode
+		cursor: Cursor{
+			X: 0.0, Y: 0.0, Z: 0.0,
+			active: false,
+			force:  100.0,
+		},
+	}
+	
+	// write cursor data to file
+	err := game.cursor.WriteFileData()
+	if err != nil {
+		fmt.Printf("Error writing cursor data: %v\n", err)
 	}
 
 	// Write initial camera data

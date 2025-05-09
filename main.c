@@ -5,10 +5,11 @@
 #include <math.h>       // for sqrtf()
 #include <time.h>      // for time()
 #include <string.h>     // for memset()
+#include <stdbool.h>    // for bool, true, false
 
 #define NUM_PARTICLES 100000
 #define GRAVITY 10.0f
-#define DAMPING 0.9f
+#define DAMPING 0.95f
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define PARTICLE_RADIUS 4
@@ -47,6 +48,217 @@ struct Camera {
     struct Ray ray;
     float fov;
 };
+
+struct Cursor {
+    float x;
+    float y;
+    float z;
+    float force;
+    bool active;
+};
+
+void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], struct Camera *camera) {
+    // Use same projection method as particles
+    const float halfWidth = ScreenWidth * 0.5f;
+    const float halfHeight = ScreenHeight * 0.5f;
+    
+    // Calculate view matrix vectors - same as in projectParticles
+    float right[3], trueUp[3];
+    float up[3] = {0, 1, 0};
+    
+    // Calculate right vector using cross product
+    right[0] = camera->ray.direction[1] * up[2] - camera->ray.direction[2] * up[1];
+    right[1] = camera->ray.direction[2] * up[0] - camera->ray.direction[0] * up[2];
+    right[2] = camera->ray.direction[0] * up[1] - camera->ray.direction[1] * up[0];
+    
+    // Calculate true up vector
+    trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
+    trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
+    trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
+    
+    // Define the 8 corners of the bounding box
+    float corners[8][3] = {
+        {bBoxMin[0], bBoxMin[1], bBoxMin[2]}, // 0: min, min, min
+        {bBoxMax[0], bBoxMin[1], bBoxMin[2]}, // 1: max, min, min
+        {bBoxMin[0], bBoxMax[1], bBoxMin[2]}, // 2: min, max, min
+        {bBoxMax[0], bBoxMax[1], bBoxMin[2]}, // 3: max, max, min
+        {bBoxMin[0], bBoxMin[1], bBoxMax[2]}, // 4: min, min, max
+        {bBoxMax[0], bBoxMin[1], bBoxMax[2]}, // 5: max, min, max
+        {bBoxMin[0], bBoxMax[1], bBoxMax[2]}, // 6: min, max, max
+        {bBoxMax[0], bBoxMax[1], bBoxMax[2]}  // 7: max, max, max
+    };
+    
+    // Project corners to screen space
+    int screenPoints[8][2];
+    bool inFront[8];
+    
+    for (int i = 0; i < 8; i++) {
+        // Vector from camera to corner
+        float x = corners[i][0] - camera->ray.origin[0];
+        float y = corners[i][1] - camera->ray.origin[1];
+        float z = corners[i][2] - camera->ray.origin[2];
+        
+        // Check if corner is in front of camera
+        float dotProduct = x * camera->ray.direction[0] + 
+                           y * camera->ray.direction[1] + 
+                           z * camera->ray.direction[2];
+        
+        inFront[i] = (dotProduct > 0);
+        
+        if (inFront[i]) {
+            // Project point to screen space
+            float fovScale = 1.0f / (dotProduct * camera->fov);
+            float screenRight = (x * right[0] + y * right[1] + z * right[2]) * fovScale;
+            float screenUp = (x * trueUp[0] + y * trueUp[1] + z * trueUp[2]) * fovScale;
+            
+            screenPoints[i][0] = (int)(screenRight * halfWidth + halfWidth);
+            screenPoints[i][1] = (int)(-screenUp * halfHeight + halfHeight);
+            
+            // Clamp to screen bounds
+            screenPoints[i][0] = screenPoints[i][0] < 0 ? 0 : (screenPoints[i][0] >= ScreenWidth ? ScreenWidth - 1 : screenPoints[i][0]);
+            screenPoints[i][1] = screenPoints[i][1] < 0 ? 0 : (screenPoints[i][1] >= ScreenHeight ? ScreenHeight - 1 : screenPoints[i][1]);
+        }
+    }
+    
+    // Define edges by vertex indices
+    int edges[12][2] = {
+        {0, 1}, {1, 3}, {3, 2}, {2, 0}, // Bottom face
+        {4, 5}, {5, 7}, {7, 6}, {6, 4}, // Top face
+        {0, 4}, {1, 5}, {2, 6}, {3, 7}  // Connecting edges
+    };
+    
+    // Draw edges
+    for (int i = 0; i < 12; i++) {
+        int v1 = edges[i][0];
+        int v2 = edges[i][1];
+        
+        // Only draw edge if both vertices are in front of camera
+        if (inFront[v1] && inFront[v2]) {
+            // Use Bresenham's algorithm to draw line
+            int x0 = screenPoints[v1][0];
+            int y0 = screenPoints[v1][1];
+            int x1 = screenPoints[v2][0];
+            int y1 = screenPoints[v2][1];
+            
+            int dx = abs(x1 - x0);
+            int dy = -abs(y1 - y0);
+            int sx = x0 < x1 ? 1 : -1;
+            int sy = y0 < y1 ? 1 : -1;
+            int err = dx + dy;
+            int e2;
+            
+            while (1) {
+                // Draw pixel if it's within screen bounds
+                if (x0 >= 0 && x0 < ScreenWidth && y0 >= 0 && y0 < ScreenHeight) {
+                    screen->data[x0][y0][0] = 0;     // R
+                    screen->data[x0][y0][1] = 255;   // G
+                    screen->data[x0][y0][2] = 0;     // B
+                    screen->data[x0][y0][3] = 255;   // Alpha
+                }
+                
+                if (x0 == x1 && y0 == y1) break;
+                e2 = 2 * err;
+                if (e2 >= dy) {
+                    if (x0 == x1) break;
+                    err += dy;
+                    x0 += sx;
+                }
+                if (e2 <= dx) {
+                    if (y0 == y1) break;
+                    err += dx;
+                    y0 += sy;
+                }
+            }
+        }
+    }
+}
+
+void drawCursor(struct Screen *screen, struct Cursor *cursor, struct Camera *camera) {
+    // Use same projection method as particles
+    const float halfWidth = ScreenWidth * 0.5f;
+    const float halfHeight = ScreenHeight * 0.5f;
+    
+    // Calculate view matrix vectors - same as in projectParticles
+    float right[3], trueUp[3];
+    float up[3] = {0, 1, 0};
+    
+    // Calculate right vector using cross product
+    right[0] = camera->ray.direction[1] * up[2] - camera->ray.direction[2] * up[1];
+    right[1] = camera->ray.direction[2] * up[0] - camera->ray.direction[0] * up[2];
+    right[2] = camera->ray.direction[0] * up[1] - camera->ray.direction[1] * up[0];
+    
+    // Calculate true up vector
+    trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
+    trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
+    trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
+
+    // Calculate vector from camera to cursor
+    float x = cursor->x - camera->ray.origin[0];
+    float y = cursor->y - camera->ray.origin[1];
+    float z = cursor->z - camera->ray.origin[2];
+    
+    // Calculate dot product to check if cursor is in front of camera
+    float dotProduct = x * camera->ray.direction[0] + 
+                     y * camera->ray.direction[1] + 
+                     z * camera->ray.direction[2];
+    
+    // Only draw cursor if it's in front of the camera
+    if (dotProduct > 0) {
+        float fovScale = 1.0f / (dotProduct * camera->fov);
+        
+        // Project onto screen using the same method as for particles
+        float screenRight = (x * right[0] + y * right[1] + z * right[2]) * fovScale;
+        float screenUp = (x * trueUp[0] + y * trueUp[1] + z * trueUp[2]) * fovScale;
+        
+        int screenX = (int)(screenRight * halfWidth + halfWidth);
+        int screenY = (int)(-screenUp * halfHeight + halfHeight);
+
+        // Clamp to screen bounds
+        screenX = screenX < 0 ? 0 : (screenX >= ScreenWidth ? ScreenWidth - 1 : screenX);
+        screenY = screenY < 0 ? 0 : (screenY >= ScreenHeight ? ScreenHeight - 1 : screenY);
+        
+        // Draw cursor with a fixed size
+        const int cursorRadius = 5;
+        // Draw horizontal line of cross
+        for (int px = screenX - cursorRadius; px <= screenX + cursorRadius; px++) {
+            if (px >= 0 && px < ScreenWidth) {
+                screen->data[px][screenY][0] = 255; // Red
+                screen->data[px][screenY][1] = 255; // Green
+                screen->data[px][screenY][2] = 255; // Blue
+                screen->data[px][screenY][3] = 255; // Alpha
+            }
+        }
+        // Draw vertical line of cross
+        for (int py = screenY - cursorRadius; py <= screenY + cursorRadius; py++) {
+            if (py >= 0 && py < ScreenHeight) {
+                screen->data[screenX][py][0] = 255; // Red
+                screen->data[screenX][py][1] = 255; // Green
+                screen->data[screenX][py][2] = 255; // Blue
+                screen->data[screenX][py][3] = 255; // Alpha
+            }
+        }
+    }
+}
+
+void readCursorData(struct Cursor *cursor) {
+    FILE *file = fopen("cursor.bin", "rb");
+    if (!file) {
+        printf("Cursor file not found, using default cursor\n");
+        return;
+    }
+    
+    if (fread(&cursor->x, sizeof(float), 1, file) != 1 ||
+        fread(&cursor->y, sizeof(float), 1, file) != 1 ||
+        fread(&cursor->z, sizeof(float), 1, file) != 1 ||
+        fread(&cursor->active, sizeof(bool), 1, file) != 1|| 
+        fread(&cursor->force, sizeof(float), 1, file) != 1) {
+        
+        fclose(file);
+        return; 
+    }
+    
+    fclose(file);
+}
 
 
 void CollideParticlesInGrid(struct PointSOA *particles) {
@@ -328,9 +540,9 @@ void updateGridData(struct PointSOA *particles) {
 }
 
 void update_particle(struct PointSOA *particles, int index, float dt) {
-    particles->x[index] += particles->xVelocity[index] * dt;
-    particles->y[index] += particles->yVelocity[index] * dt;
-    particles->z[index] += particles->zVelocity[index] * dt;
+    particles->x[index] += particles->xVelocity[index] * dt * DAMPING;
+    particles->y[index] += particles->yVelocity[index] * dt * DAMPING;
+    particles->z[index] += particles->zVelocity[index] * dt * DAMPING;
 }
 
 void add_gravity(struct PointSOA *particles, int index) {
@@ -571,11 +783,14 @@ void saveScreen(struct Screen *screen, const char *filename) {
     // printf("Finished saveScreen\n");
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor) {
     // printf("\n--- Starting render ---\n");
     clearScreen(screen);
     projectParticles(particles, camera, screen);
+    drawCursor(screen, cursor, camera);
+    drawBoundingBox(screen, particles->bBoxMax, particles->bBoxMin, camera);
     saveScreen(screen, "output.bin");
+    
     // printf("--- Finished render ---\n");
 }
 
@@ -588,7 +803,31 @@ struct TimePartition {
     int renderTime;
 };
 
-void update_particles(struct PointSOA *particles, float dt, struct TimePartition *timePartition) {
+void addForce(struct PointSOA *particles, struct Cursor *cursor) {
+    if (!cursor->active) return;
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        float dx = particles->x[i] - cursor->x;
+        float dy = particles->y[i] - cursor->y;
+        float dz = particles->z[i] - cursor->z;
+        float distSquared = dx*dx + dy*dy + dz*dz;
+        float dist = sqrtf(distSquared);
+        
+        // Prevent extreme forces at very close distances
+        const float minDistance = 2.0f;  // Minimum effective distance
+        if (dist < minDistance) {
+            dist = minDistance;
+        }
+        
+        // Apply force with the minimum distance protection
+        float forceFactor = cursor->force / dist;
+        particles->xVelocity[i] += dx * forceFactor;
+        particles->yVelocity[i] += dy * forceFactor;
+        particles->zVelocity[i] += dz * forceFactor;
+    }
+}
+
+
+void update_particles(struct PointSOA *particles, float dt, struct TimePartition *timePartition, struct Cursor *cursor) {
     clock_t start = clock();
     CollideParticlesInGrid(particles);
     clock_t collideParticlesTime = clock();
@@ -598,6 +837,8 @@ void update_particles(struct PointSOA *particles, float dt, struct TimePartition
     clock_t applyPressureTime = clock();
     timePartition->applyPressureTime = (int)((applyPressureTime - collideParticlesTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25 + timePartition->applyPressureTime * 0.75f;
     
+    addForce(particles, cursor);
+
     for (int i = 0; i < NUM_PARTICLES; i++) {
         add_gravity(particles, i);
         update_particle(particles, i, dt);
@@ -612,13 +853,13 @@ void update_particles(struct PointSOA *particles, float dt, struct TimePartition
 
 
 int main() {
-    // Allocate large structures on the heap instead of stack
+
     struct PointSOA *particles = (struct PointSOA *)malloc(sizeof(struct PointSOA));
     if (!particles) {
         perror("Failed to allocate memory for particles");
         return 1;
     }
-    // printf("Successfully allocated particles structure\n");
+
 
     struct Screen *screen = (struct Screen *)malloc(sizeof(struct Screen));
     if (!screen) {
@@ -626,10 +867,7 @@ int main() {
         free(particles);
         return 1;
     }
-    // printf("Successfully allocated screen structure\n");
-    
-    // initialize particles
-    // printf("Initializing %d particles\n", NUM_PARTICLES);
+
     for (int i = 0; i < NUM_PARTICLES; i++) {
         particles->x[i] = (float)(rand() % 100);
         particles->y[i] = (float)(rand() % 100);
@@ -639,21 +877,30 @@ int main() {
         particles->zVelocity[i] = (float)(rand() % 10) / 10.0f;
     }
 
-    // printf("Updating Particles\n");
-    // Update grid data
+    // initialize the cursor
+    struct Cursor *cursor = (struct Cursor *)malloc(sizeof(struct Cursor));
+    if (!cursor) {
+        perror("Failed to allocate memory for cursor");
+        free(particles);
+        free(screen);
+        return 1;
+    }
+    cursor->x = 0.0f;
+    cursor->y = 0.0f;
+    cursor->z = 0.0f;
+    cursor->active = false;
+
     updateGridData(particles);
 
-    // Set bounding box
-    // printf("Setting bounding box\n");
+
     particles->bBoxMin[0] = 0.0f;
     particles->bBoxMin[1] = 0.0f;
     particles->bBoxMin[2] = 0.0f;
-    particles->bBoxMax[0] = 100.0f;
-    particles->bBoxMax[1] = 100.0f;
-    particles->bBoxMax[2] = 100.0f;
+    particles->bBoxMax[0] = 150.0f;
+    particles->bBoxMax[1] = 150.0f;
+    particles->bBoxMax[2] = 150.0f;
 
-    // initialize camera
-    // printf("Initializing camera\n");
+
     struct Camera camera;
     camera.ray.origin[0] = 50.0f;
     camera.ray.origin[1] = 50.0f;
@@ -663,8 +910,7 @@ int main() {
     camera.ray.direction[2] = 1.0f;
     camera.fov = 1.0f;
 
-    // initialize screen
-    // printf("Initializing screen\n");
+
     clearScreen(screen);
 
     float dt = 0.016f; // 60 FPS
@@ -685,6 +931,7 @@ int main() {
     while (1) {
             int startTime = clock();
             readCameraData(&camera);
+            readCursorData(cursor);
     
             // Update The Grid Data
             int startGridTime = clock();
@@ -694,13 +941,13 @@ int main() {
         
             
             // update particles
-            update_particles(particles, dt, timePartition);
+            update_particles(particles, dt, timePartition, cursor);
     
             int endTime = clock();
             averageUpdateTime = (endTime - startTime) * 0.1f + averageUpdateTime * 0.9f;
     
             int startRenderTime = clock();
-            render(screen, particles, &camera);
+            render(screen, particles, &camera, cursor);
             int endRenderTime = clock();
             timePartition->renderTime = (int)((endRenderTime - startRenderTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->renderTime * 0.75f;
             
