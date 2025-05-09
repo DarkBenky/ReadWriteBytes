@@ -20,7 +20,7 @@ const (
 	frameDelay   = 16 * time.Millisecond // Match the C program's 60 FPS
 
 	// Camera movement speeds
-	moveSpeed        = 0.5
+	moveSpeed        = 0.8
 	rotateSpeed      = 0.02
 	mouseRotateSpeed = 0.003
 )
@@ -245,9 +245,12 @@ func (g *Game) writeCameraData() error {
 }
 
 type Cursor struct {
-	X, Y, Z float32
-	force   float32
-	active  bool
+	X, Y, Z    float32
+	force      float32
+	active     bool
+	rightDrag  bool // Track right mouse button dragging
+	lastMouseX int  // Store last mouse position for drag calculations
+	lastMouseY int
 }
 
 func (c *Cursor) ReadFileData() error {
@@ -315,6 +318,7 @@ func (c *Cursor) Update(g *Game) {
 		}
 	}
 
+	// Handle standard keyboard movement for cursor
 	if ebiten.IsKeyPressed(ebiten.KeyW) || ebiten.IsKeyPressed(ebiten.KeyUp) {
 		c.Z += moveSpeed * g.camera.DirZ
 		c.X += moveSpeed * g.camera.DirX
@@ -346,11 +350,75 @@ func (c *Cursor) Update(g *Game) {
 		c.Y += moveSpeed // Move up
 	}
 
-	// check for left click
+	// Handle left click for activation
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 		c.active = true
 	} else if inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft) {
 		c.active = false
+	}
+
+	// Handle right click for 3D cursor movement
+	if g.mode == cursor {
+		currentX, currentY := ebiten.CursorPosition()
+
+		// Track right button state for dragging
+		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonRight) {
+			c.rightDrag = true
+			c.lastMouseX, c.lastMouseY = currentX, currentY
+		} else if inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonRight) {
+			c.rightDrag = false
+		}
+
+		// If right button is being dragged, move cursor in 3D space
+		if c.rightDrag {
+			dx := currentX - c.lastMouseX
+			dy := currentY - c.lastMouseY
+
+			// Calculate camera's right vector (cross product of direction and up)
+			upVector := [3]float32{0, 1, 0}
+			rightX := g.camera.DirY*upVector[2] - g.camera.DirZ*upVector[1]
+			rightY := g.camera.DirZ*upVector[0] - g.camera.DirX*upVector[2]
+			rightZ := g.camera.DirX*upVector[1] - g.camera.DirY*upVector[0]
+
+			// Normalize right vector
+			rightLength := float32(math.Sqrt(float64(rightX*rightX + rightY*rightY + rightZ*rightZ)))
+			if rightLength > 0 {
+				rightX /= rightLength
+				rightY /= rightLength
+				rightZ /= rightLength
+			}
+
+			// Calculate camera's up vector (cross product of right and direction)
+			upX := rightY*g.camera.DirZ - rightZ*g.camera.DirY
+			upY := rightZ*g.camera.DirX - rightX*g.camera.DirZ
+			upZ := rightX*g.camera.DirY - rightY*g.camera.DirX
+
+			// Normalize up vector
+			upLength := float32(math.Sqrt(float64(upX*upX + upY*upY + upZ*upZ)))
+			if upLength > 0 {
+				upX /= upLength
+				upY /= upLength
+				upZ /= upLength
+			}
+
+			// Adjust movement sensitivity based on distance from camera
+			// This makes movement more intuitive at different distances
+			dx_factor := float32(dx) * 0.1
+			dy_factor := float32(dy) * 0.1
+
+			// Apply horizontal movement (along right vector)
+			c.X += rightX * dx_factor
+			c.Y += rightY * dx_factor
+			c.Z += rightZ * dx_factor
+
+			// Apply vertical movement (along up vector)
+			c.X -= upX * dy_factor
+			c.Y -= upY * dy_factor
+			c.Z -= upZ * dy_factor
+
+			// Store current position for next frame
+			c.lastMouseX, c.lastMouseY = currentX, currentY
+		}
 	}
 
 	// Write cursor data after any modifications
@@ -367,11 +435,13 @@ func (g *Game) handleCameraMovement() {
 		g.camera.PosZ += moveSpeed * g.camera.DirZ
 		g.camera.PosX += moveSpeed * g.camera.DirX
 		g.camera.PosY += moveSpeed * g.camera.DirY
+		// g.camera.PosZ += moveSpeed
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyS) || ebiten.IsKeyPressed(ebiten.KeyDown) {
 		g.camera.PosZ -= moveSpeed * g.camera.DirZ
 		g.camera.PosX -= moveSpeed * g.camera.DirX
 		g.camera.PosY -= moveSpeed * g.camera.DirY
+		// g.camera.PosZ -= moveSpeed
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyA) || ebiten.IsKeyPressed(ebiten.KeyLeft) {
 		// Move left relative to direction (cross product with up vector)
@@ -379,6 +449,7 @@ func (g *Game) handleCameraMovement() {
 		rightY := -g.camera.DirX
 		g.camera.PosX -= moveSpeed * rightX
 		g.camera.PosY -= moveSpeed * rightY
+		// g.camera.PosX += moveSpeed
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyD) || ebiten.IsKeyPressed(ebiten.KeyRight) {
 		// Move right relative to direction (cross product with up vector)
@@ -386,6 +457,7 @@ func (g *Game) handleCameraMovement() {
 		rightY := -g.camera.DirX
 		g.camera.PosX += moveSpeed * rightX
 		g.camera.PosY += moveSpeed * rightY
+		// g.camera.PosX -= moveSpeed
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyQ) {
 		g.camera.PosY -= moveSpeed // Move down
@@ -535,11 +607,12 @@ func main() {
 		mode: move, // Start in movement mode
 		cursor: Cursor{
 			X: 0.0, Y: 0.0, Z: 0.0,
-			active: false,
-			force:  100.0,
+			active:    false,
+			force:     100.0,
+			rightDrag: false,
 		},
 	}
-	
+
 	// write cursor data to file
 	err := game.cursor.WriteFileData()
 	if err != nil {
