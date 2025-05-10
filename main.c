@@ -8,15 +8,15 @@
 #include <stdbool.h>    // for bool, true, false
 
 #define NUM_PARTICLES 100000
-#define GRAVITY 20.0f
-#define DAMPING 0.95f
+#define GRAVITY 10.0f
+#define DAMPING 0.98f
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define PARTICLE_RADIUS 4
 #define MAX_SPEED 150.0f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
-#define temperature 1.0f
+#define temperature 10.0f
 #define pressure  temperature * 0.1f
 #define FrameCount 30
 
@@ -134,7 +134,6 @@ void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], 
         
         // Only draw edge if both vertices are in front of camera
         if (inFront[v1] && inFront[v2]) {
-            // Use Bresenham's algorithm to draw line
             int x0 = screenPoints[v1][0];
             int y0 = screenPoints[v1][1];
             int x1 = screenPoints[v2][0];
@@ -394,26 +393,77 @@ void CalculateCenterOfCell(struct PointSOA *particles, int index, float centerOf
 }
 
 void ApplyPressure(struct PointSOA *particles) {
+    // Process each cell
     for (int gridId = 0; gridId < gridResolution; gridId++) {
         int startIdx = particles->startIndex[gridId];
         if (startIdx == -1) continue; // No particles in this grid cell
+        
         int endIdx = startIdx + particles->numberOfParticle[gridId];
-        // calculate center of the given cell
-        float centerOfCell[3];
-        CalculateCenterOfCell(particles, gridId, centerOfCell);
-        float baselineForce = pressure * particles->numberOfParticle[gridId];
+        float currentPressure = pressure * particles->numberOfParticle[gridId];
+        
+        // Get 3D grid coordinates
+        int x = gridId % gridResolutionAxis;
+        int y = (gridId / gridResolutionAxis) % gridResolutionAxis;
+        int z = gridId / (gridResolutionAxis * gridResolutionAxis);
+        
+        // Process each particle in this cell
         for (int i = startIdx; i < endIdx; i++) {
-            // calculate distance from center of cell
-            float dx = particles->x[i] - centerOfCell[0];
-            float dy = particles->y[i] - centerOfCell[1];
-            float dz = particles->z[i] - centerOfCell[2];
-            float distSquared = dx*dx + dy*dy + dz*dz;
-            float dist = sqrtf(distSquared);
-            if (dist > 0) {
-                // apply force in the direction of the center of the cell
-                particles->xVelocity[i] += baselineForce * dx / dist;
-                particles->yVelocity[i] += baselineForce * dy / dist;
-                particles->zVelocity[i] += baselineForce * dz / dist;
+            float netForceX = 0.0f;
+            float netForceY = 0.0f;
+            float netForceZ = 0.0f;
+            
+            // Check all 6 face-adjacent neighbors
+            const int neighbors[6][3] = {
+                {-1, 0, 0}, {1, 0, 0},  // left, right
+                {0, -1, 0}, {0, 1, 0},  // down, up
+                {0, 0, -1}, {0, 0, 1}   // back, front
+            };
+            
+            // Consider all neighbors for pressure gradient
+            for (int j = 0; j < 6; j++) {
+                int nx = x + neighbors[j][0];
+                int ny = y + neighbors[j][1];
+                int nz = z + neighbors[j][2];
+                
+                // Skip out-of-bounds neighbors
+                if (nx < 0 || nx >= gridResolutionAxis ||
+                    ny < 0 || ny >= gridResolutionAxis ||
+                    nz < 0 || nz >= gridResolutionAxis) {
+                    continue;
+                }
+                
+                int neighborGridId = nx + ny * gridResolutionAxis + nz * gridResolutionAxis * gridResolutionAxis;
+                // Calculate neighbor pressure
+                float neighborPressure = pressure * particles->numberOfParticle[neighborGridId];
+                
+                // Calculate pressure difference
+                float pressureDiff = currentPressure - neighborPressure;
+                
+                // Only push if there's pressure gradient
+                if (pressureDiff > 0.0f) {
+                    // Add force component in direction of this neighbor
+                    netForceX += neighbors[j][0] * pressureDiff;
+                    netForceY += neighbors[j][1] * pressureDiff;
+                    netForceZ += neighbors[j][2] * pressureDiff;
+                }
+            }
+            
+            // Apply the net force if it's significant
+            float forceMagnitude = sqrtf(netForceX*netForceX + netForceY*netForceY + netForceZ*netForceZ);
+            if (forceMagnitude > 0.1f) {
+                // Normalize force direction
+                float invMag = 1.0f / forceMagnitude;
+                netForceX *= invMag;
+                netForceY *= invMag;
+                netForceZ *= invMag;
+                
+                // Scale by current cell pressure
+                float forceScale = currentPressure * 0.2f;
+                
+                // Apply to particle velocity
+                particles->xVelocity[i] += netForceX * forceScale;
+                particles->yVelocity[i] += netForceY * forceScale;
+                particles->zVelocity[i] += netForceZ * forceScale;
             }
         }
     }
