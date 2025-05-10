@@ -306,10 +306,7 @@ func (c *Cursor) Update(g *Game) {
 	_, scrollY := ebiten.Wheel()
 	if scrollY != 0 {
 		// Make force adjustment proportional to current force value for better control
-		adjustment := 7.5
-		if math.Abs(float64(scrollY)) > 1.0 {
-			adjustment = math.Abs(float64(scrollY)) * 7.5
-		}
+		adjustment := math.Max(float64(c.force * 0.1), 1.25)
 
 		if scrollY > 0 {
 			c.force += float32(adjustment)
