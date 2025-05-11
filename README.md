@@ -23,8 +23,17 @@ This experiment tests the performance of writing and reading frame data as binar
 The results show that writing frames is faster than reading them, with write operations capable of handling ~442 FPS while read operations can handle ~269 FPS. This suggests that the system could theoretically handle real-time frame processing for applications requiring up to 60 FPS.
 
 ## TODO
+### Threading and Performance
+- [ ] Implement simulation and rendering in different threads
+  - Render thread should run at a fixed rate (e.g., 24 FPS)
+  - Lock simulation thread when scene is being rendered
+  - Run simulation as fast as possible, but adjust step size based on TPS (higher TPS = smaller simulation steps)
 
+### Graphics Enhancement
+- [ ] Accelerate rendering with CUDA
+- [ ] add screens based fluid rendering
+
+### DONE
 - [x] rework it to work based on grid
 - [x] particle grid based on the Sebastian's video https://m.youtube.com/watch?v=pLwYMecqOxY
-- [ ] add screens based fluid rendering
-- [ ] more realistic attraction and repulsion 
+- [X] more realistic attraction and repulsion 
