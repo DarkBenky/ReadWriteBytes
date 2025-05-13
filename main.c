@@ -275,7 +275,7 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
                 float dz = particles->z[j] - particles->z[i];
                 
                 float distSquared = dx*dx + dy*dy + dz*dz;
-                float minDist = 2.0f * PARTICLE_RADIUS;
+                float minDist = 4.0f * PARTICLE_RADIUS;
                 
                 // If particles are colliding (distance < 2*radius)
                 if (distSquared < minDist * minDist) {
@@ -316,7 +316,7 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
                         particles->zVelocity[j] *= DAMPING;
                         
                         // Push particles apart to avoid sticking
-                        float correction = (minDist - dist) * 0.5f;
+                        float correction = (minDist - dist) * 0.01f;
                         particles->x[i] -= nx * correction;
                         particles->y[i] -= ny * correction;
                         particles->z[i] -= nz * correction;
