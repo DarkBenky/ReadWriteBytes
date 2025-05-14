@@ -35,17 +35,22 @@ type Camera struct {
 }
 
 const (
-	move   = uint8(iota)
-	cursor = uint8(iota)
+	move         = uint8(iota)
+	cursor       = uint8(iota)
+	depthRender  = uint8(iota)
+	normalRender = uint8(iota)
 )
 
 type Game struct {
-	pixels     [screenWidth * screenHeight * 4]uint8
-	img        *ebiten.Image
-	lastUpdate time.Time
-	camera     Camera
-	mode       uint8
-	cursor     Cursor
+	pixels      [screenWidth * screenHeight * 4]uint8
+	pixelsDepth [screenWidth * screenHeight * 4]uint8
+	img         *ebiten.Image
+	depth       *ebiten.Image
+	lastUpdate  time.Time
+	camera      Camera
+	cursor      Cursor
+	mode        uint8
+	renderMode  uint8
 }
 
 type TimePartition struct {
@@ -212,6 +217,12 @@ func (g *Game) UpdatePixels() error {
 				g.pixels[dstPos+1] = data[srcPos+1] // G
 				g.pixels[dstPos+2] = data[srcPos+2] // B
 				g.pixels[dstPos+3] = data[srcPos+3] // A
+				// }
+				// write depth buffer the depth value is saved in the 4th byte
+				g.pixelsDepth[dstPos] = data[srcPos+3]
+				g.pixelsDepth[dstPos+1] = data[srcPos+3]
+				g.pixelsDepth[dstPos+2] = data[srcPos+3]
+				g.pixelsDepth[dstPos+3] = 255 // Alpha set to 255 for depth buffer
 			}
 		}
 	}
@@ -220,7 +231,12 @@ func (g *Game) UpdatePixels() error {
 	if g.img == nil {
 		g.img = ebiten.NewImage(screenWidth, screenHeight)
 	}
-	g.img.ReplacePixels(g.pixels[:])
+	if g.depth == nil {
+		g.depth = ebiten.NewImage(screenWidth, screenHeight)
+	}
+
+	g.img.WritePixels(g.pixels[:])
+	g.depth.WritePixels(g.pixelsDepth[:])
 	return nil
 }
 
@@ -306,7 +322,7 @@ func (c *Cursor) Update(g *Game) {
 	_, scrollY := ebiten.Wheel()
 	if scrollY != 0 {
 		// Make force adjustment proportional to current force value for better control
-		adjustment := math.Max(float64(c.force * 0.1), 1.25)
+		adjustment := math.Max(float64(c.force*0.1), 1.25)
 
 		if scrollY > 0 {
 			c.force += float32(adjustment)
@@ -548,9 +564,11 @@ func (g *Game) handleCameraMovement() {
 }
 
 func (g *Game) Update() error {
-
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		g.mode = (g.mode + 1) % 2
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
+		g.renderMode = ((g.renderMode + 1) % 2) + 2
 	}
 
 	switch g.mode {
@@ -574,7 +592,12 @@ func (g *Game) Update() error {
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	if g.img != nil {
-		screen.DrawImage(g.img, nil)
+		switch g.renderMode {
+		case normalRender:
+			screen.DrawImage(g.img, nil)
+		case depthRender:
+			screen.DrawImage(g.depth, nil)
+		}
 	}
 	PlotFPS(screen)
 	PlotTimePartition(screen)
@@ -587,6 +610,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 	// print force value
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Force: %.1f", g.cursor.force), 0, 70)
+	// print render mode and how to change it
+	if g.renderMode == normalRender {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Normal (Press R to switch to Depth)", 0, 90)
+	} else {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Depth (Press R to switch to Normal)", 0, 90)
+	}
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
@@ -608,6 +637,7 @@ func main() {
 			force:     100.0,
 			rightDrag: false,
 		},
+		renderMode: normalRender,
 	}
 
 	// write cursor data to file
