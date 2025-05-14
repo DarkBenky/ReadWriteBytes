@@ -7,12 +7,12 @@
 #include <string.h>     // for memset()
 #include <stdbool.h>    // for bool, true, false
 
-#define NUM_PARTICLES 100000
+#define NUM_PARTICLES 150000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
-#define PARTICLE_RADIUS 4
+#define PARTICLE_RADIUS 6
 #define MAX_SPEED 150.0f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
@@ -279,7 +279,7 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
                 float dz = particles->z[j] - particles->z[i];
                 
                 float distSquared = dx*dx + dy*dy + dz*dz;
-                float minDist = 4.0f * PARTICLE_RADIUS;
+                float minDist = 3.0f * PARTICLE_RADIUS;
                 
                 // If particles are colliding (distance < 2*radius)
                 if (distSquared < minDist * minDist) {
@@ -1003,66 +1003,70 @@ int main() {
     }
 
     
+    clock_t lastTime = clock();
     while (1) {
-            int startTime = clock();
-            readCameraData(&camera);
-            readCursorData(cursor);
-    
-            // Update The Grid Data
-            int startGridTime = clock();
-            updateGridData(particles);
-            int endGridTime = clock();
-            timePartition->updateGridTime = (int)((endGridTime - startGridTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->updateGridTime * 0.75f;
+        // Calculate delta step based on elapsed time since the last frame
+        clock_t currentTime = clock();
+        float dt = (float)(currentTime - lastTime) / CLOCKS_PER_SEC;
+        // Cap dt to avoid instability for long delays (e.g., if paused)
+        if (dt > 0.1f) dt = 0.1f;
+        lastTime = currentTime;
         
-            
-            // update particles
-            update_particles(particles, dt, timePartition, cursor);
-    
-            int endTime = clock();
-            averageUpdateTime = (endTime - startTime) * 0.1f + averageUpdateTime * 0.9f;
-    
-            int startRenderTime = clock();
-            render(screen, particles, &camera, cursor);
-            int endRenderTime = clock();
-            timePartition->renderTime = (int)((endRenderTime - startRenderTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->renderTime * 0.75f;
-            
-            // Calculate total frame time in seconds
-            float frameTime = (float)(endRenderTime - startTime) / CLOCKS_PER_SEC;
-            float currentFPS = 1.0f / frameTime;
-            
-            // Store FPS before incrementing frameCount
-            if (frameCount < FrameCount) {
-                averageFPS[frameCount] = currentFPS;
+        int loopStartTime = clock();
+        
+        readCameraData(&camera);
+        readCursorData(cursor);
+        
+        // Update the grid data and record timing
+        int startGridTime = clock();
+        updateGridData(particles);
+        int endGridTime = clock();
+        timePartition->updateGridTime = (int)((endGridTime - startGridTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f +
+                                        timePartition->updateGridTime * 0.75f;
+        
+        // Update particles using the dynamic time step
+        update_particles(particles, dt, timePartition, cursor);
+        
+        int afterUpdateTime = clock();
+        averageUpdateTime = (afterUpdateTime - loopStartTime) * 0.1f + averageUpdateTime * 0.9f;
+        
+        int startRenderTime = clock();
+        render(screen, particles, &camera, cursor);
+        int endRenderTime = clock();
+        timePartition->renderTime = (int)((endRenderTime - startRenderTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f +
+                                    timePartition->renderTime * 0.75f;
+        
+        // Calculate frame time and FPS
+        float frameTime = (float)(endRenderTime - loopStartTime) / CLOCKS_PER_SEC;
+        float currentFPS = 1.0f / frameTime;
+        
+        if (frameCount < FrameCount) {
+            averageFPS[frameCount] = currentFPS;
+        }
+        
+        averageRenderTime = (endRenderTime - startRenderTime) * 0.25f + averageRenderTime * 0.75f;
+        
+        printf("FPS: %.2f, dt: %.4f, Update: %d ms, Render: %d ms\n", 
+               currentFPS, dt,
+               (int)(averageUpdateTime * 1000.0f / CLOCKS_PER_SEC),
+               (int)(averageRenderTime * 1000.0f / CLOCKS_PER_SEC));
+        
+        // No sleeping here as the simulation runs continuously with the dynamic dt
+        
+        if (frameCount >= FrameCount) {
+            frameCount = 0;
+            FILE *fpsFile = fopen("average_fps.bin", "wb");
+            if (fpsFile) {
+                fwrite(averageFPS, sizeof(float), FrameCount, fpsFile);
+                fclose(fpsFile);
             }
-            
-            averageRenderTime = (endRenderTime - startRenderTime) * 0.25f + averageRenderTime * 0.75f;
-            
-            printf("FPS: %.2f, Update: %d ms, Render: %d ms\n", 
-                   currentFPS, 
-                   (int)(averageUpdateTime * 1000.0f / CLOCKS_PER_SEC),
-                   (int)(averageRenderTime * 1000.0f / CLOCKS_PER_SEC));
-    
-            // Sleep if we have remaining time in the frame
-            int remainingTime = (int)(dt * 1000) - (int)(frameTime * 1000);
-            if (remainingTime > 0) {
-                usleep(remainingTime * 1000);
+            FILE *timeFile = fopen("time_partition.bin", "wb");
+            if (timeFile) {
+                fwrite(timePartition, sizeof(struct TimePartition), 1, timeFile);
+                fclose(timeFile);
             }
-
-            if (frameCount >= FrameCount) {
-                frameCount = 0;
-                FILE *fpsFile = fopen("average_fps.bin", "wb");
-                if (fpsFile) {
-                    fwrite(averageFPS, sizeof(float), 300, fpsFile);
-                    fclose(fpsFile);
-                }
-                // write time partition data
-                FILE *timeFile = fopen("time_partition.bin", "wb");
-                if (timeFile) {
-                    fwrite(timePartition, sizeof(struct TimePartition), 1, timeFile);
-                    fclose(timeFile);
-                }
-            }
-            frameCount++;
+        }
+        frameCount++;
     }
     
     // Clean up
