@@ -12,17 +12,14 @@
 #define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
-#define PARTICLE_RADIUS 6
+#define PARTICLE_RADIUS 4
 #define MAX_SPEED 150.0f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
 #define temperature 10.0f
 #define pressure  temperature * 0.1f
 #define FrameCount 30
-#define DebugRender 1
-#define R 5
-#define G 10
-#define B 15
+#define DebugRender 0
 
 struct PointSOA {
     float   x[NUM_PARTICLES];
@@ -777,14 +774,10 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
                 b = 255;
             } else {
                 float t = (normalizedVelocity - 0.5f) * 2.0f;
-                r = (uint8_t)(255 * t * 0.5f);
-                g = (uint8_t)(64 * t * 0.5f);
-                b = (uint8_t)(128 * (1.0f - t));
+                r = (uint8_t)(255 * t);
+                g = (uint8_t)(64 * t);
+                b = (uint8_t)(255 * (1.0f - t));
             }
-        } else {
-            r = R;
-            g = G;
-            b = B;
         }
 
         // Draw particle
@@ -805,17 +798,22 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         for (int px = minX; px <= maxX; px++) {
             for (int py = minY; py <= maxY; py++) {
                 // Use temporary variables to avoid overflow
-                int newR = screen->data[px][py][0] + r;
-                int newG = screen->data[px][py][1] + g;
-                int newB = screen->data[px][py][2] + b;
-                
-                // Clamp RGB values to prevent overflow
-                screen->data[px][py][0] = (newR > 255) ? 255 : newR;
-                screen->data[px][py][1] = (newG > 255) ? 255 : newG;
-                screen->data[px][py][2] = (newB > 255) ? 255 : newB;
-                
+                if (DebugRender == 1) {
+                    screen->data[px][py][0] = r;
+                    screen->data[px][py][1] = g;
+                    screen->data[px][py][2] = b;
+                } else {
+                    if (screen->data[px][py][0] < 255) {
+                        screen->data[px][py][0] += 1;
+                    } else if (screen->data[px][py][1] < 255) {
+                        screen->data[px][py][1] += 1;
+                    } else if (screen->data[px][py][2] < 255) {
+                        screen->data[px][py][2] += 1;
+                    }
+                }
                 // Alpha/distance doesn't accumulate, so direct assignment is fine
                 screen->data[px][py][3] = distance;
+
             }
         }
     }
