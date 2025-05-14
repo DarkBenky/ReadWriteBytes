@@ -6,10 +6,11 @@
 #include <time.h>      // for time()
 #include <string.h>     // for memset()
 #include <stdbool.h>    // for bool, true, false
+#include <pthread.h>    // for threading
 
 #define NUM_PARTICLES 100000
 #define GRAVITY 10.0f
-#define DAMPING 0.98f
+#define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define PARTICLE_RADIUS 4
@@ -19,6 +20,14 @@
 #define temperature 10.0f
 #define pressure  temperature * 0.1f
 #define FrameCount 30
+#define RENDER_FPS 24
+#define RENDER_INTERVAL_MS (1000.0f / RENDER_FPS)
+#define TARGET_TPS 120.0f
+#define BASE_DT 0.08f
+
+// Thread synchronization
+pthread_mutex_t scene_mutex = PTHREAD_MUTEX_INITIALIZER;
+bool should_exit = false;
 
 struct PointSOA {
     float   x[NUM_PARTICLES];
@@ -55,6 +64,24 @@ struct Cursor {
     float z;
     float force;
     bool active;
+};
+
+struct ThreadData {
+    struct PointSOA *particles;
+    struct Screen *screen;
+    struct Camera *camera;
+    struct Cursor *cursor;
+    struct TimePartition *timePartition;
+    float *averageFPS;
+};
+
+struct TimePartition {
+    int collisionTime;
+    int applyPressureTime;
+    int updateParticlesTime;
+    int moveToBoxTime;
+    int updateGridTime;
+    int renderTime;
 };
 
 void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], struct Camera *camera) {
@@ -844,15 +871,6 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     // printf("--- Finished render ---\n");
 }
 
-struct TimePartition {
-    int collisionTime;
-    int applyPressureTime;
-    int updateParticlesTime;
-    int moveToBoxTime;
-    int updateGridTime;
-    int renderTime;
-};
-
 void addForce(struct PointSOA *particles, struct Cursor *cursor) {
     if (!cursor->active) return;
     for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -901,15 +919,150 @@ void update_particles(struct PointSOA *particles, float dt, struct TimePartition
     timePartition->moveToBoxTime = (int)((moveToBoxTime - updateParticlesTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->moveToBoxTime * 0.75f;
 }
 
+void *render_thread_function(void *arg) {
+    struct ThreadData *data = (struct ThreadData *)arg;
+    struct Screen *screen = data->screen;
+    struct PointSOA *particles = data->particles;
+    struct Camera *camera = data->camera;
+    struct Cursor *cursor = data->cursor;
+    struct TimePartition *timePartition = data->timePartition;
+    float *averageFPS = data->averageFPS;
+    
+    int frameCount = 0;
+    int averageRenderTime = 0;
+    
+    while (!should_exit) {
+        clock_t start_time = clock();
+        
+        // Read camera and cursor data (no need to lock for this)
+        readCameraData(camera);
+        readCursorData(cursor);
+        
+        // Lock mutex to ensure exclusive access to particles during rendering
+        pthread_mutex_lock(&scene_mutex);
+        
+        clock_t startRenderTime = clock();
+        render(screen, particles, camera, cursor);
+        clock_t endRenderTime = clock();
+        
+        // Release lock as soon as rendering is done
+        pthread_mutex_unlock(&scene_mutex);
+        
+        timePartition->renderTime = (int)((endRenderTime - startRenderTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->renderTime * 0.75f;
+        
+        // Calculate render time and FPS
+        float frameTime = (float)(clock() - start_time) / CLOCKS_PER_SEC;
+        float currentFPS = 1.0f / frameTime;
+        
+        // Store FPS
+        if (frameCount < FrameCount) {
+            averageFPS[frameCount] = currentFPS;
+        }
+        
+        averageRenderTime = (endRenderTime - startRenderTime) * 0.25f + averageRenderTime * 0.75f;
+        
+        printf("Render FPS: %.2f, Render Time: %d ms\n", 
+               currentFPS, 
+               (int)(averageRenderTime * 1000.0f / CLOCKS_PER_SEC));
+        
+        // Write data periodically
+        if (frameCount >= FrameCount) {
+            frameCount = 0;
+            FILE *fpsFile = fopen("average_fps.bin", "wb");
+            if (fpsFile) {
+                fwrite(averageFPS, sizeof(float), FrameCount, fpsFile);
+                fclose(fpsFile);
+            }
+            
+            FILE *timeFile = fopen("time_partition.bin", "wb");
+            if (timeFile) {
+                fwrite(timePartition, sizeof(struct TimePartition), 1, timeFile);
+                fclose(timeFile);
+            }
+        }
+        frameCount++;
+        
+        // Sleep to maintain fixed frame rate
+        int elapsed_ms = (int)((clock() - start_time) * 1000.0f / CLOCKS_PER_SEC);
+        int sleep_time = RENDER_INTERVAL_MS - elapsed_ms;
+        
+        if (sleep_time > 0) {
+            usleep(sleep_time * 1000);
+        }
+    }
+    
+    return NULL;
+}
+
+void *simulation_thread_function(void *arg) {
+    struct ThreadData *data = (struct ThreadData *)arg;
+    struct PointSOA *particles = data->particles;
+    struct Cursor *cursor = data->cursor;
+    struct TimePartition *timePartition = data->timePartition;
+    
+    int simulationSteps = 0;
+    clock_t lastMeasurement = clock();
+    float tps = TARGET_TPS;
+    float dt = BASE_DT;
+    
+    while (!should_exit) {
+        clock_t start_time = clock();
+        
+        // Try to lock mutex - if we can't, skip this update
+        if (pthread_mutex_trylock(&scene_mutex) == 0) {
+            // Update The Grid Data
+            clock_t startGridTime = clock();
+            updateGridData(particles);
+            clock_t endGridTime = clock();
+            timePartition->updateGridTime = (int)((endGridTime - startGridTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->updateGridTime * 0.75f;
+            
+            // Update particles
+            update_particles(particles, dt, timePartition, cursor);
+            
+            // Release the mutex
+            pthread_mutex_unlock(&scene_mutex);
+            
+            // Count successful simulation step
+            simulationSteps++;
+            
+            // Measure and adapt simulation rate every second
+            clock_t current = clock();
+            float elapsed = (float)(current - lastMeasurement) / CLOCKS_PER_SEC;
+            
+            if (elapsed >= 1.0f) {
+                // Calculate actual TPS
+                tps = simulationSteps / elapsed;
+                
+                // Adjust dt based on TPS relative to target
+                float tps_ratio = TARGET_TPS / tps;
+                dt = BASE_DT * tps_ratio;
+                
+                // Clamp dt to reasonable values
+                if (dt > BASE_DT * 2.0f) dt = BASE_DT * 2.0f;
+                if (dt < BASE_DT * 0.1f) dt = BASE_DT * 0.1f;
+                
+                printf("Simulation TPS: %.2f, Step size: %.5f\n", tps, dt);
+                
+                // Reset counters
+                simulationSteps = 0;
+                lastMeasurement = current;
+            }
+        }
+        
+        // Small sleep to prevent CPU hogging
+        usleep(1000); // 1ms
+    }
+    
+    return NULL;
+}
 
 int main() {
-
+    // Initialize particles, screen, etc.
     struct PointSOA *particles = (struct PointSOA *)malloc(sizeof(struct PointSOA));
     if (!particles) {
         perror("Failed to allocate memory for particles");
         return 1;
     }
-
 
     struct Screen *screen = (struct Screen *)malloc(sizeof(struct Screen));
     if (!screen) {
@@ -918,6 +1071,7 @@ int main() {
         return 1;
     }
 
+    // Initialize particles with random values
     for (int i = 0; i < NUM_PARTICLES; i++) {
         particles->x[i] = (float)(rand() % 100);
         particles->y[i] = (float)(rand() % 100);
@@ -927,7 +1081,7 @@ int main() {
         particles->zVelocity[i] = (float)(rand() % 10) / 10.0f;
     }
 
-    // initialize the cursor
+    // Initialize cursor
     struct Cursor *cursor = (struct Cursor *)malloc(sizeof(struct Cursor));
     if (!cursor) {
         perror("Failed to allocate memory for cursor");
@@ -939,10 +1093,11 @@ int main() {
     cursor->y = 0.0f;
     cursor->z = 0.0f;
     cursor->active = false;
+    cursor->force = 0.0f;
 
     updateGridData(particles);
 
-
+    // Set bounding box
     particles->bBoxMin[0] = 0.0f;
     particles->bBoxMin[1] = 0.0f;
     particles->bBoxMin[2] = 0.0f;
@@ -950,7 +1105,7 @@ int main() {
     particles->bBoxMax[1] = 150.0f;
     particles->bBoxMax[2] = 150.0f;
 
-
+    // Initialize camera
     struct Camera camera;
     camera.ray.origin[0] = 50.0f;
     camera.ray.origin[1] = 50.0f;
@@ -960,89 +1115,80 @@ int main() {
     camera.ray.direction[2] = 1.0f;
     camera.fov = 1.0f;
 
-
     clearScreen(screen);
 
-    float dt = 0.08f; // 60 FPS
-    float averageFPS[FrameCount];
-    int averageUpdateTime = 0;
-    int averageRenderTime = 0;
-    int frameCount = 0;
-
+    // Allocate memory for time partition and FPS tracking
     struct TimePartition *timePartition = (struct TimePartition *)malloc(sizeof(struct TimePartition));
     if (!timePartition) {
         perror("Failed to allocate memory for time partition");
         free(particles);
         free(screen);
+        free(cursor);
         return 1;
     }
-
+    memset(timePartition, 0, sizeof(struct TimePartition));
     
-    while (1) {
-            int startTime = clock();
-            readCameraData(&camera);
-            readCursorData(cursor);
-    
-            // Update The Grid Data
-            int startGridTime = clock();
-            updateGridData(particles);
-            int endGridTime = clock();
-            timePartition->updateGridTime = (int)((endGridTime - startGridTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->updateGridTime * 0.75f;
-        
-            
-            // update particles
-            update_particles(particles, dt, timePartition, cursor);
-    
-            int endTime = clock();
-            averageUpdateTime = (endTime - startTime) * 0.1f + averageUpdateTime * 0.9f;
-    
-            int startRenderTime = clock();
-            render(screen, particles, &camera, cursor);
-            int endRenderTime = clock();
-            timePartition->renderTime = (int)((endRenderTime - startRenderTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->renderTime * 0.75f;
-            
-            // Calculate total frame time in seconds
-            float frameTime = (float)(endRenderTime - startTime) / CLOCKS_PER_SEC;
-            float currentFPS = 1.0f / frameTime;
-            
-            // Store FPS before incrementing frameCount
-            if (frameCount < FrameCount) {
-                averageFPS[frameCount] = currentFPS;
-            }
-            
-            averageRenderTime = (endRenderTime - startRenderTime) * 0.25f + averageRenderTime * 0.75f;
-            
-            printf("FPS: %.2f, Update: %d ms, Render: %d ms\n", 
-                   currentFPS, 
-                   (int)(averageUpdateTime * 1000.0f / CLOCKS_PER_SEC),
-                   (int)(averageRenderTime * 1000.0f / CLOCKS_PER_SEC));
-    
-            // Sleep if we have remaining time in the frame
-            int remainingTime = (int)(dt * 1000) - (int)(frameTime * 1000);
-            if (remainingTime > 0) {
-                usleep(remainingTime * 1000);
-            }
-
-            if (frameCount >= FrameCount) {
-                frameCount = 0;
-                FILE *fpsFile = fopen("average_fps.bin", "wb");
-                if (fpsFile) {
-                    fwrite(averageFPS, sizeof(float), 300, fpsFile);
-                    fclose(fpsFile);
-                }
-                // write time partition data
-                FILE *timeFile = fopen("time_partition.bin", "wb");
-                if (timeFile) {
-                    fwrite(timePartition, sizeof(struct TimePartition), 1, timeFile);
-                    fclose(timeFile);
-                }
-            }
-            frameCount++;
+    float *averageFPS = (float *)malloc(sizeof(float) * FrameCount);
+    if (!averageFPS) {
+        perror("Failed to allocate memory for average FPS");
+        free(particles);
+        free(screen);
+        free(cursor);
+        free(timePartition);
+        return 1;
     }
+    
+    // Initialize thread data
+    struct ThreadData threadData = {
+        .particles = particles,
+        .screen = screen,
+        .camera = &camera,
+        .cursor = cursor,
+        .timePartition = timePartition,
+        .averageFPS = averageFPS
+    };
+    
+    // Create threads
+    pthread_t render_thread, simulation_thread;
+    
+    if (pthread_create(&render_thread, NULL, render_thread_function, &threadData) != 0) {
+        perror("Failed to create render thread");
+        free(particles);
+        free(screen);
+        free(cursor);
+        free(timePartition);
+        free(averageFPS);
+        return 1;
+    }
+    
+    if (pthread_create(&simulation_thread, NULL, simulation_thread_function, &threadData) != 0) {
+        perror("Failed to create simulation thread");
+        should_exit = true;
+        pthread_join(render_thread, NULL);
+        free(particles);
+        free(screen);
+        free(cursor);
+        free(timePartition);
+        free(averageFPS);
+        return 1;
+    }
+    
+    // Wait for user input to exit
+    printf("Press Enter to exit...\n");
+    getchar();
+    
+    // Signal threads to exit and wait for them
+    should_exit = true;
+    pthread_join(render_thread, NULL);
+    pthread_join(simulation_thread, NULL);
     
     // Clean up
     free(particles);
     free(screen);
+    free(cursor);
+    free(timePartition);
+    free(averageFPS);
+    pthread_mutex_destroy(&scene_mutex);
     
     return 0;
 }
