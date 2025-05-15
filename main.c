@@ -61,6 +61,20 @@ struct Cursor {
     bool active;
 };
 
+struct TimePartition {
+    int collisionTime;
+    int applyPressureTime;
+    int updateParticlesTime;
+    int moveToBoxTime;
+    int updateGridTime;
+    int renderTime;
+    int clearScreenTime;
+    int projectParticlesTime;
+    int drawCursorTime;
+    int drawBoundingBoxTime;
+    int saveScreenTime;
+};
+
 void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], struct Camera *camera) {
     // Use same projection method as particles
     const float halfWidth = ScreenWidth * 0.5f;
@@ -806,7 +820,7 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         if (sumVelocity > maxVelocity) maxVelocity = sumVelocity;
 
         // Draw particle with tight loop bounds
-        uint16_t sumVelocityInt = (uint16_t)sumVelrocity;
+        uint16_t sumVelocityInt = (uint16_t)sumVelocity;
         for (int px = minX; px <= maxX; px++) {
             for (int py = minY; py <= maxY; py++) {
                 screen->distance[px][py] = distanceNormalized;
@@ -850,49 +864,49 @@ void clearScreen(struct Screen *screen) {
 }
 
 void saveScreen(struct Screen *screen, const char *filename) {
-    // printf("Starting saveScreen: %s\n", filename);
     FILE *file = fopen(filename, "wb");
     if (!file) {
         perror("Failed to open file");
         return;
     }
     
-    // write the screen data to the file
-    // uint8_t distance[ScreenWidth][ScreenHeight]
-    // uint8_t velocity[ScreenWidth][ScreenHeight]
-    // uint8_t normalizedOpacity[ScreenWidth][ScreenHeight]
-    // uint16_t unNormalizedVelocity[ScreenWidth][ScreenHeight];
-
-    for (int y = 0; y < ScreenHeight; y++) {
-        for (int x = 0; x < ScreenWidth; x++) {
-            fputc(screen->distance[x][y], file);
-            fputc(screen->velocity[x][y], file);
-            fputc(screen->normalizedOpacity[x][y], file);
-        }
-    }
-    fclose(file);
-    // printf("Finished saveScreen\n");
-}
-
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor) {
-    // printf("\n--- Starting render ---\n");
-    clearScreen(screen);
-    projectParticles(particles, camera, screen);
-    drawCursor(screen, cursor, camera);
-    drawBoundingBox(screen, particles->bBoxMax, particles->bBoxMin, camera);
-    saveScreen(screen, "output.bin");
+    static uint8_t buffer[ScreenWidth * 3];
     
-    // printf("--- Finished render ---\n");
+    // Process each row
+    for (int y = 0; y < ScreenHeight; y++) {
+        // Pack row data into the buffer for faster writes
+        for (int x = 0; x < ScreenWidth; x++) {
+            buffer[x*3]     = screen->distance[x][y];
+            buffer[x*3 + 1] = screen->velocity[x][y];
+            buffer[x*3 + 2] = screen->normalizedOpacity[x][y];
+        }
+        
+        // Write entire row at once
+        fwrite(buffer, 1, ScreenWidth * 3, file);
+    }
+    
+    fclose(file);
 }
 
-struct TimePartition {
-    int collisionTime;
-    int applyPressureTime;
-    int updateParticlesTime;
-    int moveToBoxTime;
-    int updateGridTime;
-    int renderTime;
-};
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition) {
+    // printf("\n--- Starting render ---\n");
+    int start = clock();
+    clearScreen(screen);
+    int clearScreenTime = clock();
+    timePartition->clearScreenTime = (int)((clearScreenTime - start) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->clearScreenTime * 0.75f;
+    projectParticles(particles, camera, screen);
+    int projectParticlesTime = clock();
+    timePartition->projectParticlesTime = (int)((projectParticlesTime - clearScreenTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->projectParticlesTime * 0.75f;
+    drawCursor(screen, cursor, camera);
+    int drawCursorTime = clock();
+    timePartition->drawCursorTime = (int)((drawCursorTime - projectParticlesTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->drawCursorTime * 0.75f;
+    drawBoundingBox(screen, particles->bBoxMax, particles->bBoxMin, camera);
+    int drawBoundingBoxTime = clock();
+    timePartition->drawBoundingBoxTime = (int)((drawBoundingBoxTime - drawCursorTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->drawBoundingBoxTime * 0.75f;
+    saveScreen(screen, "output.bin");
+    int saveScreenTime = clock();
+    timePartition->saveScreenTime = (int)((saveScreenTime - drawBoundingBoxTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->saveScreenTime * 0.75f;
+}
 
 void addForce(struct PointSOA *particles, struct Cursor *cursor) {
     if (!cursor->active) return;
@@ -1047,7 +1061,7 @@ int main() {
         averageUpdateTime = (afterUpdateTime - loopStartTime) * 0.1f + averageUpdateTime * 0.9f;
         
         int startRenderTime = clock();
-        render(screen, particles, &camera, cursor);
+        render(screen, particles, &camera, cursor, timePartition);
         int endRenderTime = clock();
         timePartition->renderTime = (int)((endRenderTime - startRenderTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f +
                                     timePartition->renderTime * 0.75f;

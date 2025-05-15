@@ -57,13 +57,31 @@ type Game struct {
 	renderMode uint8 // will be one of renderDistance, renderVelocity, renderOpacity
 }
 
+//	struct TimePartition {
+//	    int collisionTime;
+//	    int applyPressureTime;
+//	    int updateParticlesTime;
+//	    int moveToBoxTime;
+//	    int updateGridTime;
+//	    int renderTime;
+//	    int clearScreenTime;
+//	    int projectParticlesTime;
+//	    int drawCursorTime;
+//	    int drawBoundingBoxTime;
+//	    int saveScreenTime;
+//	};
 type TimePartition struct {
-	CollisionTime       int32
-	ApplyPressureTime   int32
-	UpdateParticlesTime int32
-	MoveToBoxTime       int32
-	UpdateGridTime      int32
-	RenderTime          int32
+	CollisionTime        int32
+	ApplyPressureTime    int32
+	UpdateParticlesTime  int32
+	MoveToBoxTime        int32
+	UpdateGridTime       int32
+	RenderTime           int32
+	ClearScreenTime      int32 // Fixed: changed from clearScreenTime to ClearScreenTime
+	ProjectParticlesTime int32
+	DrawCursorTime       int32
+	DrawBoundingBoxTime  int32
+	SaveScreenTime       int32
 }
 
 func PlotTimePartition(screen *ebiten.Image) {
@@ -101,6 +119,11 @@ func PlotTimePartition(screen *ebiten.Image) {
 		{"Box Bounds", tp.MoveToBoxTime, color.RGBA{255, 255, 0, 255}},
 		{"Grid Update", tp.UpdateGridTime, color.RGBA{255, 0, 255, 255}},
 		{"Render", tp.RenderTime, color.RGBA{0, 255, 255, 255}},
+		{"Clear Screen", tp.ClearScreenTime, color.RGBA{255, 128, 0, 255}}, // Fixed: changed from tp.clearScreenTime to tp.ClearScreenTime
+		{"Project Particles", tp.ProjectParticlesTime, color.RGBA{128, 255, 0, 255}},
+		{"Draw Cursor", tp.DrawCursorTime, color.RGBA{128, 0, 255, 255}},
+		{"Draw Box", tp.DrawBoundingBoxTime, color.RGBA{0, 128, 255, 255}},
+		{"Save Screen", tp.SaveScreenTime, color.RGBA{128, 128, 128, 255}},
 	}
 
 	// Find maximum time for scaling
@@ -578,7 +601,6 @@ func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		g.mode = (g.mode + 1) % 2
 	}
-
 
 	switch g.mode {
 	case move:
