@@ -37,8 +37,11 @@ struct PointSOA {
 };
 
 struct Screen {
-    uint8_t data[ScreenWidth][ScreenHeight][4]; // RGBA
-};
+    uint8_t distance[ScreenWidth][ScreenHeight]
+    uint8_t velocities[ScreenWidth][ScreenHeight]
+    uint16_t opacity[ScreenWidth][ScreenHeight]
+}
+
 
 struct Ray {
     float origin[3];
