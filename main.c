@@ -7,19 +7,17 @@
 #include <string.h>     // for memset()
 #include <stdbool.h>    // for bool, true, false
 
-#define NUM_PARTICLES 150000
+#define NUM_PARTICLES 100000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define PARTICLE_RADIUS 4
-#define MAX_SPEED 150.0f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
 #define temperature 10.0f
 #define pressure  temperature * 0.1f
 #define FrameCount 30
-#define DebugRender 0
 
 struct PointSOA {
     float   x[NUM_PARTICLES];
@@ -37,10 +35,12 @@ struct PointSOA {
 };
 
 struct Screen {
-    uint8_t distance[ScreenWidth][ScreenHeight]
-    uint8_t velocities[ScreenWidth][ScreenHeight]
-    uint16_t opacity[ScreenWidth][ScreenHeight]
-}
+    uint8_t distance[ScreenWidth][ScreenHeight];
+    uint8_t velocity[ScreenWidth][ScreenHeight];
+    uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
+    uint16_t opacity[ScreenWidth][ScreenHeight];
+    uint16_t unNormalizedVelocity[ScreenWidth][ScreenHeight];
+};
 
 
 struct Ray {
@@ -151,12 +151,18 @@ void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], 
             int e2;
             
             while (1) {
+
+                // struct Screen {
+                //     uint8_t distance[ScreenWidth][ScreenHeight];
+                //     uint8_t velocity[ScreenWidth][ScreenHeight];
+                //     uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
+                //     uint16_t opacity[ScreenWidth][ScreenHeight];
+                // };
                 // Draw pixel if it's within screen bounds
                 if (x0 >= 0 && x0 < ScreenWidth && y0 >= 0 && y0 < ScreenHeight) {
-                    screen->data[x0][y0][0] = 0;     // R
-                    screen->data[x0][y0][1] = 255;   // G
-                    screen->data[x0][y0][2] = 0;     // B
-                    screen->data[x0][y0][3] = 255;   // Alpha
+                    screen->distance[x0][y0] = 255; // Distance
+                    screen->velocity[x0][y0] = 255; // Velocity
+                    screen->normalizedOpacity[x0][y0] = 255; // Normalized Opacity
                 }
                 
                 if (x0 == x1 && y0 == y1) break;
@@ -209,35 +215,32 @@ void drawCursor(struct Screen *screen, struct Cursor *cursor, struct Camera *cam
     if (dotProduct > 0) {
         float fovScale = 1.0f / (dotProduct * camera->fov);
         
-        // Project onto screen using the same method as for particles
+        // Calculate screen position
         float screenRight = (x * right[0] + y * right[1] + z * right[2]) * fovScale;
         float screenUp = (x * trueUp[0] + y * trueUp[1] + z * trueUp[2]) * fovScale;
         
         int screenX = (int)(screenRight * halfWidth + halfWidth);
         int screenY = (int)(-screenUp * halfHeight + halfHeight);
-
-        // Clamp to screen bounds
-        screenX = screenX < 0 ? 0 : (screenX >= ScreenWidth ? ScreenWidth - 1 : screenX);
-        screenY = screenY < 0 ? 0 : (screenY >= ScreenHeight ? ScreenHeight - 1 : screenY);
         
-        // Draw cursor with a fixed size
-        const int cursorRadius = 5;
+        // Clamp to screen bounds
+        screenX = (screenX < 0) ? 0 : (screenX >= ScreenWidth ? ScreenWidth - 1 : screenX);
+        screenY = (screenY < 0) ? 0 : (screenY >= ScreenHeight ? ScreenHeight - 1 : screenY);
+        
         // Draw horizontal line of cross
+        const int cursorRadius = 5;
         for (int px = screenX - cursorRadius; px <= screenX + cursorRadius; px++) {
             if (px >= 0 && px < ScreenWidth) {
-                screen->data[px][screenY][0] = 255; // Red
-                screen->data[px][screenY][1] = 255; // Green
-                screen->data[px][screenY][2] = 255; // Blue
-                screen->data[px][screenY][3] = 255; // Alpha
+                screen->distance[px][screenY] = 255;
+                screen->velocity[px][screenY] = 255;
+                screen->normalizedOpacity[px][screenY] = 255;
             }
         }
-        // Draw vertical line of cross
+        // Draw vertical line of cross (fixed: use screenX for column)
         for (int py = screenY - cursorRadius; py <= screenY + cursorRadius; py++) {
             if (py >= 0 && py < ScreenHeight) {
-                screen->data[screenX][py][0] = 255; // Red
-                screen->data[screenX][py][1] = 255; // Green
-                screen->data[screenX][py][2] = 255; // Blue
-                screen->data[screenX][py][3] = 255; // Alpha
+                screen->distance[screenX][py] = 255;
+                screen->velocity[screenX][py] = 255;
+                screen->normalizedOpacity[screenX][py] = 255;
             }
         }
     }
@@ -735,9 +738,11 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
 
 
     float maxDistance = particles->distance[validParticles - 1];
+    float maxOpacity = 0;
+    float maxVelocity = 0;
     
     // for (int i = 0; i < validParticles; i++) {
-    for (int i = validParticles; i > 0; i--) {
+    for (int i = validParticles - 1; i >= 0; i--) {
         float x = particles->x[i] - camera->ray.origin[0];
         float y = particles->y[i] - camera->ray.origin[1];
         float z = particles->z[i] - camera->ray.origin[2];
@@ -760,63 +765,56 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         int particleRadius = (int)(PARTICLE_RADIUS * (100.0f / (sqrtf(distSquared) + 10.0f)));
         particleRadius = particleRadius < 1 ? 1 : (particleRadius > PARTICLE_RADIUS * 3 ? PARTICLE_RADIUS * 3 : particleRadius);
 
-        // Calculate particle color once
-        float sumVelocity = sqrtf(particles->xVelocity[i] * particles->xVelocity[i] +
-                                particles->yVelocity[i] * particles->yVelocity[i] +
-                                particles->zVelocity[i] * particles->zVelocity[i]);
-        
-        float normalizedVelocity = sumVelocity / MAX_SPEED;
-        if (normalizedVelocity > 1.0f) normalizedVelocity = 1.0f;
-        
-        uint8_t r, g, b;
-        if (DebugRender == 1) {
-            if (normalizedVelocity < 0.5f) {
-                float t = normalizedVelocity * 2.0f;
-                r = (uint8_t)(128 * (1.0f - t));
-                g = 0;
-                b = 255;
-            } else {
-                float t = (normalizedVelocity - 0.5f) * 2.0f;
-                r = (uint8_t)(255 * t);
-                g = (uint8_t)(64 * t);
-                b = (uint8_t)(255 * (1.0f - t));
-            }
-        }
-
-        // Draw particle
+        // Calculate drawing bounds
         int minX = screenX - particleRadius;
         int maxX = screenX + particleRadius;
         int minY = screenY - particleRadius;
         int maxY = screenY + particleRadius;
         
-        // Clamp to screen bounds
-        minX = minX < 0 ? 0 : minX;
-        maxX = maxX >= ScreenWidth ? ScreenWidth - 1 : maxX;
-        minY = minY < 0 ? 0 : minY;
-        maxY = maxY >= ScreenHeight ? ScreenHeight - 1 : maxY;
+        // discard out of bounds
+        if (minX < 0) continue;
+        if (maxX >= ScreenWidth) continue;
+        if (minY < 0) continue;
+        if (maxY >= ScreenHeight) continue;
+        
+        // Calculate particle color once
+        float sumVelocity = particles->xVelocity[i] * particles->xVelocity[i] + particles->yVelocity[i] * particles->yVelocity[i] + particles->zVelocity[i] * particles->zVelocity[i];
+        uint8_t distanceNormalized = (uint8_t)(255 * (1.0f - (distSquared / maxDistance)));
 
-        // normalize the distance
-        uint8_t distance = (uint8_t)(255 * (1.0f - (distSquared / maxDistance)));
+        float currentOpacity = (float)(screen->opacity[screenX][screenY]);
+
+        if (currentOpacity + 1 > maxOpacity) {
+            maxOpacity = currentOpacity;
+        }
+        if (sumVelocity > maxVelocity) {
+            maxVelocity = sumVelocity;
+        }
 
         for (int px = minX; px <= maxX; px++) {
             for (int py = minY; py <= maxY; py++) {
-                // Use temporary variables to avoid overflow
-                if (DebugRender == 1) {
-                    screen->data[px][py][0] = r;
-                    screen->data[px][py][1] = g;
-                    screen->data[px][py][2] = b;
-                } else {
-                    if (screen->data[px][py][0] < 255) {
-                        screen->data[px][py][0] += 1;
-                    } else if (screen->data[px][py][1] < 255) {
-                        screen->data[px][py][1] += 1;
-                    } else if (screen->data[px][py][2] < 255) {
-                        screen->data[px][py][2] += 1;
-                    }
-                }
-                // Alpha/distance doesn't accumulate, so direct assignment is fine
-                screen->data[px][py][3] = distance;
-
+                screen->distance[px][py] = distanceNormalized;
+                screen->unNormalizedVelocity[px][py] = (uint16_t)(sumVelocity);
+                screen->opacity[px][py] += 1;
+            }
+        }
+    }
+    // Normalize opacity correctly by indexing into the array
+    for (int px = 0; px < ScreenWidth; px++) {
+        for (int py = 0; py < ScreenHeight; py++) {
+            float currentOpacity = (float)(screen->opacity[px][py]);
+            if (currentOpacity != 0) {
+                // Logarithmic scaling for opacity
+                // Add 1 to avoid log(0) and scale to [0, 1] range before converting to uint8_t
+                float logOpacity = logf(currentOpacity + 1) / logf(maxOpacity + 1);
+                screen->normalizedOpacity[px][py] = (uint8_t)(255 * (1.0f - logOpacity));
+            }
+            
+            float currentVelocity = (float)(screen->unNormalizedVelocity[px][py]);
+            if (currentVelocity != 0) {
+                // Logarithmic scaling for velocity
+                // Add 1 to avoid log(0) and scale to [0, 1] range before converting to uint8_t
+                float logVelocity = logf(currentVelocity + 1) / logf(maxVelocity + 1);
+                screen->velocity[px][py] = (uint8_t)(255 * (1.0f - logVelocity));
             }
         }
     }
@@ -824,16 +822,21 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
 
 
 void clearScreen(struct Screen *screen) {
-    // printf("Starting clearScreen\n");
+
+    // uint8_t distance[ScreenWidth][ScreenHeight]
+    // uint8_t velocity[ScreenWidth][ScreenHeight]
+    // uint8_t normalizedOpacity[ScreenWidth][ScreenHeight]
+    // uint16_t opacity[ScreenWidth][ScreenHeight]
+
     for (int x = 0; x < ScreenWidth; x++) {
         for (int y = 0; y < ScreenHeight; y++) {
-            screen->data[x][y][0] = 0;
-            screen->data[x][y][1] = 0;
-            screen->data[x][y][2] = 0;
-            screen->data[x][y][3] = 0; // Alpha
+            screen->distance[x][y] = 0;
+            screen->velocity[x][y] = 0;
+            screen->normalizedOpacity[x][y] = 0;
+            screen->opacity[x][y] = 0;
+            screen->unNormalizedVelocity[x][y] = 0;
         }
     }
-    // printf("Finished clearScreen\n");
 }
 
 void saveScreen(struct Screen *screen, const char *filename) {
@@ -843,16 +846,18 @@ void saveScreen(struct Screen *screen, const char *filename) {
         perror("Failed to open file");
         return;
     }
-    // DO NOT USE PPM HEADER FOR BINARY FILES
+    
+    // write the screen data to the file
+    // uint8_t distance[ScreenWidth][ScreenHeight]
+    // uint8_t velocity[ScreenWidth][ScreenHeight]
+    // uint8_t normalizedOpacity[ScreenWidth][ScreenHeight]
+    // uint16_t unNormalizedVelocity[ScreenWidth][ScreenHeight];
+
     for (int y = 0; y < ScreenHeight; y++) {
         for (int x = 0; x < ScreenWidth; x++) {
-            fputc(screen->data[x][y][0], file);
-            fputc(screen->data[x][y][1], file);
-            fputc(screen->data[x][y][2], file);
-            fputc(screen->data[x][y][3], file); // Alpha
-        }
-        if (y % 100 == 0) {
-            // printf("Saving row %d of %d\n", y, ScreenHeight);
+            fputc(screen->distance[x][y], file);
+            fputc(screen->velocity[x][y], file);
+            fputc(screen->normalizedOpacity[x][y], file);
         }
     }
     fclose(file);

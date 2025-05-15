@@ -35,22 +35,26 @@ type Camera struct {
 }
 
 const (
-	move         = uint8(iota)
-	cursor       = uint8(iota)
-	depthRender  = uint8(iota)
-	normalRender = uint8(iota)
+	// Control mode: do not change these
+	move   = uint8(iota)
+	cursor = uint8(iota)
+)
+
+const (
+	// New render modes: 0 = distance, 1 = velocity, 2 = normalized opacity
+	renderDistance = uint8(iota)
+	renderVelocity
+	renderOpacity
 )
 
 type Game struct {
-	pixels      [screenWidth * screenHeight * 4]uint8
-	pixelsDepth [screenWidth * screenHeight * 4]uint8
-	img         *ebiten.Image
-	depth       *ebiten.Image
-	lastUpdate  time.Time
-	camera      Camera
-	cursor      Cursor
-	mode        uint8
-	renderMode  uint8
+	pixels     [screenWidth * screenHeight * 4]uint8
+	img        *ebiten.Image
+	lastUpdate time.Time
+	camera     Camera
+	cursor     Cursor
+	mode       uint8
+	renderMode uint8 // will be one of renderDistance, renderVelocity, renderOpacity
 }
 
 type TimePartition struct {
@@ -198,45 +202,48 @@ func PlotFPS(screen *ebiten.Image) {
 }
 
 func (g *Game) UpdatePixels() error {
-	// Open the file directly for binary reading
+	// Open file for binary reading
 	data, err := os.ReadFile("output.bin")
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// The C program writes data by rows (y) then columns (x)
-	// Need to remap to RGBA format for Ebiten
-	for y := 0; y < screenHeight; y++ {
-		for x := 0; x < screenWidth; x++ {
-			srcPos := (y*screenWidth + x) * 4
+	// 800x600 pixels, 3 bytes per pixel (distance, velocity, opacity)
+	// if len(data) < screenWidth*screenHeight*3 {
+	// 	return fmt.Errorf("file size is too small: %d bytes", len(data))
+	// }
+	// Each pixel in the file has 3 bytes: distance, velocity, and opacity
+	for y := 0; y < screenHeight-1; y++ {
+		for x := 0; x < screenWidth-1; x++ {
+			srcPos := (y*screenWidth + x) * 3 // Changed from 4 to 3 bytes per pixel
 			dstPos := (y*screenWidth + x) * 4
 
-			// Check bounds to prevent potential panic
-			if srcPos+3 < len(data) && dstPos+3 < len(g.pixels) {
-				g.pixels[dstPos] = data[srcPos]     // R
-				g.pixels[dstPos+1] = data[srcPos+1] // G
-				g.pixels[dstPos+2] = data[srcPos+2] // B
-				g.pixels[dstPos+3] = data[srcPos+3] // A
-				// }
-				// write depth buffer the depth value is saved in the 4th byte
-				g.pixelsDepth[dstPos] = data[srcPos+3]
-				g.pixelsDepth[dstPos+1] = data[srcPos+3]
-				g.pixelsDepth[dstPos+2] = data[srcPos+3]
-				g.pixelsDepth[dstPos+3] = 255 // Alpha set to 255 for depth buffer
+			if srcPos+3 > len(data) {
+				continue // Skip if not enough data
+			}
+			var value uint8
+			switch g.renderMode {
+			case renderDistance:
+				value = data[srcPos]
+			case renderVelocity:
+				value = data[srcPos+1]
+			case renderOpacity:
+				value = data[srcPos+2]
+			}
+
+			// Build a grayscale pixel based on the chosen channel
+			if dstPos+3 <= len(g.pixels) {
+				g.pixels[dstPos] = value   // R
+				g.pixels[dstPos+1] = value // G
+				g.pixels[dstPos+2] = value // B
+				g.pixels[dstPos+3] = 255   // A
 			}
 		}
 	}
-
-	// Update the image
 	if g.img == nil {
 		g.img = ebiten.NewImage(screenWidth, screenHeight)
 	}
-	if g.depth == nil {
-		g.depth = ebiten.NewImage(screenWidth, screenHeight)
-	}
-
 	g.img.WritePixels(g.pixels[:])
-	g.depth.WritePixels(g.pixelsDepth[:])
 	return nil
 }
 
@@ -564,12 +571,14 @@ func (g *Game) handleCameraMovement() {
 }
 
 func (g *Game) Update() error {
+	// Toggle render mode between distance, velocity and opacity
+	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
+		g.renderMode = (g.renderMode + 1) % 3
+	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		g.mode = (g.mode + 1) % 2
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-		g.renderMode = ((g.renderMode + 1) % 2) + 2
-	}
+
 
 	switch g.mode {
 	case move:
@@ -581,8 +590,7 @@ func (g *Game) Update() error {
 	// Only update at 60 FPS to match the C program
 	now := time.Now()
 	if now.Sub(g.lastUpdate) >= frameDelay {
-		err := g.UpdatePixels()
-		if err != nil {
+		if err := g.UpdatePixels(); err != nil {
 			fmt.Printf("Error updating pixels: %v\n", err)
 		}
 		g.lastUpdate = now
@@ -591,30 +599,40 @@ func (g *Game) Update() error {
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	// Always draw g.img (which now represents the chosen channel)
 	if g.img != nil {
-		switch g.renderMode {
-		case normalRender:
-			screen.DrawImage(g.img, nil)
-		case depthRender:
-			screen.DrawImage(g.depth, nil)
-		}
+		screen.DrawImage(g.img, nil)
 	}
 	PlotFPS(screen)
 	PlotTimePartition(screen)
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("FPS: %.1f\nCamera: (%.1f, %.1f, %.1f) Dir: (%.1f, %.1f, %.1f)\nControls: WASD/Arrows - Move, QE - Up/Down, IJKL - Rotate, Mouse Drag - Look",
-		ebiten.CurrentFPS(), g.camera.PosX, g.camera.PosY, g.camera.PosZ, g.camera.DirX, g.camera.DirY, g.camera.DirZ))
+	ebitenutil.DebugPrint(screen, fmt.Sprintf("FPS: %.1f\nCamera: (%.1f, %.1f, %.1f) Dir: (%.1f, %.1f, %.1f)\nControls: WASD/Arrows - Move, QE - Up/Down, IJKL - Rotate, Mouse Drag - Look\nRender Mode: %s (Press R to change)",
+		ebiten.CurrentFPS(), g.camera.PosX, g.camera.PosY, g.camera.PosZ,
+		g.camera.DirX, g.camera.DirY, g.camera.DirZ,
+		func() string {
+			switch g.renderMode {
+			case renderDistance:
+				return "Distance"
+			case renderVelocity:
+				return "Velocity"
+			case renderOpacity:
+				return "Normalized Opacity"
+			}
+			return ""
+		}()))
 	if g.mode == move {
-		ebitenutil.DebugPrintAt(screen, "Mode: Move", 0, 50)
+		ebitenutil.DebugPrintAt(screen, "Mode: Move", 0, 70)
 	} else {
-		ebitenutil.DebugPrintAt(screen, "Mode: Cursor", 0, 50)
+		ebitenutil.DebugPrintAt(screen, "Mode: Cursor", 0, 70)
 	}
 	// print force value
-	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Force: %.1f", g.cursor.force), 0, 70)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Force: %.1f", g.cursor.force), 0, 90)
 	// print render mode and how to change it
-	if g.renderMode == normalRender {
-		ebitenutil.DebugPrintAt(screen, "Render Mode: Normal (Press R to switch to Depth)", 0, 90)
+	if g.renderMode == renderDistance {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Distance (Press R to cycle)", 0, 110)
+	} else if g.renderMode == renderVelocity {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Velocity (Press R to cycle)", 0, 110)
 	} else {
-		ebitenutil.DebugPrintAt(screen, "Render Mode: Depth (Press R to switch to Normal)", 0, 90)
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Opacity (Press R to cycle)", 0, 110)
 	}
 }
 
@@ -637,7 +655,7 @@ func main() {
 			force:     100.0,
 			rightDrag: false,
 		},
-		renderMode: normalRender,
+		renderMode: renderDistance, // Use renderDistance instead of undefined normalRender
 	}
 
 	// write cursor data to file
