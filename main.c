@@ -712,20 +712,34 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
     trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
 
+    // Cache camera origin for faster access
+    const float camX = camera->ray.origin[0];
+    const float camY = camera->ray.origin[1];
+    const float camZ = camera->ray.origin[2];
+    const float camDirX = camera->ray.direction[0];
+    const float camDirY = camera->ray.direction[1];
+    const float camDirZ = camera->ray.direction[2];
     
     // Calculate distances once
     int validParticles = 0;
+    float maxDistance = 0.0f;
+    
     for (int i = 0; i < NUM_PARTICLES; i++) {
-        float x = particles->x[i] - camera->ray.origin[0];
-        float y = particles->y[i] - camera->ray.origin[1];
-        float z = particles->z[i] - camera->ray.origin[2];
+        float x = particles->x[i] - camX;
+        float y = particles->y[i] - camY;
+        float z = particles->z[i] - camZ;
         
-        float dotProduct = x * camera->ray.direction[0] + 
-                         y * camera->ray.direction[1] + 
-                         z * camera->ray.direction[2];
+        float dotProduct = x * camDirX + y * camDirY + z * camDirZ;
                          
         if (dotProduct > 0) { // Only include particles in front of camera
-            particles->distance[validParticles] = x*x + y*y + z*z;
+            float distSquared = x*x + y*y + z*z;
+            particles->distance[validParticles] = distSquared;
+            
+            // Track maximum distance directly during first pass
+            if (distSquared > maxDistance) {
+                maxDistance = distSquared;
+            }
+            
             if (validParticles != i) {
                 swapParticles(particles, validParticles, i);
             }
@@ -733,24 +747,24 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         }
     }
     
+    // Skip sort if no particles are visible
+    if (validParticles == 0) return;
+    
     // Sort particles using quick sort
     quickSortParticles(particles, 0, validParticles - 1, particles->distance);
-
-
-    float maxDistance = particles->distance[validParticles - 1];
+    
+    // Initialize tracking variables
     float maxOpacity = 0;
     float maxVelocity = 0;
-    
-    // for (int i = 0; i < validParticles; i++) {
-    for (int i = validParticles - 1; i >= 0; i--) {
-        float x = particles->x[i] - camera->ray.origin[0];
-        float y = particles->y[i] - camera->ray.origin[1];
-        float z = particles->z[i] - camera->ray.origin[2];
 
-        float dotProduct = x * camera->ray.direction[0] + 
-                         y * camera->ray.direction[1] + 
-                         z * camera->ray.direction[2];
-        
+    // Process particles back-to-front (furthest to nearest)
+    for (int i = validParticles - 1; i >= 0; i--) {
+        // Reuse calculations from distance computation
+        float x = particles->x[i] - camX;
+        float y = particles->y[i] - camY;
+        float z = particles->z[i] - camZ;
+
+        float dotProduct = x * camDirX + y * camDirY + z * camDirZ;
         float fovScale = 1.0f / (dotProduct * camera->fov);
         
         // Project onto screen
@@ -762,7 +776,12 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
 
         // Fast distance approximation using squared distance
         float distSquared = particles->distance[i];
-        int particleRadius = (int)(PARTICLE_RADIUS * (100.0f / (sqrtf(distSquared) + 10.0f)));
+        
+        // Use inverse square root approximation if available for speed
+        float invDist = 1.0f / (sqrtf(distSquared) + 10.0f);
+        int particleRadius = (int)(PARTICLE_RADIUS * 100.0f * invDist);
+        
+        // Apply bounds without branching
         particleRadius = particleRadius < 1 ? 1 : (particleRadius > PARTICLE_RADIUS * 3 ? PARTICLE_RADIUS * 3 : particleRadius);
 
         // Calculate drawing bounds
@@ -771,49 +790,49 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         int minY = screenY - particleRadius;
         int maxY = screenY + particleRadius;
         
-        // discard out of bounds
-        if (minX < 0) continue;
-        if (maxX >= ScreenWidth) continue;
-        if (minY < 0) continue;
-        if (maxY >= ScreenHeight) continue;
+        // Quick bounds check
+        if (minX < 0 || maxX >= ScreenWidth || minY < 0 || maxY >= ScreenHeight) continue;
         
         // Calculate particle color once
-        float sumVelocity = particles->xVelocity[i] * particles->xVelocity[i] + particles->yVelocity[i] * particles->yVelocity[i] + particles->zVelocity[i] * particles->zVelocity[i];
+        float vx = particles->xVelocity[i];
+        float vy = particles->yVelocity[i];
+        float vz = particles->zVelocity[i];
+        float sumVelocity = vx*vx + vy*vy + vz*vz;
         uint8_t distanceNormalized = (uint8_t)(255 * (1.0f - (distSquared / maxDistance)));
 
-        float currentOpacity = (float)(screen->opacity[screenX][screenY]);
+        // Track maximum values
+        float currentOpacity = (float)(screen->opacity[screenX][screenY]) + 1.0f;
+        if (currentOpacity > maxOpacity) maxOpacity = currentOpacity;
+        if (sumVelocity > maxVelocity) maxVelocity = sumVelocity;
 
-        if (currentOpacity + 1 > maxOpacity) {
-            maxOpacity = currentOpacity;
-        }
-        if (sumVelocity > maxVelocity) {
-            maxVelocity = sumVelocity;
-        }
-
+        // Draw particle with tight loop bounds
+        uint16_t sumVelocityInt = (uint16_t)sumVelrocity;
         for (int px = minX; px <= maxX; px++) {
             for (int py = minY; py <= maxY; py++) {
                 screen->distance[px][py] = distanceNormalized;
-                screen->unNormalizedVelocity[px][py] = (uint16_t)(sumVelocity);
-                screen->opacity[px][py] += 1;
+                screen->unNormalizedVelocity[px][py] = sumVelocityInt;
+                screen->opacity[px][py]++;
             }
         }
     }
-    // Normalize opacity correctly by indexing into the array
+    
+    // Pre-calculate normalization factors to avoid repeated calculations
+    float invLogMaxOpacity = 1.0f / logf(maxOpacity + 1.0f);
+    float invLogMaxVelocity = 1.0f / logf(maxVelocity + 1.0f);
+    
+    // Normalize opacity and velocity in a single pass
     for (int px = 0; px < ScreenWidth; px++) {
         for (int py = 0; py < ScreenHeight; py++) {
-            float currentOpacity = (float)(screen->opacity[px][py]);
-            if (currentOpacity != 0) {
-                // Logarithmic scaling for opacity
-                // Add 1 to avoid log(0) and scale to [0, 1] range before converting to uint8_t
-                float logOpacity = logf(currentOpacity + 1) / logf(maxOpacity + 1);
+            uint16_t opacity = screen->opacity[px][py];
+            uint16_t velocity = screen->unNormalizedVelocity[px][py];
+            
+            if (opacity != 0) {
+                float logOpacity = logf((float)opacity + 1.0f) * invLogMaxOpacity;
                 screen->normalizedOpacity[px][py] = (uint8_t)(255 * (1.0f - logOpacity));
             }
             
-            float currentVelocity = (float)(screen->unNormalizedVelocity[px][py]);
-            if (currentVelocity != 0) {
-                // Logarithmic scaling for velocity
-                // Add 1 to avoid log(0) and scale to [0, 1] range before converting to uint8_t
-                float logVelocity = logf(currentVelocity + 1) / logf(maxVelocity + 1);
+            if (velocity != 0) {
+                float logVelocity = logf((float)velocity + 1.0f) * invLogMaxVelocity;
                 screen->velocity[px][py] = (uint8_t)(255 * (1.0f - logVelocity));
             }
         }
@@ -822,21 +841,12 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
 
 
 void clearScreen(struct Screen *screen) {
-
-    // uint8_t distance[ScreenWidth][ScreenHeight]
-    // uint8_t velocity[ScreenWidth][ScreenHeight]
-    // uint8_t normalizedOpacity[ScreenWidth][ScreenHeight]
-    // uint16_t opacity[ScreenWidth][ScreenHeight]
-
-    for (int x = 0; x < ScreenWidth; x++) {
-        for (int y = 0; y < ScreenHeight; y++) {
-            screen->distance[x][y] = 0;
-            screen->velocity[x][y] = 0;
-            screen->normalizedOpacity[x][y] = 0;
-            screen->opacity[x][y] = 0;
-            screen->unNormalizedVelocity[x][y] = 0;
-        }
-    }
+    // Clear all screen buffers using memset - much faster than nested loops
+    memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
+    memset(screen->unNormalizedVelocity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
 }
 
 void saveScreen(struct Screen *screen, const char *filename) {
