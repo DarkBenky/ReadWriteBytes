@@ -6,9 +6,10 @@
 #include <time.h>      // for time()
 #include <string.h>     // for memset()
 #include <stdbool.h>    // for bool, true, false
+#include <immintrin.h> // for AVX intrinsics
 
 #define NUM_PARTICLES 100000
-#define GRAVITY 10.0f
+#define GRAVITY 0.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
@@ -26,12 +27,15 @@ struct PointSOA {
     float   xVelocity[NUM_PARTICLES];
     float   yVelocity[NUM_PARTICLES];
     float   zVelocity[NUM_PARTICLES];
+    float   totalVelocity[NUM_PARTICLES];
     float   distance[NUM_PARTICLES];
     float   bBoxMin[3];
     float   bBoxMax[3];
     int     gridID[NUM_PARTICLES];
     int     startIndex[gridResolution];
     int     numberOfParticle[gridResolution];
+    int     screenX[NUM_PARTICLES];
+    int     screenY[NUM_PARTICLES];
 };
 
 struct Screen {
@@ -39,7 +43,6 @@ struct Screen {
     uint8_t velocity[ScreenWidth][ScreenHeight];
     uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
     uint16_t opacity[ScreenWidth][ScreenHeight];
-    uint16_t unNormalizedVelocity[ScreenWidth][ScreenHeight];
 };
 
 
@@ -73,6 +76,10 @@ struct TimePartition {
     int drawCursorTime;
     int drawBoundingBoxTime;
     int saveScreenTime;
+    int sortTime;
+    int projectionTime;
+    int renderDistanceVelocityTime;
+    int renderOpacityTime;
 };
 
 void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], struct Camera *camera) {
@@ -281,7 +288,87 @@ void readCursorData(struct Cursor *cursor) {
 }
 
 
+// void CollideParticlesInGrid(struct PointSOA *particles) {
+//     for (int gridId = 0; gridId < gridResolution; gridId++) {
+//         int startIdx = particles->startIndex[gridId];
+//         if (startIdx == -1) continue; // No particles in this grid cell
+//         int endIdx = startIdx + particles->numberOfParticle[gridId];
+        
+//         // Check collisions between all particles in this cell
+//         for (int i = startIdx; i < endIdx; i++) {
+//             for (int j = i + 1; j < endIdx; j++) {
+//                 // Calculate distance between particles
+//                 float dx = particles->x[j] - particles->x[i];
+//                 float dy = particles->y[j] - particles->y[i];
+//                 float dz = particles->z[j] - particles->z[i];
+                
+//                 float distSquared = dx*dx + dy*dy + dz*dz;
+//                 float minDist = 3.0f * PARTICLE_RADIUS;
+                
+//                 // If particles are colliding (distance < 2*radius)
+//                 if (distSquared < minDist * minDist) {
+//                     // Calculate collision normal
+//                     float dist = sqrtf(distSquared);
+//                     float nx = dx / dist;
+//                     float ny = dy / dist;
+//                     float nz = dz / dist;
+                    
+//                     // Calculate relative velocity along normal
+//                     float vx = particles->xVelocity[j] - particles->xVelocity[i];
+//                     float vy = particles->yVelocity[j] - particles->yVelocity[i];
+//                     float vz = particles->zVelocity[j] - particles->zVelocity[i];
+                    
+//                     float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
+                    
+//                     // Only collide if particles are moving toward each other
+//                     if (velocityAlongNormal < 0) {
+//                         // Calculate impulse scalar (assuming equal mass)
+//                         float impulse = -2.0f * velocityAlongNormal;
+                        
+//                         // Apply impulse
+//                         particles->xVelocity[i] -= impulse * nx * 0.5f;
+//                         particles->yVelocity[i] -= impulse * ny * 0.5f;
+//                         particles->zVelocity[i] -= impulse * nz * 0.5f;
+                        
+//                         particles->xVelocity[j] += impulse * nx * 0.5f;
+//                         particles->yVelocity[j] += impulse * ny * 0.5f;
+//                         particles->zVelocity[j] += impulse * nz * 0.5f;
+                        
+//                         // Add some damping to collision
+//                         particles->xVelocity[i] *= DAMPING;
+//                         particles->yVelocity[i] *= DAMPING;
+//                         particles->zVelocity[i] *= DAMPING;
+                        
+//                         particles->xVelocity[j] *= DAMPING;
+//                         particles->yVelocity[j] *= DAMPING;
+//                         particles->zVelocity[j] *= DAMPING;
+                        
+//                         // Push particles apart to avoid sticking
+//                         float correction = (minDist - dist) * 0.01f;
+//                         particles->x[i] -= nx * correction;
+//                         particles->y[i] -= ny * correction;
+//                         particles->z[i] -= nz * correction;
+                        
+//                         particles->x[j] += nx * correction;
+//                         particles->y[j] += ny * correction;
+//                         particles->z[j] += nz * correction;
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
+
 void CollideParticlesInGrid(struct PointSOA *particles) {
+    // Constants as AVX vectors
+    const __m256 particleRadiusVec = _mm256_set1_ps(PARTICLE_RADIUS);
+    const __m256 minDistVec = _mm256_set1_ps(3.0f * PARTICLE_RADIUS);
+    const __m256 minDistSquaredVec = _mm256_mul_ps(minDistVec, minDistVec);
+    const __m256 halfVec = _mm256_set1_ps(0.5f);
+    const __m256 dampingVec = _mm256_set1_ps(DAMPING);
+    const __m256 correctionFactorVec = _mm256_set1_ps(0.01f);
+    const __m256 zeroVec = _mm256_setzero_ps();
+    
     for (int gridId = 0; gridId < gridResolution; gridId++) {
         int startIdx = particles->startIndex[gridId];
         if (startIdx == -1) continue; // No particles in this grid cell
@@ -289,69 +376,177 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
         
         // Check collisions between all particles in this cell
         for (int i = startIdx; i < endIdx; i++) {
-            for (int j = i + 1; j < endIdx; j++) {
-                // Calculate distance between particles
-                float dx = particles->x[j] - particles->x[i];
-                float dy = particles->y[j] - particles->y[i];
-                float dz = particles->z[j] - particles->z[i];
-                
-                float distSquared = dx*dx + dy*dy + dz*dz;
-                float minDist = 3.0f * PARTICLE_RADIUS;
-                
-                // If particles are colliding (distance < 2*radius)
-                if (distSquared < minDist * minDist) {
-                    // Calculate collision normal
-                    float dist = sqrtf(distSquared);
-                    float nx = dx / dist;
-                    float ny = dy / dist;
-                    float nz = dz / dist;
+            // Load particle i data once
+            __m256 xi = _mm256_set1_ps(particles->x[i]);
+            __m256 yi = _mm256_set1_ps(particles->y[i]);
+            __m256 zi = _mm256_set1_ps(particles->z[i]);
+            __m256 vxi = _mm256_set1_ps(particles->xVelocity[i]);
+            __m256 vyi = _mm256_set1_ps(particles->yVelocity[i]);
+            __m256 vzi = _mm256_set1_ps(particles->zVelocity[i]);
+            
+            // Process 8 particles at a time where possible
+            for (int j = i + 1; j < endIdx; j += 8) {
+                int remaining = endIdx - j;
+                if (remaining >= 8) {
+                    // Load 8 particles at once
+                    __m256 xj = _mm256_loadu_ps(&particles->x[j]);
+                    __m256 yj = _mm256_loadu_ps(&particles->y[j]);
+                    __m256 zj = _mm256_loadu_ps(&particles->z[j]);
                     
-                    // Calculate relative velocity along normal
-                    float vx = particles->xVelocity[j] - particles->xVelocity[i];
-                    float vy = particles->yVelocity[j] - particles->yVelocity[i];
-                    float vz = particles->zVelocity[j] - particles->zVelocity[i];
+                    // Calculate distance vectors
+                    __m256 dx = _mm256_sub_ps(xj, xi);
+                    __m256 dy = _mm256_sub_ps(yj, yi);
+                    __m256 dz = _mm256_sub_ps(zj, zi);
                     
-                    float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
+                    // Calculate squared distance
+                    __m256 distSquared = _mm256_add_ps(
+                        _mm256_add_ps(
+                            _mm256_mul_ps(dx, dx),
+                            _mm256_mul_ps(dy, dy)
+                        ),
+                        _mm256_mul_ps(dz, dz)
+                    );
                     
-                    // Only collide if particles are moving toward each other
-                    if (velocityAlongNormal < 0) {
-                        // Calculate impulse scalar (assuming equal mass)
-                        float impulse = -2.0f * velocityAlongNormal;
+                    // Compare with minimum distance squared
+                    __m256 collisionMask = _mm256_cmp_ps(distSquared, minDistSquaredVec, _CMP_LT_OQ);
+                    
+                    // Skip to next batch if no collisions
+                    if (_mm256_testz_ps(collisionMask, collisionMask)) {
+                        continue;
+                    }
+                    
+                    // Get mask as integer for processing individual lanes
+                    int mask = _mm256_movemask_ps(collisionMask);
+                    
+                    // Process collisions for each set bit in the mask
+                    for (int k = 0; k < 8; k++) {
+                        if (mask & (1 << k)) {
+                            int jIdx = j + k;
+                            
+                            // Recalculate with scalar math for this specific pair
+                            float dx_s = particles->x[jIdx] - particles->x[i];
+                            float dy_s = particles->y[jIdx] - particles->y[i];
+                            float dz_s = particles->z[jIdx] - particles->z[i];
+                            
+                            float distSquared_s = dx_s*dx_s + dy_s*dy_s + dz_s*dz_s;
+                            float minDist = 3.0f * PARTICLE_RADIUS;
+                            
+                            // Double-check collision (should always be true due to mask)
+                            if (distSquared_s < minDist * minDist) {
+                                // Calculate collision normal
+                                float dist = sqrtf(distSquared_s);
+                                float nx = dx_s / dist;
+                                float ny = dy_s / dist;
+                                float nz = dz_s / dist;
+                                
+                                // Calculate relative velocity along normal
+                                float vx = particles->xVelocity[jIdx] - particles->xVelocity[i];
+                                float vy = particles->yVelocity[jIdx] - particles->yVelocity[i];
+                                float vz = particles->zVelocity[jIdx] - particles->zVelocity[i];
+                                
+                                float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
+                                
+                                // Only collide if particles are moving toward each other
+                                if (velocityAlongNormal < 0) {
+                                    // Calculate impulse scalar (assuming equal mass)
+                                    float impulse = -2.0f * velocityAlongNormal;
+                                    
+                                    // Apply impulse
+                                    particles->xVelocity[i] -= impulse * nx * 0.5f;
+                                    particles->yVelocity[i] -= impulse * ny * 0.5f;
+                                    particles->zVelocity[i] -= impulse * nz * 0.5f;
+                                    
+                                    particles->xVelocity[jIdx] += impulse * nx * 0.5f;
+                                    particles->yVelocity[jIdx] += impulse * ny * 0.5f;
+                                    particles->zVelocity[jIdx] += impulse * nz * 0.5f;
+                                    
+                                    // Add some damping to collision
+                                    particles->xVelocity[i] *= DAMPING;
+                                    particles->yVelocity[i] *= DAMPING;
+                                    particles->zVelocity[i] *= DAMPING;
+                                    
+                                    particles->xVelocity[jIdx] *= DAMPING;
+                                    particles->yVelocity[jIdx] *= DAMPING;
+                                    particles->zVelocity[jIdx] *= DAMPING;
+                                    
+                                    // Push particles apart to avoid sticking
+                                    float correction = (minDist - dist) * 0.01f;
+                                    particles->x[i] -= nx * correction;
+                                    particles->y[i] -= ny * correction;
+                                    particles->z[i] -= nz * correction;
+                                    
+                                    particles->x[jIdx] += nx * correction;
+                                    particles->y[jIdx] += ny * correction;
+                                    particles->z[jIdx] += nz * correction;
+                                    
+                                    // Update cached values for particle i
+                                    xi = _mm256_set1_ps(particles->x[i]);
+                                    yi = _mm256_set1_ps(particles->y[i]);
+                                    zi = _mm256_set1_ps(particles->z[i]);
+                                    vxi = _mm256_set1_ps(particles->xVelocity[i]);
+                                    vyi = _mm256_set1_ps(particles->yVelocity[i]);
+                                    vzi = _mm256_set1_ps(particles->zVelocity[i]);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Handle remaining particles with scalar code
+                    for (int jIdx = j; jIdx < endIdx; jIdx++) {
+                        float dx = particles->x[jIdx] - particles->x[i];
+                        float dy = particles->y[jIdx] - particles->y[i];
+                        float dz = particles->z[jIdx] - particles->z[i];
                         
-                        // Apply impulse
-                        particles->xVelocity[i] -= impulse * nx * 0.5f;
-                        particles->yVelocity[i] -= impulse * ny * 0.5f;
-                        particles->zVelocity[i] -= impulse * nz * 0.5f;
+                        float distSquared = dx*dx + dy*dy + dz*dz;
+                        float minDist = 3.0f * PARTICLE_RADIUS;
                         
-                        particles->xVelocity[j] += impulse * nx * 0.5f;
-                        particles->yVelocity[j] += impulse * ny * 0.5f;
-                        particles->zVelocity[j] += impulse * nz * 0.5f;
-                        
-                        // Add some damping to collision
-                        particles->xVelocity[i] *= DAMPING;
-                        particles->yVelocity[i] *= DAMPING;
-                        particles->zVelocity[i] *= DAMPING;
-                        
-                        particles->xVelocity[j] *= DAMPING;
-                        particles->yVelocity[j] *= DAMPING;
-                        particles->zVelocity[j] *= DAMPING;
-                        
-                        // Push particles apart to avoid sticking
-                        float correction = (minDist - dist) * 0.01f;
-                        particles->x[i] -= nx * correction;
-                        particles->y[i] -= ny * correction;
-                        particles->z[i] -= nz * correction;
-                        
-                        particles->x[j] += nx * correction;
-                        particles->y[j] += ny * correction;
-                        particles->z[j] += nz * correction;
+                        if (distSquared < minDist * minDist) {
+                            float dist = sqrtf(distSquared);
+                            float nx = dx / dist;
+                            float ny = dy / dist;
+                            float nz = dz / dist;
+                            
+                            float vx = particles->xVelocity[jIdx] - particles->xVelocity[i];
+                            float vy = particles->yVelocity[jIdx] - particles->yVelocity[i];
+                            float vz = particles->zVelocity[jIdx] - particles->zVelocity[i];
+                            
+                            float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
+                            
+                            if (velocityAlongNormal < 0) {
+                                float impulse = -2.0f * velocityAlongNormal;
+                                
+                                particles->xVelocity[i] -= impulse * nx * 0.5f;
+                                particles->yVelocity[i] -= impulse * ny * 0.5f;
+                                particles->zVelocity[i] -= impulse * nz * 0.5f;
+                                
+                                particles->xVelocity[jIdx] += impulse * nx * 0.5f;
+                                particles->yVelocity[jIdx] += impulse * ny * 0.5f;
+                                particles->zVelocity[jIdx] += impulse * nz * 0.5f;
+                                
+                                particles->xVelocity[i] *= DAMPING;
+                                particles->yVelocity[i] *= DAMPING;
+                                particles->zVelocity[i] *= DAMPING;
+                                
+                                particles->xVelocity[jIdx] *= DAMPING;
+                                particles->yVelocity[jIdx] *= DAMPING;
+                                particles->zVelocity[jIdx] *= DAMPING;
+                                
+                                float correction = (minDist - dist) * 0.01f;
+                                particles->x[i] -= nx * correction;
+                                particles->y[i] -= ny * correction;
+                                particles->z[i] -= nz * correction;
+                                
+                                particles->x[jIdx] += nx * correction;
+                                particles->y[jIdx] += ny * correction;
+                                particles->z[jIdx] += nz * correction;
+                            }
+                        }
                     }
                 }
             }
         }
     }
 }
-
 
 void swapParticles(struct PointSOA *particles, int i, int j) {
     // Swap positions
@@ -413,7 +608,97 @@ void CalculateCenterOfCell(struct PointSOA *particles, int index, float centerOf
     centerOfCell[2] = particles->bBoxMin[2] + (zIndex + 0.5f) * zStep;
 }
 
+// void ApplyPressure(struct PointSOA *particles) {
+//     // Process each cell
+//     for (int gridId = 0; gridId < gridResolution; gridId++) {
+//         int startIdx = particles->startIndex[gridId];
+//         if (startIdx == -1) continue; // No particles in this grid cell
+        
+//         int endIdx = startIdx + particles->numberOfParticle[gridId];
+//         float currentPressure = pressure * particles->numberOfParticle[gridId];
+        
+//         // Get 3D grid coordinates
+//         int x = gridId % gridResolutionAxis;
+//         int y = (gridId / gridResolutionAxis) % gridResolutionAxis;
+//         int z = gridId / (gridResolutionAxis * gridResolutionAxis);
+        
+//         // Process each particle in this cell
+//         for (int i = startIdx; i < endIdx; i++) {
+//             float netForceX = 0.0f;
+//             float netForceY = 0.0f;
+//             float netForceZ = 0.0f;
+            
+//             // Check all 6 face-adjacent neighbors
+//             const int neighbors[6][3] = {
+//                 {-1, 0, 0}, {1, 0, 0},  // left, right
+//                 {0, -1, 0}, {0, 1, 0},  // down, up
+//                 {0, 0, -1}, {0, 0, 1}   // back, front
+//             };
+            
+//             // Consider all neighbors for pressure gradient
+//             for (int j = 0; j < 6; j++) {
+//                 int nx = x + neighbors[j][0];
+//                 int ny = y + neighbors[j][1];
+//                 int nz = z + neighbors[j][2];
+                
+//                 // Skip out-of-bounds neighbors
+//                 if (nx < 0 || nx >= gridResolutionAxis ||
+//                     ny < 0 || ny >= gridResolutionAxis ||
+//                     nz < 0 || nz >= gridResolutionAxis) {
+//                     continue;
+//                 }
+                
+//                 int neighborGridId = nx + ny * gridResolutionAxis + nz * gridResolutionAxis * gridResolutionAxis;
+//                 // Calculate neighbor pressure
+//                 float neighborPressure = pressure * particles->numberOfParticle[neighborGridId];
+                
+//                 // Calculate pressure difference
+//                 float pressureDiff = currentPressure - neighborPressure;
+                
+//                 // Only push if there's pressure gradient
+//                 if (pressureDiff > 0.0f) {
+//                     // Add force component in direction of this neighbor
+//                     netForceX += neighbors[j][0] * pressureDiff;
+//                     netForceY += neighbors[j][1] * pressureDiff;
+//                     netForceZ += neighbors[j][2] * pressureDiff;
+//                 }
+//             }
+            
+//             // Apply the net force if it's significant
+//             float forceMagnitude = sqrtf(netForceX*netForceX + netForceY*netForceY + netForceZ*netForceZ);
+//             if (forceMagnitude > 0.1f) {
+//                 // Normalize force direction
+//                 float invMag = 1.0f / forceMagnitude;
+//                 netForceX *= invMag;
+//                 netForceY *= invMag;
+//                 netForceZ *= invMag;
+                
+//                 // Scale by current cell pressure
+//                 float forceScale = currentPressure * 0.2f;
+                
+//                 // Apply to particle velocity
+//                 particles->xVelocity[i] += netForceX * forceScale;
+//                 particles->yVelocity[i] += netForceY * forceScale;
+//                 particles->zVelocity[i] += netForceZ * forceScale;
+//             }
+//         }
+//     }
+// }
+
 void ApplyPressure(struct PointSOA *particles) {
+    // Constants as AVX vectors for vectorized operations
+    const __m256 pressureVec = _mm256_set1_ps(pressure);
+    const __m256 forceScaleFactorVec = _mm256_set1_ps(0.2f);
+    const __m256 thresholdVec = _mm256_set1_ps(0.1f);
+    const __m256 zeroVec = _mm256_setzero_ps();
+    
+    // Define neighbor directions once
+    const int neighbors[6][3] = {
+        {-1, 0, 0}, {1, 0, 0},  // left, right
+        {0, -1, 0}, {0, 1, 0},  // down, up
+        {0, 0, -1}, {0, 0, 1}   // back, front
+    };
+    
     // Process each cell
     for (int gridId = 0; gridId < gridResolution; gridId++) {
         int startIdx = particles->startIndex[gridId];
@@ -421,51 +706,140 @@ void ApplyPressure(struct PointSOA *particles) {
         
         int endIdx = startIdx + particles->numberOfParticle[gridId];
         float currentPressure = pressure * particles->numberOfParticle[gridId];
+        __m256 currentPressureVec = _mm256_set1_ps(currentPressure);
         
         // Get 3D grid coordinates
         int x = gridId % gridResolutionAxis;
         int y = (gridId / gridResolutionAxis) % gridResolutionAxis;
         int z = gridId / (gridResolutionAxis * gridResolutionAxis);
         
-        // Process each particle in this cell
-        for (int i = startIdx; i < endIdx; i++) {
+        // Pre-compute and cache neighbor information
+        float neighborPressures[6];
+        float directionX[6], directionY[6], directionZ[6];
+        int validNeighbors = 0;
+        
+        for (int j = 0; j < 6; j++) {
+            int nx = x + neighbors[j][0];
+            int ny = y + neighbors[j][1];
+            int nz = z + neighbors[j][2];
+            
+            // Skip out-of-bounds neighbors
+            if (nx < 0 || nx >= gridResolutionAxis ||
+                ny < 0 || ny >= gridResolutionAxis ||
+                nz < 0 || nz >= gridResolutionAxis) {
+                continue;
+            }
+            
+            int neighborGridId = nx + ny * gridResolutionAxis + nz * gridResolutionAxis * gridResolutionAxis;
+            float neighborPressure = pressure * particles->numberOfParticle[neighborGridId];
+            
+            // Store neighbor info for reuse with all particles
+            neighborPressures[validNeighbors] = neighborPressure;
+            directionX[validNeighbors] = (float)neighbors[j][0];
+            directionY[validNeighbors] = (float)neighbors[j][1];
+            directionZ[validNeighbors] = (float)neighbors[j][2];
+            validNeighbors++;
+        }
+        
+        // Process particles in this cell in batches of 8
+        int i;
+        for (i = startIdx; i <= endIdx - 8; i += 8) {
+            // Process 8 particles at once with AVX
+            __m256 netForceXVec = _mm256_setzero_ps();
+            __m256 netForceYVec = _mm256_setzero_ps();
+            __m256 netForceZVec = _mm256_setzero_ps();
+            
+            // Consider all valid neighbors
+            for (int j = 0; j < validNeighbors; j++) {
+                // Calculate pressure difference
+                __m256 neighborPressureVec = _mm256_set1_ps(neighborPressures[j]);
+                __m256 pressureDiffVec = _mm256_sub_ps(currentPressureVec, neighborPressureVec);
+                
+                // Create mask for positive pressure differences
+                __m256 positiveMask = _mm256_cmp_ps(pressureDiffVec, zeroVec, _CMP_GT_OQ);
+                
+                // Skip if no positive pressure differences
+                if (_mm256_testz_ps(positiveMask, positiveMask)) {
+                    continue;
+                }
+                
+                // Apply direction * pressure difference with mask
+                __m256 scaledDiffVec = _mm256_and_ps(pressureDiffVec, positiveMask);
+                __m256 dirXVec = _mm256_set1_ps(directionX[j]);
+                __m256 dirYVec = _mm256_set1_ps(directionY[j]);
+                __m256 dirZVec = _mm256_set1_ps(directionZ[j]);
+                
+                netForceXVec = _mm256_add_ps(netForceXVec, _mm256_mul_ps(dirXVec, scaledDiffVec));
+                netForceYVec = _mm256_add_ps(netForceYVec, _mm256_mul_ps(dirYVec, scaledDiffVec));
+                netForceZVec = _mm256_add_ps(netForceZVec, _mm256_mul_ps(dirZVec, scaledDiffVec));
+            }
+            
+            // Calculate force magnitude squared
+            __m256 forceMagSquaredVec = _mm256_add_ps(
+                _mm256_add_ps(
+                    _mm256_mul_ps(netForceXVec, netForceXVec),
+                    _mm256_mul_ps(netForceYVec, netForceYVec)
+                ),
+                _mm256_mul_ps(netForceZVec, netForceZVec)
+            );
+            
+            // Calculate sqrt for magnitude
+            __m256 forceMagVec = _mm256_sqrt_ps(forceMagSquaredVec);
+            
+            // Create mask for significant forces
+            __m256 forceMask = _mm256_cmp_ps(forceMagVec, thresholdVec, _CMP_GT_OQ);
+            
+            // Skip if no particles have significant force
+            if (_mm256_testz_ps(forceMask, forceMask)) {
+                continue;
+            }
+            
+            // Calculate safe inverse magnitude (avoid division by zero)
+            __m256 safeForceVec = _mm256_max_ps(forceMagVec, _mm256_set1_ps(0.0001f));
+            __m256 invMagVec = _mm256_div_ps(_mm256_set1_ps(1.0f), safeForceVec);
+            
+            // Normalize force vectors
+            __m256 normForceXVec = _mm256_mul_ps(netForceXVec, invMagVec);
+            __m256 normForceYVec = _mm256_mul_ps(netForceYVec, invMagVec);
+            __m256 normForceZVec = _mm256_mul_ps(netForceZVec, invMagVec);
+            
+            // Scale by current pressure
+            __m256 forceScaleVec = _mm256_mul_ps(currentPressureVec, forceScaleFactorVec);
+            __m256 finalForceXVec = _mm256_mul_ps(normForceXVec, forceScaleVec);
+            __m256 finalForceYVec = _mm256_mul_ps(normForceYVec, forceScaleVec);
+            __m256 finalForceZVec = _mm256_mul_ps(normForceZVec, forceScaleVec);
+            
+            // Apply force mask to only affect particles with significant force
+            finalForceXVec = _mm256_and_ps(finalForceXVec, forceMask);
+            finalForceYVec = _mm256_and_ps(finalForceYVec, forceMask);
+            finalForceZVec = _mm256_and_ps(finalForceZVec, forceMask);
+            
+            // Load current velocities
+            __m256 xVelVec = _mm256_loadu_ps(&particles->xVelocity[i]);
+            __m256 yVelVec = _mm256_loadu_ps(&particles->yVelocity[i]);
+            __m256 zVelVec = _mm256_loadu_ps(&particles->zVelocity[i]);
+            
+            // Update velocities and store
+            _mm256_storeu_ps(&particles->xVelocity[i], _mm256_add_ps(xVelVec, finalForceXVec));
+            _mm256_storeu_ps(&particles->yVelocity[i], _mm256_add_ps(yVelVec, finalForceYVec));
+            _mm256_storeu_ps(&particles->zVelocity[i], _mm256_add_ps(zVelVec, finalForceZVec));
+        }
+        
+        // Handle remaining particles with scalar code
+        for (; i < endIdx; i++) {
             float netForceX = 0.0f;
             float netForceY = 0.0f;
             float netForceZ = 0.0f;
             
-            // Check all 6 face-adjacent neighbors
-            const int neighbors[6][3] = {
-                {-1, 0, 0}, {1, 0, 0},  // left, right
-                {0, -1, 0}, {0, 1, 0},  // down, up
-                {0, 0, -1}, {0, 0, 1}   // back, front
-            };
-            
             // Consider all neighbors for pressure gradient
-            for (int j = 0; j < 6; j++) {
-                int nx = x + neighbors[j][0];
-                int ny = y + neighbors[j][1];
-                int nz = z + neighbors[j][2];
-                
-                // Skip out-of-bounds neighbors
-                if (nx < 0 || nx >= gridResolutionAxis ||
-                    ny < 0 || ny >= gridResolutionAxis ||
-                    nz < 0 || nz >= gridResolutionAxis) {
-                    continue;
-                }
-                
-                int neighborGridId = nx + ny * gridResolutionAxis + nz * gridResolutionAxis * gridResolutionAxis;
-                // Calculate neighbor pressure
-                float neighborPressure = pressure * particles->numberOfParticle[neighborGridId];
-                
-                // Calculate pressure difference
-                float pressureDiff = currentPressure - neighborPressure;
+            for (int j = 0; j < validNeighbors; j++) {
+                float pressureDiff = currentPressure - neighborPressures[j];
                 
                 // Only push if there's pressure gradient
                 if (pressureDiff > 0.0f) {
-                    // Add force component in direction of this neighbor
-                    netForceX += neighbors[j][0] * pressureDiff;
-                    netForceY += neighbors[j][1] * pressureDiff;
-                    netForceZ += neighbors[j][2] * pressureDiff;
+                    netForceX += directionX[j] * pressureDiff;
+                    netForceY += directionY[j] * pressureDiff;
+                    netForceZ += directionZ[j] * pressureDiff;
                 }
             }
             
@@ -491,24 +865,24 @@ void ApplyPressure(struct PointSOA *particles) {
 }
 
 // First, optimize the move_to_grid function for direct calculation
-void move_to_grid(struct PointSOA *particles, int index) {
-    float xStep = (particles->bBoxMax[0] - particles->bBoxMin[0]) / gridResolutionAxis;
-    float yStep = (particles->bBoxMax[1] - particles->bBoxMin[1]) / gridResolutionAxis;
-    float zStep = (particles->bBoxMax[2] - particles->bBoxMin[2]) / gridResolutionAxis;
+// void move_to_grid(struct PointSOA *particles, int index) {
+//     float xStep = (particles->bBoxMax[0] - particles->bBoxMin[0]) / gridResolutionAxis;
+//     float yStep = (particles->bBoxMax[1] - particles->bBoxMin[1]) / gridResolutionAxis;
+//     float zStep = (particles->bBoxMax[2] - particles->bBoxMin[2]) / gridResolutionAxis;
     
-    // Calculate grid positions directly with clamping
-    int xIndex = (int)((particles->x[index] - particles->bBoxMin[0]) / xStep);
-    int yIndex = (int)((particles->y[index] - particles->bBoxMin[1]) / yStep);
-    int zIndex = (int)((particles->z[index] - particles->bBoxMin[2]) / zStep);
+//     // Calculate grid positions directly with clamping
+//     int xIndex = (int)((particles->x[index] - particles->bBoxMin[0]) / xStep);
+//     int yIndex = (int)((particles->y[index] - particles->bBoxMin[1]) / yStep);
+//     int zIndex = (int)((particles->z[index] - particles->bBoxMin[2]) / zStep);
     
-    // Clamp indices
-    xIndex = (xIndex < 0) ? 0 : ((xIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : xIndex);
-    yIndex = (yIndex < 0) ? 0 : ((yIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : yIndex);
-    zIndex = (zIndex < 0) ? 0 : ((zIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : zIndex);
+//     // Clamp indices
+//     xIndex = (xIndex < 0) ? 0 : ((xIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : xIndex);
+//     yIndex = (yIndex < 0) ? 0 : ((yIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : yIndex);
+//     zIndex = (zIndex < 0) ? 0 : ((zIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : zIndex);
     
-    // Convert 3D coordinates to a single index
-    particles->gridID[index] = xIndex + yIndex * gridResolutionAxis + zIndex * gridResolutionAxis * gridResolutionAxis;
-}
+//     // Convert 3D coordinates to a single index
+//     particles->gridID[index] = xIndex + yIndex * gridResolutionAxis + zIndex * gridResolutionAxis * gridResolutionAxis;
+// }
 
 // Use radix sort for better performance with integer keys
 void radixSortParticles(struct PointSOA *particles, int n) {
@@ -580,10 +954,85 @@ void radixSortParticles(struct PointSOA *particles, int n) {
     free(tempGridID);
 }
 
+// Earlier in the file, add this AVX-optimized version:
 void updateGridData(struct PointSOA *particles) {
-    // Assign each particle to its grid cell
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        move_to_grid(particles, i);
+    // Calculate grid steps once
+    float xStep = (particles->bBoxMax[0] - particles->bBoxMin[0]) / gridResolutionAxis;
+    float yStep = (particles->bBoxMax[1] - particles->bBoxMin[1]) / gridResolutionAxis;
+    float zStep = (particles->bBoxMax[2] - particles->bBoxMin[2]) / gridResolutionAxis;
+    
+    // Prepare constant AVX registers
+    __m256 xStepVec = _mm256_set1_ps(1.0f / xStep);
+    __m256 yStepVec = _mm256_set1_ps(1.0f / yStep);
+    __m256 zStepVec = _mm256_set1_ps(1.0f / zStep);
+    __m256 xMinVec = _mm256_set1_ps(particles->bBoxMin[0]);
+    __m256 yMinVec = _mm256_set1_ps(particles->bBoxMin[1]);
+    __m256 zMinVec = _mm256_set1_ps(particles->bBoxMin[2]);
+    __m256 zeroVec = _mm256_setzero_ps();
+    __m256 gridMaxVec = _mm256_set1_ps((float)(gridResolutionAxis - 1));
+    __m256i gridResVec = _mm256_set1_epi32(gridResolutionAxis);
+    __m256i gridResSquaredVec = _mm256_set1_epi32(gridResolutionAxis * gridResolutionAxis);
+    
+    // Process particles in chunks of 8
+    int alignedCount = NUM_PARTICLES & ~7; // Round down to multiple of 8
+    
+    for (int i = 0; i < alignedCount; i += 8) {
+        // Load particle positions
+        __m256 xVec = _mm256_loadu_ps(&particles->x[i]);
+        __m256 yVec = _mm256_loadu_ps(&particles->y[i]);
+        __m256 zVec = _mm256_loadu_ps(&particles->z[i]);
+        
+        // Calculate grid indices
+        __m256 xIndexFloat = _mm256_mul_ps(_mm256_sub_ps(xVec, xMinVec), xStepVec);
+        __m256 yIndexFloat = _mm256_mul_ps(_mm256_sub_ps(yVec, yMinVec), yStepVec);
+        __m256 zIndexFloat = _mm256_mul_ps(_mm256_sub_ps(zVec, zMinVec), zStepVec);
+        
+        // Convert float indices to integers
+        __m256i xIndexVec = _mm256_cvttps_epi32(xIndexFloat);
+        __m256i yIndexVec = _mm256_cvttps_epi32(yIndexFloat);
+        __m256i zIndexVec = _mm256_cvttps_epi32(zIndexFloat);
+        
+        // Apply clamp to x indices (min = 0, max = gridResolutionAxis - 1)
+        __m256i xClamped = _mm256_max_epi32(_mm256_min_epi32(xIndexVec, _mm256_cvttps_epi32(gridMaxVec)), 
+                                           _mm256_setzero_si256());
+        
+        // Apply clamp to y indices
+        __m256i yClamped = _mm256_max_epi32(_mm256_min_epi32(yIndexVec, _mm256_cvttps_epi32(gridMaxVec)), 
+                                           _mm256_setzero_si256());
+        
+        // Apply clamp to z indices
+        __m256i zClamped = _mm256_max_epi32(_mm256_min_epi32(zIndexVec, _mm256_cvttps_epi32(gridMaxVec)), 
+                                           _mm256_setzero_si256());
+        
+        // Calculate grid IDs: xIndex + yIndex * gridRes + zIndex * gridRes * gridRes
+        __m256i yContrib = _mm256_mullo_epi32(yClamped, gridResVec);
+        __m256i zContrib = _mm256_mullo_epi32(zClamped, gridResSquaredVec);
+        __m256i gridIDs = _mm256_add_epi32(_mm256_add_epi32(xClamped, yContrib), zContrib);
+        
+        // Store grid IDs
+        int results[8] __attribute__((aligned(32)));
+        _mm256_store_si256((__m256i*)results, gridIDs);
+        
+        // Copy results to particles array
+        for (int j = 0; j < 8; j++) {
+            particles->gridID[i + j] = results[j];
+        }
+    }
+    
+    // Handle remaining particles
+    for (int i = alignedCount; i < NUM_PARTICLES; i++) {
+        // Calculate grid positions directly with clamping
+        int xIndex = (int)((particles->x[i] - particles->bBoxMin[0]) / xStep);
+        int yIndex = (int)((particles->y[i] - particles->bBoxMin[1]) / yStep);
+        int zIndex = (int)((particles->z[i] - particles->bBoxMin[2]) / zStep);
+        
+        // Clamp indices
+        xIndex = (xIndex < 0) ? 0 : ((xIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : xIndex);
+        yIndex = (yIndex < 0) ? 0 : ((yIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : yIndex);
+        zIndex = (zIndex < 0) ? 0 : ((zIndex >= gridResolutionAxis) ? gridResolutionAxis - 1 : zIndex);
+        
+        // Convert 3D coordinates to a single index
+        particles->gridID[i] = xIndex + yIndex * gridResolutionAxis + zIndex * gridResolutionAxis * gridResolutionAxis;
     }
     
     // Reset grid cell start indices
@@ -610,14 +1059,61 @@ void updateGridData(struct PointSOA *particles) {
     }
 }
 
-void update_particle(struct PointSOA *particles, int index, float dt) {
-    particles->x[index] += particles->xVelocity[index] * dt * DAMPING;
-    particles->y[index] += particles->yVelocity[index] * dt * DAMPING;
-    particles->z[index] += particles->zVelocity[index] * dt * DAMPING;
-}
-
-void add_gravity(struct PointSOA *particles, int index) {
-    particles->yVelocity[index] -= GRAVITY;
+void update_particle_apply_gravity(struct PointSOA *particles, float dt) {
+    // Prepare constants as AVX vectors
+    __m256 dtVec = _mm256_set1_ps(dt);
+    __m256 dampingVec = _mm256_set1_ps(DAMPING);
+    __m256 gravityVec = _mm256_set1_ps(GRAVITY);
+    
+    // Process particles in chunks of 8
+    int alignedCount = NUM_PARTICLES & ~7; // Round down to multiple of 8
+    
+    for (int i = 0; i < alignedCount; i += 8) {
+        // Load current positions
+        __m256 xVec = _mm256_loadu_ps(&particles->x[i]);
+        __m256 yVec = _mm256_loadu_ps(&particles->y[i]);
+        __m256 zVec = _mm256_loadu_ps(&particles->z[i]);
+        
+        // Load velocities
+        __m256 xVelocityVec = _mm256_loadu_ps(&particles->xVelocity[i]);
+        __m256 yVelocityVec = _mm256_loadu_ps(&particles->yVelocity[i]);
+        __m256 zVelocityVec = _mm256_loadu_ps(&particles->zVelocity[i]);
+        
+        // Apply gravity to velocity
+        yVelocityVec = _mm256_sub_ps(yVelocityVec, gravityVec);
+        
+        // Calculate position updates: velocity * dt * damping
+        __m256 dtDampingVec = _mm256_mul_ps(dtVec, dampingVec);
+        __m256 xOffsetVec = _mm256_mul_ps(_mm256_mul_ps(xVelocityVec, dtVec), dampingVec);
+        __m256 yOffsetVec = _mm256_mul_ps(_mm256_mul_ps(yVelocityVec, dtVec), dampingVec);
+        __m256 zOffsetVec = _mm256_mul_ps(_mm256_mul_ps(zVelocityVec, dtVec), dampingVec);
+        
+        // Update positions
+        xVec = _mm256_add_ps(xVec, xOffsetVec);
+        yVec = _mm256_add_ps(yVec, yOffsetVec);
+        zVec = _mm256_add_ps(zVec, zOffsetVec);
+        
+        // Store updated positions
+        _mm256_storeu_ps(&particles->x[i], xVec);
+        _mm256_storeu_ps(&particles->y[i], yVec);
+        _mm256_storeu_ps(&particles->z[i], zVec);
+        
+        // Store updated velocities
+        _mm256_storeu_ps(&particles->xVelocity[i], xVelocityVec);
+        _mm256_storeu_ps(&particles->yVelocity[i], yVelocityVec);
+        _mm256_storeu_ps(&particles->zVelocity[i], zVelocityVec);
+    }
+    
+    // Handle remaining particles
+    for (int i = alignedCount; i < NUM_PARTICLES; i++) {
+        // Apply gravity
+        particles->yVelocity[i] -= GRAVITY;
+        
+        // Update positions
+        particles->x[i] += particles->xVelocity[i] * dt * DAMPING;
+        particles->y[i] += particles->yVelocity[i] * dt * DAMPING;
+        particles->z[i] += particles->zVelocity[i] * dt * DAMPING;
+    }
 }
 
 void move_to_box(struct PointSOA *particles, float bBoxMin[3], float bBoxMax[3]) {
@@ -707,7 +1203,7 @@ void quickSortParticles(struct PointSOA *particles, int low, int high, float *di
 
 
 
-void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen) {
+void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct TimePartition *timePartition) {
     // Pre-calculate camera vectors and constants
     const float halfWidth = ScreenWidth * 0.5f;
     const float halfHeight = ScreenHeight * 0.5f;
@@ -738,6 +1234,7 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     int validParticles = 0;
     float maxDistance = 0.0f;
     
+    clock_t start = clock();
     for (int i = 0; i < NUM_PARTICLES; i++) {
         float x = particles->x[i] - camX;
         float y = particles->y[i] - camY;
@@ -766,27 +1263,68 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     
     // Sort particles using quick sort
     quickSortParticles(particles, 0, validParticles - 1, particles->distance);
+    clock_t endSortTime = clock();
+    timePartition->sortTime = (int)(((endSortTime - start) / 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->sortTime * 0.75f);
+   
     
     // Initialize tracking variables
     float maxOpacity = 0;
     float maxVelocity = 0;
 
-    // Process particles back-to-front (furthest to nearest)
-    for (int i = validParticles - 1; i >= 0; i--) {
-        // Reuse calculations from distance computation
+    // calculate the particle coordinates to screen coordinates
+    #pragma omp parallel for default(none) \
+    shared(particles, camX, camY, camZ, camDirX, camDirY, camDirZ, \
+           right, trueUp, camera, halfWidth, halfHeight, validParticles) \
+    reduction(max:maxVelocity)
+    for (int i = 0; i < validParticles - 1; i++) {
         float x = particles->x[i] - camX;
         float y = particles->y[i] - camY;
         float z = particles->z[i] - camZ;
 
         float dotProduct = x * camDirX + y * camDirY + z * camDirZ;
         float fovScale = 1.0f / (dotProduct * camera->fov);
-        
-        // Project onto screen
+
         float screenRight = (x * right[0] + y * right[1] + z * right[2]) * fovScale;
         float screenUp = (x * trueUp[0] + y * trueUp[1] + z * trueUp[2]) * fovScale;
-        
+
         int screenX = (int)(screenRight * halfWidth + halfWidth);
         int screenY = (int)(-screenUp * halfHeight + halfHeight);
+
+        float distSquared = particles->distance[i];
+        float invDist = 1.0f / (sqrtf(distSquared) + 10.0f);
+        int particleRadius = (int)(PARTICLE_RADIUS * 100.0f * invDist);
+        particleRadius = particleRadius < 1 ? 1 : (particleRadius > PARTICLE_RADIUS * 3 ? PARTICLE_RADIUS * 3 : particleRadius);
+
+        int minX = screenX - particleRadius;
+        int maxX = screenX + particleRadius;
+        int minY = screenY - particleRadius;
+        int maxY = screenY + particleRadius;
+
+        float vx = particles->xVelocity[i];
+        float vy = particles->yVelocity[i];
+        float vz = particles->zVelocity[i];
+
+        float totalVelocity = vx*vx + vy*vy + vz*vz;
+
+        if (totalVelocity > maxVelocity) {
+            maxVelocity = totalVelocity;
+        }
+
+        if (minX < 0 || maxX >= ScreenWidth || minY < 0 || maxY >= ScreenHeight) continue;
+
+        particles->screenX[i] = screenX;
+        particles->screenY[i] = screenY;
+        particles->totalVelocity[i] = totalVelocity;
+    }
+
+
+    clock_t endProjectTime = clock();
+    timePartition->projectionTime = (int)((endProjectTime - endSortTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->projectionTime * 0.75f;
+
+    // Process particles back-to-front (furthest to nearest)
+    for (int i = validParticles - 1; i >= 0; i--) {       
+        int screenX = particles->screenX[i];
+        int screenY = particles->screenY[i];
 
         // Fast distance approximation using squared distance
         float distSquared = particles->distance[i];
@@ -808,28 +1346,26 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         if (minX < 0 || maxX >= ScreenWidth || minY < 0 || maxY >= ScreenHeight) continue;
         
         // Calculate particle color once
-        float vx = particles->xVelocity[i];
-        float vy = particles->yVelocity[i];
-        float vz = particles->zVelocity[i];
-        float sumVelocity = vx*vx + vy*vy + vz*vz;
+        uint8_t NormalizedVelocity = (uint8_t)(255 * (1.0f - (particles->totalVelocity[i] / maxVelocity)));
         uint8_t distanceNormalized = (uint8_t)(255 * (1.0f - (distSquared / maxDistance)));
 
         // Track maximum values
         float currentOpacity = (float)(screen->opacity[screenX][screenY]) + 1.0f;
         if (currentOpacity > maxOpacity) maxOpacity = currentOpacity;
-        if (sumVelocity > maxVelocity) maxVelocity = sumVelocity;
 
-        // Draw particle with tight loop bounds
-        uint16_t sumVelocityInt = (uint16_t)sumVelocity;
         for (int px = minX; px <= maxX; px++) {
             for (int py = minY; py <= maxY; py++) {
                 screen->distance[px][py] = distanceNormalized;
-                screen->unNormalizedVelocity[px][py] = sumVelocityInt;
+                screen->velocity[px][py] = NormalizedVelocity;
                 screen->opacity[px][py]++;
             }
         }
     }
+
+    clock_t renderDistanceVelocity = clock();
+    timePartition->renderDistanceVelocityTime = (int)((renderDistanceVelocity - endProjectTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->renderDistanceVelocityTime * 0.75f;
     
+
     // Pre-calculate normalization factors to avoid repeated calculations
     float invLogMaxOpacity = 1.0f / logf(maxOpacity + 1.0f);
     float invLogMaxVelocity = 1.0f / logf(maxVelocity + 1.0f);
@@ -838,19 +1374,14 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     for (int px = 0; px < ScreenWidth; px++) {
         for (int py = 0; py < ScreenHeight; py++) {
             uint16_t opacity = screen->opacity[px][py];
-            uint16_t velocity = screen->unNormalizedVelocity[px][py];
-            
             if (opacity != 0) {
                 float logOpacity = logf((float)opacity + 1.0f) * invLogMaxOpacity;
                 screen->normalizedOpacity[px][py] = (uint8_t)(255 * (1.0f - logOpacity));
             }
-            
-            if (velocity != 0) {
-                float logVelocity = logf((float)velocity + 1.0f) * invLogMaxVelocity;
-                screen->velocity[px][py] = (uint8_t)(255 * (1.0f - logVelocity));
-            }
         }
     }
+    clock_t renderOpacityTime = clock();
+    timePartition->renderOpacityTime = (int)((renderOpacityTime - renderDistanceVelocity) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->renderOpacityTime * 0.75f;
 }
 
 
@@ -860,7 +1391,6 @@ void clearScreen(struct Screen *screen) {
     memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
-    memset(screen->unNormalizedVelocity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
 }
 
 void saveScreen(struct Screen *screen, const char *filename) {
@@ -894,7 +1424,7 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     clearScreen(screen);
     int clearScreenTime = clock();
     timePartition->clearScreenTime = (int)((clearScreenTime - start) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->clearScreenTime * 0.75f;
-    projectParticles(particles, camera, screen);
+    projectParticles(particles, camera, screen, timePartition);
     int projectParticlesTime = clock();
     timePartition->projectParticlesTime = (int)((projectParticlesTime - clearScreenTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->projectParticlesTime * 0.75f;
     drawCursor(screen, cursor, camera);
@@ -944,16 +1474,14 @@ void update_particles(struct PointSOA *particles, float dt, struct TimePartition
     
     addForce(particles, cursor);
 
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        add_gravity(particles, i);
-        update_particle(particles, i, dt);
-    }
+    update_particle_apply_gravity(particles,dt);
+    
     clock_t updateParticlesTime = clock();
     timePartition->updateParticlesTime = (int)((updateParticlesTime - applyPressureTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->updateParticlesTime * 0.75f;
     
     move_to_box(particles, particles->bBoxMin, particles->bBoxMax);
     clock_t moveToBoxTime = clock();
-    timePartition->moveToBoxTime = (int)((moveToBoxTime - updateParticlesTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->moveToBoxTime * 0.75f;
+    timePartition->moveToBoxTime = (int)(((moveToBoxTime - updateParticlesTime) * 1000.0f / CLOCKS_PER_SEC) * 0.25f + timePartition->moveToBoxTime * 0.75f);
 }
 
 

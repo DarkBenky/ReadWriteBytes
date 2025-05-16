@@ -69,19 +69,27 @@ type Game struct {
 //	    int drawCursorTime;
 //	    int drawBoundingBoxTime;
 //	    int saveScreenTime;
+//		int sortTime;
+//		int projectionTime;
+//		int renderDistanceVelocityTime;
+//		int renderOpacityTime;
 //	};
 type TimePartition struct {
-	CollisionTime        int32
-	ApplyPressureTime    int32
-	UpdateParticlesTime  int32
-	MoveToBoxTime        int32
-	UpdateGridTime       int32
-	RenderTime           int32
-	ClearScreenTime      int32 // Fixed: changed from clearScreenTime to ClearScreenTime
-	ProjectParticlesTime int32
-	DrawCursorTime       int32
-	DrawBoundingBoxTime  int32
-	SaveScreenTime       int32
+	CollisionTime              int32
+	ApplyPressureTime          int32
+	UpdateParticlesTime        int32
+	MoveToBoxTime              int32
+	UpdateGridTime             int32
+	RenderTime                 int32
+	ClearScreenTime            int32
+	ProjectParticlesTime       int32
+	DrawCursorTime             int32
+	DrawBoundingBoxTime        int32
+	SaveScreenTime             int32
+	SortTime                   int32
+	ProjectionTime             int32
+	RenderDistanceVelocityTime int32
+	RenderOpacityTime          int32
 }
 
 func PlotTimePartition(screen *ebiten.Image) {
@@ -124,6 +132,10 @@ func PlotTimePartition(screen *ebiten.Image) {
 		{"Draw Cursor", tp.DrawCursorTime, color.RGBA{128, 0, 255, 255}},
 		{"Draw Box", tp.DrawBoundingBoxTime, color.RGBA{0, 128, 255, 255}},
 		{"Save Screen", tp.SaveScreenTime, color.RGBA{128, 128, 128, 255}},
+		{"Sort", tp.SortTime, color.RGBA{255, 128, 128, 255}},
+		{"Projection", tp.ProjectionTime, color.RGBA{128, 255, 128, 255}},
+		{"Render Dist/Velo", tp.RenderDistanceVelocityTime, color.RGBA{128, 128, 255, 255}},
+		{"Render Opacity", tp.RenderOpacityTime, color.RGBA{255, 128, 255, 255}},
 	}
 
 	// Find maximum time for scaling
