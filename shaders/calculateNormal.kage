@@ -1,0 +1,31 @@
+package blur
+
+func Fragment(dstPos vec4, texCoord vec2, color vec4) vec4 {
+    size := imageSrcTextureSize()
+    XStep := 1.0 / size.x
+    YStep := 1.0 / size.y
+
+    // Sample distance values from neighbors
+    if texCoord.x < 0 || texCoord.x > 1 || texCoord.y < 0 || texCoord.y > 1 || imageSrc0At(texCoord).g == 0 {
+        return vec4(0.0, 0.0, 0.0, 1.0) // Out of bounds
+    }
+
+    hL := imageSrc0At(texCoord - vec2(XStep, 0)).g
+    hR := imageSrc0At(texCoord + vec2(XStep, 0)).g
+    hD := imageSrc0At(texCoord - vec2(0, YStep)).g
+    hU := imageSrc0At(texCoord + vec2(0, YStep)).g
+
+
+    dx := (hR - hL)
+    dy := (hU - hD)
+
+
+    if dx == 0 && dy == 0 {
+        return vec4(0.5, 0.5, 1.0, 1.0) // Neutral normal pointing outwards
+    }
+
+    n := normalize(vec3(-dx, -dy, 1.0))
+
+    // Output normal in RGB
+    return vec4(n * 0.5 + 0.5, 1.0)  // map [-1, 1] to [0, 1] for display
+}

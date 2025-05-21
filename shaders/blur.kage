@@ -1,0 +1,47 @@
+package blur
+
+// Define constants for kernel size and sigma values
+const KernelSize = 5
+var SigmaSpatial float
+var SigmaRange float
+
+func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
+    // Calculate half of the kernel size
+    const halfSize = KernelSize / 2
+
+    // Initialize accumulators for color and weight
+    sum := vec4(0.0)
+    weightSum := 0.0
+
+    // Get the color of the current pixel
+    centerColor := imageSrc0At(texCoord)
+
+    // Loop over the kernel
+    for y := -halfSize; y <= halfSize; y++ {
+        for x := -halfSize; x <= halfSize; x++ {
+            // Calculate the offset
+            offset := vec2(float(x), float(y)) / imageSrcTextureSize()
+
+            // Get the color at the neighboring pixel
+            sampleColor := imageSrc0At(texCoord + offset)
+
+            // Compute the spatial weight
+            spatialDist := float(x*x + y*y)
+            spatialWeight := exp(-spatialDist / (2.0 * SigmaSpatial * SigmaSpatial))
+
+            // Compute the range (color) weight
+            colorDiff := sampleColor.rgb - centerColor.rgb
+            rangeWeight := exp(-dot(colorDiff, colorDiff) / (2.0 * SigmaRange * SigmaRange))
+
+            // Combine the weights
+            weight := spatialWeight * rangeWeight
+
+            // Accumulate the weighted color and weight
+            sum += sampleColor * weight
+            weightSum += weight
+        }
+    }
+
+    // Normalize the result
+    return sum / weightSum
+}
