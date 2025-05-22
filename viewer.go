@@ -961,10 +961,22 @@ func main() {
 		panic(err)
 	}
 
+	src, err = loadShader("shaders/example.kage")
+	if err != nil {
+		fmt.Printf("Error loading shader: %v\n", err)
+		panic(err)
+	}
+	example, err := ebiten.NewShader(src)
+	if err != nil {
+		fmt.Printf("Error creating shader: %v\n", err)
+		panic(err)
+	}
+
 	shaders := []Shader{
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 2.0, "SigmaRange": 1.5}, name: "Blur"},
 		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.15, "SigmaRange": 0.5}, name: "Blur"},
 		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.25, "SigmaRange": 0.5}, name: "Blur"},
+		{shader: example, name: "ExampleShader"},
 	}
 
 	game := &Game{

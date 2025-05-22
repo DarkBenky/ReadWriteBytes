@@ -1,0 +1,23 @@
+package main
+
+// Vertex shader: transforms vertex positions and passes texture coordinates.
+func Vertex(position vec2, texCoord vec2, color vec4) (vec4, vec2, vec4) {
+    // Convert position from pixel coordinates to normalized device coordinates
+    pos := vec4(
+        2.0 * position.x / __imageDstTextureSize.x - 1.0,
+        1.0 - 2.0 * position.y / __imageDstTextureSize.y,
+        0.0,
+        1.0,
+    )
+    return pos, texCoord, color
+}
+
+// Fragment shader: generates a vertical gradient based on the y-coordinate.
+func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
+    // Calculate gradient factor based on y-coordinate
+    factor := texCoord.y
+    // Interpolate between two colors
+    startColor := vec4(1.0, 0.0, 0.0, 1.0) // Red
+    endColor := vec4(0.0, 0.0, 1.0, 1.0)   // Blue
+    return mix(startColor, endColor, factor)
+}
