@@ -1,11 +1,11 @@
 CC = clang
-CFLAGS = -O3 -march=native -fopenmp
+CFLAGS = -O3 -march=native
 LDFLAGS = -lm
 
 all: main
 
 main: main.c
-    $(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 clean:
-    rm -f main
+	rm -f main
