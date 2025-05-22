@@ -25,6 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 ### Add Open GL to the go code to project particles on GPU directly
+- Render headlessly the image and save it in the to drive so the go code can read it
 - [ ] implement
 
 ### Add better timing
