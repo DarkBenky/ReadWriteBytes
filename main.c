@@ -10,12 +10,12 @@
 #include <omp.h>        // for OpenMP
 #include <pthread.h> // for pthreads
 
-#define NUM_PARTICLES 50000
+#define NUM_PARTICLES 150000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
-#define PARTICLE_RADIUS 6.0f
+#define PARTICLE_RADIUS 4
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
 #define temperature 10.0f
@@ -1536,37 +1536,37 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     
     float maxVelocity = 0.0f;
     
-    clock_t startProjectTimeMP = clock();
+    // clock_t startProjectTimeMP = clock();
     
-    // Assign data to the global thread data structures
-    asignDataToThreads(particles, camera, validParticles);
+    // // Assign data to the global thread data structures
+    // asignDataToThreads(particles, camera, validParticles);
     
-    // Reset max velocity for each thread
-    for (int i = 0; i < NUM_THREADS; i++) {
-        threadData[i]->maxVelocity = 0.0f;
-    }
+    // // Reset max velocity for each thread
+    // for (int i = 0; i < NUM_THREADS; i++) {
+    //     threadData[i]->maxVelocity = 0.0f;
+    // }
     
-    // Signal threads to start processing
-    for (int i = 0; i < NUM_THREADS; i++) {
-        ready[i] = 1;
-    }
+    // // Signal threads to start processing
+    // for (int i = 0; i < NUM_THREADS; i++) {
+    //     ready[i] = 1;
+    // }
     
-    // Wait until all threads have processed their data
-    for (int i = 0; i < NUM_THREADS; i++) {
-        while (ready[i]) {
-            // Busy wait or use a short sleep
-            usleep(100); // Sleep for 100 microseconds
-        }
-    }
+    // // Wait until all threads have processed their data
+    // for (int i = 0; i < NUM_THREADS; i++) {
+    //     while (ready[i]) {
+    //         // Busy wait or use a short sleep
+    //         usleep(100); // Sleep for 100 microseconds
+    //     }
+    // }
     
-    // Calculate the maximum velocity from all threads
-    for (int i = 0; i < NUM_THREADS; i++) {
-        if (threadData[i]->maxVelocity > maxVelocity) {
-            maxVelocity = threadData[i]->maxVelocity;
-        }
-    }
+    // // Calculate the maximum velocity from all threads
+    // for (int i = 0; i < NUM_THREADS; i++) {
+    //     if (threadData[i]->maxVelocity > maxVelocity) {
+    //         maxVelocity = threadData[i]->maxVelocity;
+    //     }
+    // }
     
-    printf("Multithreaded projection time: %f\n", (float)(clock() - startProjectTimeMP) / (float)CLOCKS_PER_SEC);
+    // printf("Multithreaded projection time: %f\n", (float)(clock() - startProjectTimeMP) / (float)CLOCKS_PER_SEC);
 
 
     // clock_t starProjectTimeSingle = clock();
@@ -1889,12 +1889,12 @@ int main() {
     }
 
     for (int i = 0; i < NUM_PARTICLES; i++) {
-        particles->x[i] = (float)(rand() % 75);
-        particles->y[i] = (float)(rand() % 75);
-        particles->z[i] = (float)(rand() % 75);
-        particles->xVelocity[i] = (float)(rand() % 10) / 10.0f;
-        particles->yVelocity[i] = (float)(rand() % 10) / 10.0f;
-        particles->zVelocity[i] = (float)(rand() % 10) / 10.0f;
+        particles->x[i] = (float)(rand() % 50 + 30);
+        particles->y[i] = (float)(rand() % 50);
+        particles->z[i] = (float)(rand() % 50 + 30);
+        particles->xVelocity[i] = (float)(rand() % 10) / 100.0f;
+        particles->yVelocity[i] = (float)(rand() % 10) / 100.0f;
+        particles->zVelocity[i] = (float)(rand() % 10) / 100.0f;
     }
 
     // initialize the cursor
@@ -1916,9 +1916,9 @@ int main() {
     particles->bBoxMin[0] = 0.0f;
     particles->bBoxMin[1] = 0.0f;
     particles->bBoxMin[2] = 0.0f;
-    particles->bBoxMax[0] = 75.0f;
-    particles->bBoxMax[1] = 75.0f;
-    particles->bBoxMax[2] = 75.0f;
+    particles->bBoxMax[0] = 80.0f;
+    particles->bBoxMax[1] = 80.0f;
+    particles->bBoxMax[2] = 80.0f;
 
     clearScreen(screen);
 

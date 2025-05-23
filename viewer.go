@@ -18,7 +18,7 @@ import (
 const (
 	screenWidth  = 800
 	screenHeight = 600
-	frameDelay   = 16 * time.Millisecond // Match the C program's 60 FPS
+	frameDelay   = 35 * time.Millisecond // Match the C program's 60 FPS
 
 	// Camera movement speeds
 	moveSpeed        = 0.8
