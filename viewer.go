@@ -174,6 +174,9 @@ func PlotTimePartition(screen *ebiten.Image) {
 		// Draw time value
 		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.5f", float32(seg.time)), int(startX+float64(width)+5), y+5)
 	}
+	// Print the total time and FPS of the C program
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Total Time: %.5f ms", tp.CollisionTime+tp.ApplyPressureTime+tp.UpdateParticlesTime+tp.MoveToBoxTime+tp.UpdateGridTime+tp.RenderTime+tp.ClearScreenTime+tp.ProjectParticlesTime+tp.DrawCursorTime+tp.DrawBoundingBoxTime+tp.SaveScreenTime), startX-80, startY+len(segments)*(barHeight+barSpacing)+10)
+	// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("FPS: %.1f", 1/(tp.CollisionTime+tp.ApplyPressureTime+tp.UpdateParticlesTime+tp.MoveToBoxTime+tp.UpdateGridTime+tp.RenderTime+tp.ClearScreenTime+tp.ProjectParticlesTime+tp.DrawCursorTime+tp.DrawBoundingBoxTime+tp.SaveScreenTime)), startX-80, startY+len(segments)*(barHeight+barSpacing)+30)
 }
 
 func PlotFPS(screen *ebiten.Image) {

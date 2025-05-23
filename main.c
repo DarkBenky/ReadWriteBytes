@@ -10,12 +10,12 @@
 #include <omp.h>        // for OpenMP
 #include <pthread.h> // for pthreads
 
-#define NUM_PARTICLES 150000
+#define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
-#define PARTICLE_RADIUS 4
+#define PARTICLE_RADIUS 6.0f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
 #define temperature 10.0f
@@ -133,7 +133,7 @@ struct PointSOA {
     float   yVelocity[NUM_PARTICLES];
     float   zVelocity[NUM_PARTICLES];
     float   totalVelocity[NUM_PARTICLES];
-    float   distance[NUM_PARTICLES];
+    // float   distance[NUM_PARTICLES];
     float   bBoxMin[3];
     float   bBoxMax[3];
     int     gridID[NUM_PARTICLES];
@@ -1378,7 +1378,6 @@ void calculateParticleScreenCoordinates(struct ThreadData *data) {
     }
 }
 
-/
 void heapifyParticles(struct PointSOA *particles, float *distances, int n, int i) {
     int largest = i;
     int left = 2 * i + 1;
@@ -1422,8 +1421,28 @@ void heapSortParticles(struct PointSOA *particles, float *distances, int n) {
     }
 }
 
+struct ParticleIndex {
+    int index;
+    float distance;
+};
 
-void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct TimePartition *timePartition, struct ThreadsData *threadsData) {
+struct ParticleIndexes {
+    struct ParticleIndex particleIndexes[NUM_PARTICLES];
+};
+
+// Comparison function for qsort
+int compareParticlesByDistance(const void *a, const void *b) {
+    const struct ParticleIndex *particleA = (const struct ParticleIndex *)a;
+    const struct ParticleIndex *particleB = (const struct ParticleIndex *)b;
+    
+    // Sort from farthest to nearest (descending order)
+    if (particleA->distance > particleB->distance) return 1;
+    if (particleA->distance < particleB->distance) return -1;
+    return 0;
+}
+
+
+void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes) {
     // Pre-calculate camera vectors and constants
     const float halfWidth = ScreenWidth * 0.5f;
     const float halfHeight = ScreenHeight * 0.5f;
@@ -1464,15 +1483,13 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
                          
         if (dotProduct > 0) { // Only include particles in front of camera
             float distSquared = x*x + y*y + z*z;
-            particles->distance[validParticles] = distSquared;
+            // particles->distance[validParticles] = distSquared;
+            particleIndexes->particleIndexes[validParticles].index = i;
+            particleIndexes->particleIndexes[validParticles].distance = distSquared;
             
             // Track maximum distance directly during first pass
             if (distSquared > maxDistance) {
                 maxDistance = distSquared;
-            }
-            
-            if (validParticles != i) {
-                swapParticles(particles, validParticles, i);
             }
             validParticles++;
         }
@@ -1484,12 +1501,16 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     // Sort particles using quick sort
     // quickSortParticles(particles, 0, validParticles - 1, particles->distance);
     // Use heap sort for better performance with large datasets
-    float *distances = particles->distance;
-    heapSortParticles(particles, distances, validParticles);
+    // float *distances = particles->distance;
+    // heapSortParticles(particles, distances, validParticles);
+
+    // Use qsort for simplicity
+    qsort(particleIndexes->particleIndexes, validParticles, sizeof(struct ParticleIndex), compareParticlesByDistance);
+
     clock_t endSortTime = clock();
     float dt = (float)(endSortTime - start) / (float)CLOCKS_PER_SEC;
     timePartition->sortTime += dt;
-    printf("Sorting time: %f\n", dt);
+    // printf("Sorting time: %f\n", dt);
    
     // Add maxVelocity declaration here
     // float maxVelocity = 0.0f;
@@ -1515,44 +1536,46 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     
     float maxVelocity = 0.0f;
     
-    // clock_t startProjectTimeMP = clock();
+    clock_t startProjectTimeMP = clock();
     
     // Assign data to the global thread data structures
-    // asignDataToThreads(particles, camera, validParticles);
+    asignDataToThreads(particles, camera, validParticles);
     
-    // // Reset max velocity for each thread
-    // for (int i = 0; i < NUM_THREADS; i++) {
-    //     threadData[i]->maxVelocity = 0.0f;
-    // }
+    // Reset max velocity for each thread
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threadData[i]->maxVelocity = 0.0f;
+    }
     
-    // // Signal threads to start processing
-    // for (int i = 0; i < NUM_THREADS; i++) {
-    //     ready[i] = 1;
-    // }
+    // Signal threads to start processing
+    for (int i = 0; i < NUM_THREADS; i++) {
+        ready[i] = 1;
+    }
     
-    // // Wait until all threads have processed their data
-    // for (int i = 0; i < NUM_THREADS; i++) {
-    //     while (ready[i]) {
-    //         // Busy wait or use a short sleep
-    //         usleep(100); // Sleep for 100 microseconds
-    //     }
-    // }
+    // Wait until all threads have processed their data
+    for (int i = 0; i < NUM_THREADS; i++) {
+        while (ready[i]) {
+            // Busy wait or use a short sleep
+            usleep(100); // Sleep for 100 microseconds
+        }
+    }
     
-    // // Calculate the maximum velocity from all threads
-    // for (int i = 0; i < NUM_THREADS; i++) {
-    //     if (threadData[i]->maxVelocity > maxVelocity) {
-    //         maxVelocity = threadData[i]->maxVelocity;
-    //     }
-    // }
+    // Calculate the maximum velocity from all threads
+    for (int i = 0; i < NUM_THREADS; i++) {
+        if (threadData[i]->maxVelocity > maxVelocity) {
+            maxVelocity = threadData[i]->maxVelocity;
+        }
+    }
     
-    // printf("Multithreaded projection time: %f\n", (float)(clock() - startProjectTimeMP) / CLOCKS_PER_SEC);
+    printf("Multithreaded projection time: %f\n", (float)(clock() - startProjectTimeMP) / (float)CLOCKS_PER_SEC);
 
 
     // clock_t starProjectTimeSingle = clock();
-    for (int i = 0; i < validParticles - 1; i++) {
-        float x = particles->x[i] - camX;
-        float y = particles->y[i] - camY;
-        float z = particles->z[i] - camZ;
+    // Project particles to screen coordinates using sorted indices
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        int index = particleIndexes->particleIndexes[i].index;
+        float x = particles->x[index] - camX;
+        float y = particles->y[index] - camY;
+        float z = particles->z[index] - camZ;
 
         float dotProduct = x * camDirX + y * camDirY + z * camDirZ;
         float fovScale = 1.0f / (dotProduct * camera->fov);
@@ -1562,40 +1585,41 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
 
         int screenX = (int)(screenRight * halfWidth + halfWidth);
         int screenY = (int)(-screenUp * halfHeight + halfHeight);
-
-        float vx = particles->xVelocity[i];
-        float vy = particles->yVelocity[i];
-        float vz = particles->zVelocity[i];
-
         
         if (screenX < 0 || screenX >= ScreenWidth || screenY < 0 || screenY >= ScreenHeight) continue;
 
+        // Calculate velocity
+        float vx = particles->xVelocity[index];
+        float vy = particles->yVelocity[index];
+        float vz = particles->zVelocity[index];
         float totalVelocity = vx*vx + vy*vy + vz*vz;
 
         if (totalVelocity > maxVelocity) {
             maxVelocity = totalVelocity;
         }
 
-        particles->screenX[i] = screenX;
-        particles->screenY[i] = screenY;
-        particles->totalVelocity[i] = totalVelocity;
+        particles->screenX[index] = screenX;
+        particles->screenY[index] = screenY;
+        particles->totalVelocity[index] = totalVelocity;
     }
     // printf("Single thread projection time: %f\n", (float)(clock() - starProjectTimeSingle) / CLOCKS_PER_SEC);
 
 
     clock_t endProjectTime = clock();
     dt = (float)(endProjectTime - endSortTime) / (float)CLOCKS_PER_SEC;
-    printf("Projection time: %f\n", dt);
+    // printf("Projection time: %f\n", dt);
     timePartition->projectionTime += dt;
 
     float maxOpacity = 0;
     // Process particles back-to-front (furthest to nearest)
-    for (int i = validParticles - 1; i >= 0; i--) {       
-        int screenX = particles->screenX[i];
-        int screenY = particles->screenY[i];
+    for (int i = validParticles - 1; i >= 0; i--) {    
+        int index = particleIndexes->particleIndexes[i].index;
+        
+        int screenX = particles->screenX[index];
+        int screenY = particles->screenY[index];
 
         // Fast distance approximation using squared distance
-        float distSquared = particles->distance[i];
+        float distSquared = particleIndexes->particleIndexes[i].distance;
         
         // Use inverse square root approximation if available for speed
         float invDist = 1.0f / (sqrtf(distSquared) + 10.0f);
@@ -1614,7 +1638,7 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         if (minX < 0 || maxX >= ScreenWidth || minY < 0 || maxY >= ScreenHeight) continue;
         
         // Calculate particle color once
-        uint8_t NormalizedVelocity = (uint8_t)(255 * (1.0f - (particles->totalVelocity[i] / maxVelocity)));
+        uint8_t NormalizedVelocity = (uint8_t)(255 * (1.0f - (particles->totalVelocity[index] / maxVelocity)));
         uint8_t distanceNormalized = (uint8_t)(255 * (1.0f - (distSquared / maxDistance)));
 
         // Track maximum values
@@ -1633,7 +1657,7 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     clock_t renderDistanceVelocity = clock();
     dt = (float)(renderDistanceVelocity - endProjectTime) / (float)CLOCKS_PER_SEC;
     timePartition->renderDistanceVelocityTime += dt;
-    printf("Render distance and velocity time: %f\n", dt);
+    // printf("Render distance and velocity time: %f\n", dt);
     
 
     // Pre-calculate normalization factors to avoid repeated calculations
@@ -1653,7 +1677,7 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     clock_t renderOpacityTime = clock();
     dt = (float)(renderOpacityTime - renderDistanceVelocity) / (float)CLOCKS_PER_SEC;
     timePartition->renderOpacityTime += dt;
-    printf("Render opacity time: %f\n", dt);
+    // printf("Render opacity time: %f\n", dt);
 }
 
 
@@ -1690,7 +1714,7 @@ void saveScreen(struct Screen *screen, const char *filename) {
     fclose(file);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
     clearScreen(screen);
@@ -1698,34 +1722,34 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
 
     float dt = (float)(clearScreenTime - start) / (float)CLOCKS_PER_SEC;
     timePartition->clearScreenTime += dt;
-    printf("Clear screen time: %f\n", dt);
+    // printf("Clear screen time: %f\n", dt);
 
-    projectParticles(particles, camera, screen, timePartition, threadsData);
+    projectParticles(particles, camera, screen, timePartition, threadsData, particleIndexes);
     int projectParticlesTime = clock();
 
     dt = (float)(projectParticlesTime - clearScreenTime) / (float)CLOCKS_PER_SEC;
     timePartition->projectParticlesTime += dt;
-    printf("Project particles time: %f\n", dt);
+    // printf("Project particles time: %f\n", dt);
 
     drawCursor(screen, cursor, camera);
     int drawCursorTime = clock();
 
     dt = (float)(drawCursorTime - projectParticlesTime) / (float)CLOCKS_PER_SEC;
     timePartition->drawCursorTime += dt;
-    printf("Draw cursor time: %f\n", dt);
+    // printf("Draw cursor time: %f\n", dt);
 
     drawBoundingBox(screen, particles->bBoxMax, particles->bBoxMin, camera);
     int drawBoundingBoxTime = clock();
 
     dt = (float)(drawBoundingBoxTime - drawCursorTime) / (float)CLOCKS_PER_SEC;
     timePartition->drawBoundingBoxTime += dt;
-    printf("Draw bounding box time: %f\n", dt);
+    // printf("Draw bounding box time: %f\n", dt);
     
     saveScreen(screen, "output.bin");
     int saveScreenTime = clock();
     dt = (float)(saveScreenTime - drawBoundingBoxTime) / (float)CLOCKS_PER_SEC;
     timePartition->saveScreenTime += dt;
-    printf("Save screen time: %f\n", dt);
+    // printf("Save screen time: %f\n", dt);
 }
 
 void addForce(struct PointSOA *particles, struct Cursor *cursor) {
@@ -1756,22 +1780,26 @@ void update_particles(struct PointSOA *particles, float dt, struct TimePartition
     clock_t start = clock();
     CollideParticlesInGrid(particles);
     clock_t collideParticlesTime = clock();
-    timePartition->collisionTime = ((collideParticlesTime - start)  / CLOCKS_PER_SEC) * 0.25f + timePartition->collisionTime * 0.75f;
+    float dt_ = (float)(collideParticlesTime - start) / (float)CLOCKS_PER_SEC;
+    timePartition->collisionTime += dt_;
     
     ApplyPressure(particles);
     clock_t applyPressureTime = clock();
-    timePartition->applyPressureTime = ((applyPressureTime - collideParticlesTime)  / CLOCKS_PER_SEC) * 0.25 + timePartition->applyPressureTime * 0.75f;
+    dt = (float)(applyPressureTime - collideParticlesTime) / (float)CLOCKS_PER_SEC;
+    timePartition->applyPressureTime += dt_;
     
     addForce(particles, cursor);
 
     update_particle_apply_gravity(particles,dt);
     
     clock_t updateParticlesTime = clock();
-    timePartition->updateParticlesTime = ((updateParticlesTime - applyPressureTime)  / CLOCKS_PER_SEC) * 0.25f + timePartition->updateParticlesTime * 0.75f;
+    dt = (float)(updateParticlesTime - applyPressureTime) / (float)CLOCKS_PER_SEC;
+    timePartition->updateParticlesTime += dt_;
     
     move_to_box(particles, particles->bBoxMin, particles->bBoxMax);
     clock_t moveToBoxTime = clock();
-    timePartition->moveToBoxTime = (((moveToBoxTime - updateParticlesTime)  / CLOCKS_PER_SEC) * 0.25f + timePartition->moveToBoxTime * 0.75f);
+    dt = (float)(moveToBoxTime - updateParticlesTime) / (float)CLOCKS_PER_SEC;
+    timePartition->moveToBoxTime += dt_;
 }
 
 // read the pause.bin
@@ -1800,6 +1828,13 @@ int main() {
     camera.ray.direction[1] = 0.0f;
     camera.ray.direction[2] = 1.0f;
     camera.fov = 1.0f;
+
+    // initialize the particles indexes
+    struct ParticleIndexes *particleIndexes = (struct ParticleIndexes *)malloc(sizeof(struct ParticleIndexes));
+    if (!particleIndexes) {
+        perror("Failed to allocate memory for particle indexes");
+        return 1;
+    }
 
 
     // Initialize threadData array before creating threads
@@ -1854,9 +1889,9 @@ int main() {
     }
 
     for (int i = 0; i < NUM_PARTICLES; i++) {
-        particles->x[i] = (float)(rand() % 100);
-        particles->y[i] = (float)(rand() % 100);
-        particles->z[i] = (float)(rand() % 100);
+        particles->x[i] = (float)(rand() % 75);
+        particles->y[i] = (float)(rand() % 75);
+        particles->z[i] = (float)(rand() % 75);
         particles->xVelocity[i] = (float)(rand() % 10) / 10.0f;
         particles->yVelocity[i] = (float)(rand() % 10) / 10.0f;
         particles->zVelocity[i] = (float)(rand() % 10) / 10.0f;
@@ -1881,9 +1916,9 @@ int main() {
     particles->bBoxMin[0] = 0.0f;
     particles->bBoxMin[1] = 0.0f;
     particles->bBoxMin[2] = 0.0f;
-    particles->bBoxMax[0] = 150.0f;
-    particles->bBoxMax[1] = 150.0f;
-    particles->bBoxMax[2] = 150.0f;
+    particles->bBoxMax[0] = 75.0f;
+    particles->bBoxMax[1] = 75.0f;
+    particles->bBoxMax[2] = 75.0f;
 
     clearScreen(screen);
 
@@ -1906,12 +1941,14 @@ int main() {
     while (1) {
         // Calculate delta step based on elapsed time since the last frame
         clock_t currentTime = clock();
-        float dt = (float)(currentTime - lastTime) / CLOCKS_PER_SEC;
+        float dt = (float)(currentTime - lastTime) / (float)CLOCKS_PER_SEC;
+        float TPS = 1.0f / dt;
         // Cap dt to avoid instability for long delays (e.g., if paused)
         if (dt > 0.1f) dt = 0.1f;
+        // dt = 0.1f;
         lastTime = currentTime;
         
-        int loopStartTime = clock();
+        clock_t loopStartTime = clock();
         
         readCameraData(&camera);
         readCursorData(cursor);
@@ -1919,11 +1956,11 @@ int main() {
         
         // Update the grid data and record timing
         // First, update the grid data regardless of pause state
-        int startGridTime = clock();
+        clock_t startGridTime = clock();
         updateGridData(particles);
-        int endGridTime = clock();
-        timePartition->updateGridTime = ((endGridTime - startGridTime) / CLOCKS_PER_SEC) * 0.25f +
-                                        timePartition->updateGridTime * 0.75f;
+        clock_t endGridTime = clock();
+        float dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;  
+        timePartition->updateGridTime += dt1;
 
         // Only update particles if NOT paused
         if (!paused) {
@@ -1932,27 +1969,26 @@ int main() {
             printf("Simulation paused, skipping update\n");
         }
         
-        int afterUpdateTime = clock();
-        float averageUpdateTime = (afterUpdateTime - loopStartTime) / CLOCKS_PER_SEC;
+        clock_t afterUpdateTime = clock();
+        float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
         
-        int startRenderTime = clock();
-        render(screen, particles, &camera, cursor, timePartition, threadsData);
-        int endRenderTime = clock();
-        timePartition->renderTime = (float)((endRenderTime - startRenderTime)  / CLOCKS_PER_SEC) * 0.25f +
-                                    timePartition->renderTime * 0.75f;
+        clock_t startRenderTime = clock();
+        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes);
+        clock_t endRenderTime = clock();
+        dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
+        timePartition->renderTime += dt1;
 
-
-        float frameTime = (float)(endRenderTime - startRenderTime) / CLOCKS_PER_SEC;
-        float currentFPS = 1.0f / frameTime;
+    
+        float currentFPS = 1.0f / dt1;
         
         if (frameCount < FrameCount) {
             averageFPS[frameCount] = currentFPS;
         }
         
-        float averageRenderTime = (endRenderTime - startRenderTime) / CLOCKS_PER_SEC;
+        float averageRenderTime = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
         
-        printf("FPS: %.2f, dt: %.4f, Update: %f ms, Render: %f ms\n", 
-               currentFPS, dt,
+        printf("FPS: %.2f, TPS: %.4f, Update: %f ms, Render: %f ms\n", 
+               currentFPS, TPS,
                (averageUpdateTime),
                (averageRenderTime));
         
@@ -1964,10 +2000,44 @@ int main() {
                 fclose(fpsFile);
             }
             FILE *timeFile = fopen("time_partition.bin", "wb");
+
+            // average the time partition data
+            timePartition->collisionTime /= FrameCount;
+            timePartition->applyPressureTime /= FrameCount;
+            timePartition->updateParticlesTime /= FrameCount;
+            timePartition->moveToBoxTime /= FrameCount;
+            timePartition->updateGridTime /= FrameCount;
+            timePartition->renderTime /= FrameCount;
+            timePartition->clearScreenTime /= FrameCount;
+            timePartition->projectParticlesTime /= FrameCount;
+            timePartition->drawCursorTime /= FrameCount;
+            timePartition->drawBoundingBoxTime /= FrameCount;
+            timePartition->saveScreenTime /= FrameCount;
+            timePartition->sortTime /= FrameCount;
+            timePartition->projectionTime /= FrameCount;
+            timePartition->renderDistanceVelocityTime /= FrameCount;
+            timePartition->renderOpacityTime /= FrameCount;
+            // Write the averaged data to the file
             if (timeFile) {
                 fwrite(timePartition, sizeof(struct TimePartition), 1, timeFile);
                 fclose(timeFile);
             }
+            // Reset the time partition data
+            timePartition->collisionTime = 0;
+            timePartition->applyPressureTime = 0;
+            timePartition->updateParticlesTime = 0;
+            timePartition->moveToBoxTime = 0;
+            timePartition->updateGridTime = 0;
+            timePartition->renderTime = 0;
+            timePartition->clearScreenTime = 0;
+            timePartition->projectParticlesTime = 0;
+            timePartition->drawCursorTime = 0;
+            timePartition->drawBoundingBoxTime = 0;
+            timePartition->saveScreenTime = 0;
+            timePartition->sortTime = 0;
+            timePartition->projectionTime = 0;
+            timePartition->renderDistanceVelocityTime = 0;
+            timePartition->renderOpacityTime = 0;
         }
         frameCount++;
     }
