@@ -1645,8 +1645,29 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         float currentOpacity = (float)(screen->opacity[screenX][screenY]) + 1.0f;
         if (currentOpacity > maxOpacity) maxOpacity = currentOpacity;
 
-        for (int px = minX; px <= maxX; px++) {
-            for (int py = minY; py <= maxY; py++) {
+        // for (int px = minX; px <= maxX; px++) {
+        //     for (int py = minY; py <= maxY; py++) {
+        //         screen->distance[px][py] = distanceNormalized;
+        //         screen->velocity[px][py] = NormalizedVelocity;
+        //         screen->opacity[px][py]++;
+        //     }
+        // }
+        // Draw a filled circle centered at (screenX, screenY)
+        int radiusSquared = particleRadius * particleRadius;
+        for (int dy = -particleRadius; dy <= particleRadius; dy++) {
+            int py = screenY + dy;
+            if (py < 0 || py >= ScreenHeight) continue;
+
+            // Precompute dy^2
+            int dy2 = dy * dy;
+
+            for (int dx = -particleRadius; dx <= particleRadius; dx++) {
+                int dx2 = dx * dx;
+                if (dx2 + dy2 > radiusSquared) continue; // skip outside circle
+
+                int px = screenX + dx;
+                if (px < 0 || px >= ScreenWidth) continue;
+
                 screen->distance[px][py] = distanceNormalized;
                 screen->velocity[px][py] = NormalizedVelocity;
                 screen->opacity[px][py]++;
