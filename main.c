@@ -23,14 +23,42 @@
 #define FrameCount 30
 #define NUM_THREADS 16
 pthread_t threads[NUM_THREADS];
+
+#define DISABLE_MP_PROJECT_PARTICLES 0
 struct ThreadData* threadData[NUM_THREADS];
 volatile int ready[NUM_THREADS];
 volatile int done[NUM_THREADS];
 static int threadIds[NUM_THREADS];
 
+#define DISABLE_MP_COLLIDE_PARTICLES 0
+struct ThreadDataCollideParticles {
+    struct PointSOA *particles;
+    int startGridId;  // Changed from startIdx/endIdx to gridId range
+    int endGridId;
+    pthread_t thread;  // Add thread handle
+};
+
+
+volatile int collisionReady[NUM_THREADS];
+volatile int collisionDone[NUM_THREADS];
+struct ThreadDataCollideParticles* collisionThreadData[NUM_THREADS];
+
+void initializeCollisionThreads() {
+    for (int i = 0; i < NUM_THREADS; i++) {
+        collisionReady[i] = 0;
+        collisionDone[i] = 0;
+        collisionThreadData[i] = (struct ThreadDataCollideParticles*)malloc(sizeof(struct ThreadDataCollideParticles));
+        if (!collisionThreadData[i]) {
+            printf("Failed to allocate collision thread data for thread %d\n", i);
+            exit(1);
+        }
+    }
+}
+
 // Function prototypes
 void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
+void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
 
 void createThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -45,14 +73,11 @@ void *threadFunction(void *arg) {
     int threadId = *(int *)arg;
     
     while (!done[threadId]) {
-        // Wait for signal to process data
-        while (!ready[threadId] && !done[threadId]) {
-            // Remove sleep or use a more efficient wait strategy
-            // Consider using compiler intrinsics for a brief pause
+        // Wait for either projection or collision work
+        while (!ready[threadId] && !collisionReady[threadId] && !done[threadId]) {
             #if defined(__x86_64__) || defined(__i386__)
                 __builtin_ia32_pause();
             #else
-                // Shorter sleep time for non-x86 platforms
                 usleep(100); 
             #endif
         }
@@ -61,11 +86,19 @@ void *threadFunction(void *arg) {
             break;
         }
         
-        // Process data
-        calculateParticleScreenCoordinates(threadData[threadId]);
+        // Handle projection work
+        if (DISABLE_MP_PROJECT_PARTICLES == 1) {
+            if (ready[threadId]) {
+                calculateParticleScreenCoordinates(threadData[threadId]);
+                ready[threadId] = 0;
+            }
+        }
         
-        // Signal that processing is complete
-        ready[threadId] = 0;
+        // Handle collision work
+        if (collisionReady[threadId]) {
+            CollideParticlesInGridInThread(collisionThreadData[threadId]);
+            collisionReady[threadId] = 0;
+        }
     }
     
     return NULL;
@@ -76,8 +109,14 @@ void joinThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
         done[i] = 1;
         pthread_join(threads[i], NULL);
+        
+        // Free collision thread data
+        if (collisionThreadData[i]) {
+            free(collisionThreadData[i]);
+        }
     }
 }
+
 
 
 struct Screen {
@@ -122,6 +161,7 @@ struct TimePartition {
     float projectionTime;
     float renderDistanceVelocityTime;
     float renderOpacityTime;
+    float readDataTime;
 };
 
 
@@ -470,7 +510,9 @@ void readCursorData(struct Cursor *cursor) {
 //     }
 // }
 
-void CollideParticlesInGrid(struct PointSOA *particles) {
+void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data) {
+    struct PointSOA *particles = data->particles;
+    
     // Constants as AVX vectors
     const __m256 particleRadiusVec = _mm256_set1_ps(PARTICLE_RADIUS);
     const __m256 minDistVec = _mm256_set1_ps(3.0f * PARTICLE_RADIUS);
@@ -479,12 +521,13 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
     const __m256 dampingVec = _mm256_set1_ps(DAMPING);
     const __m256 correctionFactorVec = _mm256_set1_ps(0.01f);
     const __m256 zeroVec = _mm256_setzero_ps();
-    
-    for (int gridId = 0; gridId < gridResolution; gridId++) {
+
+    // Process assigned grid cells
+    for (int gridId = data->startGridId; gridId < data->endGridId; gridId++) {
         int startIdx = particles->startIndex[gridId];
         if (startIdx == -1) continue; // No particles in this grid cell
         int endIdx = startIdx + particles->numberOfParticle[gridId];
-        
+
         // Check collisions between all particles in this cell
         for (int i = startIdx; i < endIdx; i++) {
             // Load particle i data once
@@ -650,6 +693,232 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
                                 particles->x[jIdx] += nx * correction;
                                 particles->y[jIdx] += ny * correction;
                                 particles->z[jIdx] += nz * correction;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void CollideParticlesInGrid(struct PointSOA *particles) {
+    if (DISABLE_MP_COLLIDE_PARTICLES == 0 ) {
+        clock_t startTime = clock();
+        int gridCellsPerThread = gridResolution / NUM_THREADS;
+        int remainder = gridResolution % NUM_THREADS;
+        
+        // Assign work to existing threads
+        int startGridId = 0;
+        for (int i = 0; i < NUM_THREADS; i++) {
+            int cellsForThisThread = gridCellsPerThread + (i < remainder ? 1 : 0);
+            
+            collisionThreadData[i]->particles = particles;
+            collisionThreadData[i]->startGridId = startGridId;
+            collisionThreadData[i]->endGridId = startGridId + cellsForThisThread;
+            
+            startGridId += cellsForThisThread;
+        }
+        
+        // Signal threads to start collision processing
+        for (int i = 0; i < NUM_THREADS; i++) {
+            collisionReady[i] = 1;
+        }
+        
+        // Wait for all threads to complete collision work
+        for (int i = 0; i < NUM_THREADS; i++) {
+            while (collisionReady[i]) {
+                #if defined(__x86_64__) || defined(__i386__)
+                    __builtin_ia32_pause();
+                #else
+                    usleep(100);
+                #endif
+            }
+        }
+        // printf("Time taken to collide particles MultiTreaded: %f seconds\n", (float)(clock() - startTime) / CLOCKS_PER_SEC);
+    }
+    else {
+        // Constants as AVX vectors
+        clock_t startTime = clock();
+        const __m256 particleRadiusVec = _mm256_set1_ps(PARTICLE_RADIUS);
+        const __m256 minDistVec = _mm256_set1_ps(3.0f * PARTICLE_RADIUS);
+        const __m256 minDistSquaredVec = _mm256_mul_ps(minDistVec, minDistVec);
+        const __m256 halfVec = _mm256_set1_ps(0.5f);
+        const __m256 dampingVec = _mm256_set1_ps(DAMPING);
+        const __m256 correctionFactorVec = _mm256_set1_ps(0.01f);
+        const __m256 zeroVec = _mm256_setzero_ps();
+        
+        for (int gridId = 0; gridId < gridResolution; gridId++) {
+            int startIdx = particles->startIndex[gridId];
+            if (startIdx == -1) continue; // No particles in this grid cell
+            int endIdx = startIdx + particles->numberOfParticle[gridId];
+            
+            // Check collisions between all particles in this cell
+            for (int i = startIdx; i < endIdx; i++) {
+                // Load particle i data once
+                __m256 xi = _mm256_set1_ps(particles->x[i]);
+                __m256 yi = _mm256_set1_ps(particles->y[i]);
+                __m256 zi = _mm256_set1_ps(particles->z[i]);
+                __m256 vxi = _mm256_set1_ps(particles->xVelocity[i]);
+                __m256 vyi = _mm256_set1_ps(particles->yVelocity[i]);
+                __m256 vzi = _mm256_set1_ps(particles->zVelocity[i]);
+                
+                // Process 8 particles at a time where possible
+                for (int j = i + 1; j < endIdx; j += 8) {
+                    int remaining = endIdx - j;
+                    if (remaining >= 8) {
+                        // Load 8 particles at once
+                        __m256 xj = _mm256_loadu_ps(&particles->x[j]);
+                        __m256 yj = _mm256_loadu_ps(&particles->y[j]);
+                        __m256 zj = _mm256_loadu_ps(&particles->z[j]);
+                        
+                        // Calculate distance vectors
+                        __m256 dx = _mm256_sub_ps(xj, xi);
+                        __m256 dy = _mm256_sub_ps(yj, yi);
+                        __m256 dz = _mm256_sub_ps(zj, zi);
+                        
+                        // Calculate squared distance
+                        __m256 distSquared = _mm256_add_ps(
+                            _mm256_add_ps(
+                                _mm256_mul_ps(dx, dx),
+                                _mm256_mul_ps(dy, dy)
+                            ),
+                            _mm256_mul_ps(dz, dz)
+                        );
+                        
+                        // Compare with minimum distance squared
+                        __m256 collisionMask = _mm256_cmp_ps(distSquared, minDistSquaredVec, _CMP_LT_OQ);
+                        
+                        // Skip to next batch if no collisions
+                        if (_mm256_testz_ps(collisionMask, collisionMask)) {
+                            continue;
+                        }
+                        
+                        // Get mask as integer for processing individual lanes
+                        int mask = _mm256_movemask_ps(collisionMask);
+                        
+                        // Process collisions for each set bit in the mask
+                        for (int k = 0; k < 8; k++) {
+                            if (mask & (1 << k)) {
+                                int jIdx = j + k;
+                                
+                                // Recalculate with scalar math for this specific pair
+                                float dx_s = particles->x[jIdx] - particles->x[i];
+                                float dy_s = particles->y[jIdx] - particles->y[i];
+                                float dz_s = particles->z[jIdx] - particles->z[i];
+                                
+                                float distSquared_s = dx_s*dx_s + dy_s*dy_s + dz_s*dz_s;
+                                float minDist = 3.0f * PARTICLE_RADIUS;
+                                
+                                // Double-check collision (should always be true due to mask)
+                                if (distSquared_s < minDist * minDist) {
+                                    // Calculate collision normal
+                                    float dist = sqrtf(distSquared_s);
+                                    float nx = dx_s / dist;
+                                    float ny = dy_s / dist;
+                                    float nz = dz_s / dist;
+                                    
+                                    // Calculate relative velocity along normal
+                                    float vx = particles->xVelocity[jIdx] - particles->xVelocity[i];
+                                    float vy = particles->yVelocity[jIdx] - particles->yVelocity[i];
+                                    float vz = particles->zVelocity[jIdx] - particles->zVelocity[i];
+                                    
+                                    float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
+                                    
+                                    // Only collide if particles are moving toward each other
+                                    if (velocityAlongNormal < 0) {
+                                        // Calculate impulse scalar (assuming equal mass)
+                                        float impulse = -2.0f * velocityAlongNormal;
+                                        
+                                        // Apply impulse
+                                        particles->xVelocity[i] -= impulse * nx * 0.5f;
+                                        particles->yVelocity[i] -= impulse * ny * 0.5f;
+                                        particles->zVelocity[i] -= impulse * nz * 0.5f;
+                                        
+                                        particles->xVelocity[jIdx] += impulse * nx * 0.5f;
+                                        particles->yVelocity[jIdx] += impulse * ny * 0.5f;
+                                        particles->zVelocity[jIdx] += impulse * nz * 0.5f;
+                                        
+                                        // Add some damping to collision
+                                        particles->xVelocity[i] *= DAMPING;
+                                        particles->yVelocity[i] *= DAMPING;
+                                        particles->zVelocity[i] *= DAMPING;
+                                        
+                                        particles->xVelocity[jIdx] *= DAMPING;
+                                        particles->yVelocity[jIdx] *= DAMPING;
+                                        particles->zVelocity[jIdx] *= DAMPING;
+                                        
+                                        // Push particles apart to avoid sticking
+                                        float correction = (minDist - dist) * 0.01f;
+                                        particles->x[i] -= nx * correction;
+                                        particles->y[i] -= ny * correction;
+                                        particles->z[i] -= nz * correction;
+                                        
+                                        particles->x[jIdx] += nx * correction;
+                                        particles->y[jIdx] += ny * correction;
+                                        particles->z[jIdx] += nz * correction;
+                                        
+                                        // Update cached values for particle i
+                                        xi = _mm256_set1_ps(particles->x[i]);
+                                        yi = _mm256_set1_ps(particles->y[i]);
+                                        zi = _mm256_set1_ps(particles->z[i]);
+                                        vxi = _mm256_set1_ps(particles->xVelocity[i]);
+                                        vyi = _mm256_set1_ps(particles->yVelocity[i]);
+                                        vzi = _mm256_set1_ps(particles->zVelocity[i]);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Handle remaining particles with scalar code
+                        for (int jIdx = j; jIdx < endIdx; jIdx++) {
+                            float dx = particles->x[jIdx] - particles->x[i];
+                            float dy = particles->y[jIdx] - particles->y[i];
+                            float dz = particles->z[jIdx] - particles->z[i];
+                            
+                            float distSquared = dx*dx + dy*dy + dz*dz;
+                            float minDist = 3.0f * PARTICLE_RADIUS;
+                            
+                            if (distSquared < minDist * minDist) {
+                                float dist = sqrtf(distSquared);
+                                float nx = dx / dist;
+                                float ny = dy / dist;
+                                float nz = dz / dist;
+                                
+                                float vx = particles->xVelocity[jIdx] - particles->xVelocity[i];
+                                float vy = particles->yVelocity[jIdx] - particles->yVelocity[i];
+                                float vz = particles->zVelocity[jIdx] - particles->zVelocity[i];
+                                
+                                float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
+                                
+                                if (velocityAlongNormal < 0) {
+                                    float impulse = -2.0f * velocityAlongNormal;
+                                    
+                                    particles->xVelocity[i] -= impulse * nx * 0.5f;
+                                    particles->yVelocity[i] -= impulse * ny * 0.5f;
+                                    particles->zVelocity[i] -= impulse * nz * 0.5f;
+                                    
+                                    particles->xVelocity[jIdx] += impulse * nx * 0.5f;
+                                    particles->yVelocity[jIdx] += impulse * ny * 0.5f;
+                                    particles->zVelocity[jIdx] += impulse * nz * 0.5f;
+                                    
+                                    particles->xVelocity[i] *= DAMPING;
+                                    particles->yVelocity[i] *= DAMPING;
+                                    particles->zVelocity[i] *= DAMPING;
+                                    
+                                    particles->xVelocity[jIdx] *= DAMPING;
+                                    particles->yVelocity[jIdx] *= DAMPING;
+                                    particles->zVelocity[jIdx] *= DAMPING;
+                                    
+                                    float correction = (minDist - dist) * 0.01f;
+                                    particles->x[i] -= nx * correction;
+                                    particles->y[i] -= ny * correction;
+                                    particles->z[i] -= nz * correction;
+                                    
+                                    particles->x[jIdx] += nx * correction;
+                                    particles->y[jIdx] += ny * correction;
+                                    particles->z[jIdx] += nz * correction;
+                                }
                             }
                         }
                     }
@@ -996,44 +1265,196 @@ void ApplyPressure(struct PointSOA *particles) {
 // }
 
 // Use radix sort for better performance with integer keys
+// void radixSortParticles(struct PointSOA *particles, int n) {
+//     // Find the maximum number to know the number of digits
+//     int maxVal = 0;
+//     for (int i = 0; i < n; i++) {
+//         if (particles->gridID[i] > maxVal) {
+//             maxVal = particles->gridID[i];
+//         }
+//     }
+    
+//     // Temporary arrays for sorting
+//     float* tempX = (float*)malloc(n * sizeof(float));
+//     float* tempY = (float*)malloc(n * sizeof(float));
+//     float* tempZ = (float*)malloc(n * sizeof(float));
+//     float* tempVX = (float*)malloc(n * sizeof(float));
+//     float* tempVY = (float*)malloc(n * sizeof(float));
+//     float* tempVZ = (float*)malloc(n * sizeof(float));
+//     int* tempGridID = (int*)malloc(n * sizeof(int));
+    
+//     // Do counting sort for every digit
+//     for (int exp = 1; maxVal / exp > 0; exp *= 10) {
+//         int count[10] = {0};
+        
+//         // Count occurrences of each digit at current place value
+//         for (int i = 0; i < n; i++) {
+//             count[(particles->gridID[i] / exp) % 10]++;
+//         }
+        
+//         // Compute cumulative count (positions)
+//         for (int i = 1; i < 10; i++) {
+//             count[i] += count[i - 1];
+//         }
+        
+//         // Build the output array in reverse order to maintain stability
+//         for (int i = n - 1; i >= 0; i--) {
+//             int digit = (particles->gridID[i] / exp) % 10;
+//             int pos = --count[digit];
+            
+//             // Copy the data to temporary arrays
+//             tempX[pos] = particles->x[i];
+//             tempY[pos] = particles->y[i];
+//             tempZ[pos] = particles->z[i];
+//             tempVX[pos] = particles->xVelocity[i];
+//             tempVY[pos] = particles->yVelocity[i];
+//             tempVZ[pos] = particles->zVelocity[i];
+//             tempGridID[pos] = particles->gridID[i];
+//         }
+        
+//         // Copy back to original arrays
+//         for (int i = 0; i < n; i++) {
+//             particles->x[i] = tempX[i];
+//             particles->y[i] = tempY[i];
+//             particles->z[i] = tempZ[i];
+//             particles->xVelocity[i] = tempVX[i];
+//             particles->yVelocity[i] = tempVY[i];
+//             particles->zVelocity[i] = tempVZ[i];
+//             particles->gridID[i] = tempGridID[i];
+//         }
+//     }
+    
+//     // Free temporary arrays
+//     free(tempX);
+//     free(tempY);
+//     free(tempZ);
+//     free(tempVX);
+//     free(tempVY);
+//     free(tempVZ);
+//     free(tempGridID);
+// }
+
 void radixSortParticles(struct PointSOA *particles, int n) {
-    // Find the maximum number to know the number of digits
+    // Early exit for small arrays
+    if (n <= 1) return;
+    
+    // Find the maximum number to know the number of digits - vectorized
     int maxVal = 0;
-    for (int i = 0; i < n; i++) {
+    int i;
+    
+    // Process 8 values at once with AVX
+    __m256i maxVec = _mm256_setzero_si256();
+    for (i = 0; i <= n - 8; i += 8) {
+        __m256i gridVec = _mm256_loadu_si256((__m256i*)&particles->gridID[i]);
+        maxVec = _mm256_max_epi32(maxVec, gridVec);
+    }
+    
+    // Extract max from vector
+    int maxArray[8] __attribute__((aligned(32)));
+    _mm256_store_si256((__m256i*)maxArray, maxVec);
+    for (int j = 0; j < 8; j++) {
+        if (maxArray[j] > maxVal) maxVal = maxArray[j];
+    }
+    
+    // Handle remaining elements
+    for (; i < n; i++) {
         if (particles->gridID[i] > maxVal) {
             maxVal = particles->gridID[i];
         }
     }
     
-    // Temporary arrays for sorting
-    float* tempX = (float*)malloc(n * sizeof(float));
-    float* tempY = (float*)malloc(n * sizeof(float));
-    float* tempZ = (float*)malloc(n * sizeof(float));
-    float* tempVX = (float*)malloc(n * sizeof(float));
-    float* tempVY = (float*)malloc(n * sizeof(float));
-    float* tempVZ = (float*)malloc(n * sizeof(float));
-    int* tempGridID = (int*)malloc(n * sizeof(int));
+    // Early exit if all values are the same
+    if (maxVal == 0) return;
     
-    // Do counting sort for every digit
-    for (int exp = 1; maxVal / exp > 0; exp *= 10) {
-        int count[10] = {0};
+    // Calculate number of bits needed instead of decimal digits
+    int numBits = 0;
+    int temp = maxVal;
+    while (temp > 0) {
+        numBits++;
+        temp >>= 1;
+    }
+    
+    // Use stack allocation for small arrays, heap for large
+    const int STACK_THRESHOLD = 8192; // 8KB threshold
+    bool useStack = (n * sizeof(float) * 7 < STACK_THRESHOLD);
+    
+    float *tempX, *tempY, *tempZ, *tempVX, *tempVY, *tempVZ;
+    int *tempGridID;
+    
+    if (useStack && n <= STACK_THRESHOLD / (sizeof(float) * 7)) {
+        // Use stack allocation for better cache performance
+        float stackX[STACK_THRESHOLD / (sizeof(float) * 7)];
+        float stackY[STACK_THRESHOLD / (sizeof(float) * 7)];
+        float stackZ[STACK_THRESHOLD / (sizeof(float) * 7)];
+        float stackVX[STACK_THRESHOLD / (sizeof(float) * 7)];
+        float stackVY[STACK_THRESHOLD / (sizeof(float) * 7)];
+        float stackVZ[STACK_THRESHOLD / (sizeof(float) * 7)];
+        int stackGridID[STACK_THRESHOLD / (sizeof(float) * 7)];
         
-        // Count occurrences of each digit at current place value
+        tempX = stackX;
+        tempY = stackY;
+        tempZ = stackZ;
+        tempVX = stackVX;
+        tempVY = stackVY;
+        tempVZ = stackVZ;
+        tempGridID = stackGridID;
+    } else {
+        // Allocate all temporary arrays at once for better memory locality
+        size_t totalSize = n * (6 * sizeof(float) + sizeof(int));
+        char *tempBuffer = (char*)malloc(totalSize);
+        if (!tempBuffer) {
+            printf("Failed to allocate memory for radix sort\n");
+            return;
+        }
+        
+        tempX = (float*)tempBuffer;
+        tempY = (float*)(tempBuffer + n * sizeof(float));
+        tempZ = (float*)(tempBuffer + 2 * n * sizeof(float));
+        tempVX = (float*)(tempBuffer + 3 * n * sizeof(float));
+        tempVY = (float*)(tempBuffer + 4 * n * sizeof(float));
+        tempVZ = (float*)(tempBuffer + 5 * n * sizeof(float));
+        tempGridID = (int*)(tempBuffer + 6 * n * sizeof(float));
+    }
+    
+    // Use 8-bit radix for better performance - define as enum to avoid VLA warning
+    enum { RADIX_BITS = 8, RADIX_SIZE = 256 };
+    
+    // Calculate number of passes needed
+    int numPasses = (numBits + RADIX_BITS - 1) / RADIX_BITS;
+    
+    for (int pass = 0; pass < numPasses; pass++) {
+        int shift = pass * RADIX_BITS;
+        
+        // Skip this pass if all values have 0 in this position
+        bool hasNonZero = false;
+        for (int i = 0; i < n && !hasNonZero; i++) {
+            if ((particles->gridID[i] >> shift) & (RADIX_SIZE - 1)) {
+                hasNonZero = true;
+            }
+        }
+        if (!hasNonZero) continue;
+        
+        // Fixed-size count array - no VLA warning
+        int count[RADIX_SIZE];
+        memset(count, 0, sizeof(count));
+        
+        // Count occurrences - vectorized counting
         for (int i = 0; i < n; i++) {
-            count[(particles->gridID[i] / exp) % 10]++;
+            int digit = (particles->gridID[i] >> shift) & (RADIX_SIZE - 1);
+            count[digit]++;
         }
         
         // Compute cumulative count (positions)
-        for (int i = 1; i < 10; i++) {
+        for (int i = 1; i < RADIX_SIZE; i++) {
             count[i] += count[i - 1];
         }
         
         // Build the output array in reverse order to maintain stability
         for (int i = n - 1; i >= 0; i--) {
-            int digit = (particles->gridID[i] / exp) % 10;
+            int digit = (particles->gridID[i] >> shift) & (RADIX_SIZE - 1);
             int pos = --count[digit];
             
-            // Copy the data to temporary arrays
+            // Copy data - this could be optimized with SIMD for larger chunks
             tempX[pos] = particles->x[i];
             tempY[pos] = particles->y[i];
             tempZ[pos] = particles->z[i];
@@ -1043,26 +1464,20 @@ void radixSortParticles(struct PointSOA *particles, int n) {
             tempGridID[pos] = particles->gridID[i];
         }
         
-        // Copy back to original arrays
-        for (int i = 0; i < n; i++) {
-            particles->x[i] = tempX[i];
-            particles->y[i] = tempY[i];
-            particles->z[i] = tempZ[i];
-            particles->xVelocity[i] = tempVX[i];
-            particles->yVelocity[i] = tempVY[i];
-            particles->zVelocity[i] = tempVZ[i];
-            particles->gridID[i] = tempGridID[i];
-        }
+        // Copy back to original arrays using memcpy for better performance
+        memcpy(particles->x, tempX, n * sizeof(float));
+        memcpy(particles->y, tempY, n * sizeof(float));
+        memcpy(particles->z, tempZ, n * sizeof(float));
+        memcpy(particles->xVelocity, tempVX, n * sizeof(float));
+        memcpy(particles->yVelocity, tempVY, n * sizeof(float));
+        memcpy(particles->zVelocity, tempVZ, n * sizeof(float));
+        memcpy(particles->gridID, tempGridID, n * sizeof(int));
     }
     
-    // Free temporary arrays
-    free(tempX);
-    free(tempY);
-    free(tempZ);
-    free(tempVX);
-    free(tempVY);
-    free(tempVZ);
-    free(tempGridID);
+    // Free memory only if we used heap allocation
+    if (!useStack) {
+        free(tempX); // This frees the entire allocated block
+    }
 }
 
 // Earlier in the file, add this AVX-optimized version:
@@ -1152,6 +1567,7 @@ void updateGridData(struct PointSOA *particles) {
     
     // Sort particles by grid ID using radix sort (much faster than insertion sort)
     radixSortParticles(particles, NUM_PARTICLES);
+    // printf("Radix sort time: %f seconds\n", (double)(clock() - start) / CLOCKS_PER_SEC);
     
     // Update start indices and count particles in a single pass
     int currentGridID = -1;
@@ -1441,6 +1857,12 @@ int compareParticlesByDistance(const void *a, const void *b) {
     return 0;
 }
 
+float fastInvSqrt(float x) {
+    union { float f; uint32_t i; } u = { x };
+    u.i = 0x5f3759df - (u.i >> 1);
+    float y = u.f;
+    return y * (1.5f - 0.5f * x * y * y);
+};
 
 void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes) {
     // Pre-calculate camera vectors and constants
@@ -1622,7 +2044,18 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         float distSquared = particleIndexes->particleIndexes[i].distance;
         
         // Use inverse square root approximation if available for speed
-        float invDist = 1.0f / (sqrtf(distSquared) + 10.0f);
+        // clock_t startRenderTime = clock();
+        // float invDist = 1.0f / (sqrtf(distSquared) + 10.0f);
+        // clock_t endRenderTime = clock();
+        // float dt = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
+        // printf("Distance calculation time for particle %d: %f\n", i, dt);
+        // startRenderTime = clock();
+        // Use fast inverse square root if available
+        float invDist = fastInvSqrt(distSquared);
+        // endRenderTime = clock();
+        // dt = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
+        // printf("Fast inverse square root time for particle %d: %f\n", i, dt);
+
         int particleRadius = (int)(PARTICLE_RADIUS * 100.0f * invDist);
         
         // Apply bounds without branching
@@ -1653,26 +2086,55 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         //     }
         // }
         // Draw a filled circle centered at (screenX, screenY)
+        // clock_t renderDistanceVelocityStart = clock();
         int radiusSquared = particleRadius * particleRadius;
+        // for (int dy = -particleRadius; dy <= particleRadius; dy++) {
+        //     int py = screenY + dy;
+        //     if (py < 0 || py >= ScreenHeight) continue;
+
+        //     // Precompute dy^2
+        //     int dy2 = dy * dy;
+
+        //     for (int dx = -particleRadius; dx <= particleRadius; dx++) {
+        //         int dx2 = dx * dx;
+        //         if (dx2 + dy2 > radiusSquared) continue; // skip outside circle
+
+        //         int px = screenX + dx;
+        //         if (px < 0 || px >= ScreenWidth) continue;
+
+        //         screen->distance[px][py] = distanceNormalized;
+        //         screen->velocity[px][py] = NormalizedVelocity;
+        //         screen->opacity[px][py]++;
+        //     }
+        // }
+        // clock_t renderDistanceVelocityEnd = clock();
+        // float dt = (float)(renderDistanceVelocityEnd - renderDistanceVelocityStart) / (float)CLOCKS_PER_SEC;
+        // printf("Render distance and velocity time for particle (Old) %d: %f\n", i, dt);
+        // int radiusSquared = particleRadius * particleRadius;
         for (int dy = -particleRadius; dy <= particleRadius; dy++) {
             int py = screenY + dy;
             if (py < 0 || py >= ScreenHeight) continue;
-
-            // Precompute dy^2
+            
             int dy2 = dy * dy;
-
-            for (int dx = -particleRadius; dx <= particleRadius; dx++) {
-                int dx2 = dx * dx;
-                if (dx2 + dy2 > radiusSquared) continue; // skip outside circle
-
-                int px = screenX + dx;
-                if (px < 0 || px >= ScreenWidth) continue;
-
+            int maxDx = (int)sqrtf((float)(radiusSquared - dy2)); // Calculate span once per row
+            
+            int startX = screenX - maxDx;
+            int endX = screenX + maxDx;
+            
+            // Clamp to screen bounds
+            if (startX < 0) startX = 0;
+            if (endX >= ScreenWidth) endX = ScreenWidth - 1;
+            
+            // Fill the entire span at once
+            for (int px = startX; px <= endX; px++) {
                 screen->distance[px][py] = distanceNormalized;
                 screen->velocity[px][py] = NormalizedVelocity;
                 screen->opacity[px][py]++;
             }
         }
+        // clock_t endProjectTime = clock();
+        // dt = (float)(endProjectTime - renderDistanceVelocityStart) / (float)CLOCKS_PER_SEC;
+        // printf("Render distance and velocity time for particle (New) %d: %f\n", i, dt);
     }
 
     clock_t renderDistanceVelocity = clock();
@@ -1710,28 +2172,51 @@ void clearScreen(struct Screen *screen) {
     memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
 }
 
+// void saveScreen(struct Screen *screen, const char *filename) {
+//     FILE *file = fopen(filename, "wb");
+//     if (!file) {
+//         perror("Failed to open file");
+//         return;
+//     }
+    
+//     static uint8_t buffer[ScreenWidth * 3];
+    
+//     // Process each row
+//     for (int y = 0; y < ScreenHeight; y++) {
+//         // Pack row data into the buffer for faster writes
+//         for (int x = 0; x < ScreenWidth; x++) {
+//             buffer[x*3]     = screen->distance[x][y];
+//             buffer[x*3 + 1] = screen->velocity[x][y];
+//             buffer[x*3 + 2] = screen->normalizedOpacity[x][y];
+//         }
+        
+//         // Write entire row at once
+//         fwrite(buffer, 1, ScreenWidth * 3, file);
+//     }
+    
+//     fclose(file);
+// }
+
+
 void saveScreen(struct Screen *screen, const char *filename) {
     FILE *file = fopen(filename, "wb");
     if (!file) {
         perror("Failed to open file");
         return;
     }
-    
-    static uint8_t buffer[ScreenWidth * 3];
-    
-    // Process each row
+
+    static uint8_t buffer[ScreenWidth * ScreenHeight * 3];
+
+    int i = 0;
     for (int y = 0; y < ScreenHeight; y++) {
-        // Pack row data into the buffer for faster writes
         for (int x = 0; x < ScreenWidth; x++) {
-            buffer[x*3]     = screen->distance[x][y];
-            buffer[x*3 + 1] = screen->velocity[x][y];
-            buffer[x*3 + 2] = screen->normalizedOpacity[x][y];
+            buffer[i++] = screen->distance[x][y];  // Changed from [x][y] to [y][x]
+            buffer[i++] = screen->velocity[x][y];  // Changed from [x][y] to [y][x]
+            buffer[i++] = screen->normalizedOpacity[x][y];  // Changed from [x][y] to [y][x]
         }
-        
-        // Write entire row at once
-        fwrite(buffer, 1, ScreenWidth * 3, file);
     }
-    
+
+    fwrite(buffer, 1, ScreenWidth * ScreenHeight * 3, file);
     fclose(file);
 }
 
@@ -1803,24 +2288,28 @@ void update_particles(struct PointSOA *particles, float dt, struct TimePartition
     clock_t collideParticlesTime = clock();
     float dt_ = (float)(collideParticlesTime - start) / (float)CLOCKS_PER_SEC;
     timePartition->collisionTime += dt_;
+    // printf("Collision time: %f\n", dt_);
     
     ApplyPressure(particles);
     clock_t applyPressureTime = clock();
-    dt = (float)(applyPressureTime - collideParticlesTime) / (float)CLOCKS_PER_SEC;
+    dt_ = (float)(applyPressureTime - collideParticlesTime) / (float)CLOCKS_PER_SEC;
     timePartition->applyPressureTime += dt_;
+    // printf("Apply pressure time: %f\n", dt_);
     
     addForce(particles, cursor);
 
     update_particle_apply_gravity(particles,dt);
     
     clock_t updateParticlesTime = clock();
-    dt = (float)(updateParticlesTime - applyPressureTime) / (float)CLOCKS_PER_SEC;
+    dt_ = (float)(updateParticlesTime - applyPressureTime) / (float)CLOCKS_PER_SEC;
     timePartition->updateParticlesTime += dt_;
+    // printf("Update particles time: %f\n", dt_);
     
     move_to_box(particles, particles->bBoxMin, particles->bBoxMax);
     clock_t moveToBoxTime = clock();
-    dt = (float)(moveToBoxTime - updateParticlesTime) / (float)CLOCKS_PER_SEC;
+    dt_ = (float)(moveToBoxTime - updateParticlesTime) / (float)CLOCKS_PER_SEC;
     timePartition->moveToBoxTime += dt_;
+    // printf("Move to box time: %f\n", dt_);
 }
 
 // read the pause.bin
@@ -1857,6 +2346,8 @@ int main() {
         return 1;
     }
 
+    // Initialize collision thread system
+    initializeCollisionThreads();
 
     // Initialize threadData array before creating threads
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -1957,7 +2448,6 @@ int main() {
         return 1;
     }
 
-    
     clock_t lastTime = clock();
     while (1) {
         // Calculate delta step based on elapsed time since the last frame
@@ -1971,16 +2461,20 @@ int main() {
         
         clock_t loopStartTime = clock();
         
+        clock_t readDataTime = clock();
         readCameraData(&camera);
         readCursorData(cursor);
         readPauseData(&paused);
+        clock_t endReadDataTime = clock();
+        float dt1 = (float)(endReadDataTime - readDataTime) / (float)CLOCKS_PER_SEC;
+        timePartition->readDataTime += dt1;
         
         // Update the grid data and record timing
         // First, update the grid data regardless of pause state
         clock_t startGridTime = clock();
         updateGridData(particles);
         clock_t endGridTime = clock();
-        float dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;  
+        dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;  
         timePartition->updateGridTime += dt1;
 
         // Only update particles if NOT paused
@@ -2038,6 +2532,7 @@ int main() {
             timePartition->projectionTime /= FrameCount;
             timePartition->renderDistanceVelocityTime /= FrameCount;
             timePartition->renderOpacityTime /= FrameCount;
+            timePartition->readDataTime /= FrameCount;
             // Write the averaged data to the file
             if (timeFile) {
                 fwrite(timePartition, sizeof(struct TimePartition), 1, timeFile);
@@ -2059,6 +2554,7 @@ int main() {
             timePartition->projectionTime = 0;
             timePartition->renderDistanceVelocityTime = 0;
             timePartition->renderOpacityTime = 0;
+            timePartition->readDataTime = 0;
         }
         frameCount++;
     }

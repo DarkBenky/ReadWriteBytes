@@ -98,6 +98,7 @@ type TimePartition struct {
 	ProjectionTime             float32
 	RenderDistanceVelocityTime float32
 	RenderOpacityTime          float32
+	ReadDataTime               float32
 }
 
 func PlotTimePartition(screen *ebiten.Image) {
@@ -129,13 +130,14 @@ func PlotTimePartition(screen *ebiten.Image) {
 		time  float32
 		color color.RGBA
 	}{
+		{"Read Data", tp.ReadDataTime, color.RGBA{128, 255, 255, 255}},
 		{"Collision", tp.CollisionTime, color.RGBA{255, 0, 0, 255}},
 		{"Pressure", tp.ApplyPressureTime, color.RGBA{0, 255, 0, 255}},
 		{"Update", tp.UpdateParticlesTime, color.RGBA{0, 0, 255, 255}},
 		{"Box Bounds", tp.MoveToBoxTime, color.RGBA{255, 255, 0, 255}},
 		{"Grid Update", tp.UpdateGridTime, color.RGBA{255, 0, 255, 255}},
 		{"Render", tp.RenderTime, color.RGBA{0, 255, 255, 255}},
-		{"Clear Screen", tp.ClearScreenTime, color.RGBA{255, 128, 0, 255}}, // Fixed: changed from tp.clearScreenTime to tp.ClearScreenTime
+		{"Clear Screen", tp.ClearScreenTime, color.RGBA{255, 128, 0, 255}},
 		{"Project Particles", tp.ProjectParticlesTime, color.RGBA{128, 255, 0, 255}},
 		{"Draw Cursor", tp.DrawCursorTime, color.RGBA{128, 0, 255, 255}},
 		{"Draw Box", tp.DrawBoundingBoxTime, color.RGBA{0, 128, 255, 255}},
@@ -175,8 +177,8 @@ func PlotTimePartition(screen *ebiten.Image) {
 		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.5f", float32(seg.time)), int(startX+float64(width)+5), y+5)
 	}
 	// Print the total time and FPS of the C program
-	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Total Time: %.5f ms", tp.CollisionTime+tp.ApplyPressureTime+tp.UpdateParticlesTime+tp.MoveToBoxTime+tp.UpdateGridTime+tp.RenderTime+tp.ClearScreenTime+tp.ProjectParticlesTime+tp.DrawCursorTime+tp.DrawBoundingBoxTime+tp.SaveScreenTime), startX-80, startY+len(segments)*(barHeight+barSpacing)+10)
-	// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("FPS: %.1f", 1/(tp.CollisionTime+tp.ApplyPressureTime+tp.UpdateParticlesTime+tp.MoveToBoxTime+tp.UpdateGridTime+tp.RenderTime+tp.ClearScreenTime+tp.ProjectParticlesTime+tp.DrawCursorTime+tp.DrawBoundingBoxTime+tp.SaveScreenTime)), startX-80, startY+len(segments)*(barHeight+barSpacing)+30)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Total Time: %.5f s", tp.CollisionTime+tp.ApplyPressureTime+tp.UpdateParticlesTime+tp.MoveToBoxTime+tp.UpdateGridTime+tp.RenderTime+tp.ClearScreenTime+tp.ProjectParticlesTime+tp.DrawCursorTime+tp.DrawBoundingBoxTime+tp.SaveScreenTime), startX-80, startY+len(segments)*(barHeight+barSpacing)+10)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("FPS: %.3f", 1/(tp.CollisionTime+tp.ApplyPressureTime+tp.UpdateParticlesTime+tp.MoveToBoxTime+tp.UpdateGridTime+tp.RenderTime+tp.ClearScreenTime+tp.ProjectParticlesTime+tp.DrawCursorTime+tp.DrawBoundingBoxTime+tp.SaveScreenTime)), startX-80, startY+len(segments)*(barHeight+barSpacing)+30)
 }
 
 func PlotFPS(screen *ebiten.Image) {
