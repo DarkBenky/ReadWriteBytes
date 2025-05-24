@@ -24,6 +24,9 @@
 #define NUM_THREADS 16
 pthread_t threads[NUM_THREADS];
 
+int Sort = 0; // Global variable to control sorting in rendering method
+#define SortFrequency 2 // Sort every 4 frames
+
 #define DISABLE_MP_PROJECT_PARTICLES 0
 struct ThreadData* threadData[NUM_THREADS];
 volatile int ready[NUM_THREADS];
@@ -1863,9 +1866,6 @@ float fastInvSqrt(float x) {
     float y = u.f;
     return y * (1.5f - 0.5f * x * y * y);
 };
-
-int Sort = 0; // Global variable to control sorting method
-#define SortFrequency 2 // Sort every 4 frames
 
 void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes) {
     // Pre-calculate camera vectors and constants
