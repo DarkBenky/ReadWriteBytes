@@ -10,7 +10,7 @@
 #include <omp.h>        // for OpenMP
 #include <pthread.h> // for pthreads
 
-#define NUM_PARTICLES 150000
+#define NUM_PARTICLES 200000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
@@ -1864,6 +1864,9 @@ float fastInvSqrt(float x) {
     return y * (1.5f - 0.5f * x * y * y);
 };
 
+int Sort = 0; // Global variable to control sorting method
+#define SortFrequency 2 // Sort every 4 frames
+
 void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes) {
     // Pre-calculate camera vectors and constants
     const float halfWidth = ScreenWidth * 0.5f;
@@ -1927,7 +1930,13 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     // heapSortParticles(particles, distances, validParticles);
 
     // Use qsort for simplicity
-    qsort(particleIndexes->particleIndexes, validParticles, sizeof(struct ParticleIndex), compareParticlesByDistance);
+    // sort each 4. frame
+    if (Sort == 0) {
+        qsort(particleIndexes->particleIndexes, validParticles, sizeof(struct ParticleIndex), compareParticlesByDistance);
+    }
+    Sort = (Sort + 1) % SortFrequency; // Cycle through sorting methods every 4 frames
+
+
 
     clock_t endSortTime = clock();
     float dt = (float)(endSortTime - start) / (float)CLOCKS_PER_SEC;
@@ -2452,10 +2461,10 @@ int main() {
     while (1) {
         // Calculate delta step based on elapsed time since the last frame
         clock_t currentTime = clock();
-        float dt = (float)(currentTime - lastTime) / (float)CLOCKS_PER_SEC;
+        float dt = (float)(currentTime - lastTime) / (float)CLOCKS_PER_SEC; // Scale to a reasonable frame time
         float TPS = 1.0f / dt;
         // Cap dt to avoid instability for long delays (e.g., if paused)
-        if (dt > 0.1f) dt = 0.1f;
+        if (dt > 0.1f) dt = 0.08f;
         // dt = 0.1f;
         lastTime = currentTime;
         
@@ -2502,7 +2511,7 @@ int main() {
         
         float averageRenderTime = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
         
-        printf("FPS: %.2f, TPS: %.4f, Update: %f ms, Render: %f ms\n", 
+        printf("FPS: %.2f, TPS: %.2f, Update: %.02f s, Render: %0.2f s\n", 
                currentFPS, TPS,
                (averageUpdateTime),
                (averageRenderTime));
