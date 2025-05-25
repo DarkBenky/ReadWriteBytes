@@ -10,7 +10,7 @@
 #include <omp.h>        // for OpenMP
 #include <pthread.h> // for pthreads
 
-#define NUM_PARTICLES 200000
+#define NUM_PARTICLES 100000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
@@ -21,35 +21,87 @@
 #define temperature 10.0f
 #define pressure  temperature * 0.1f
 #define FrameCount 30
-#define NUM_THREADS 16
+#define NUM_THREADS 0
 pthread_t threads[NUM_THREADS];
 
-int Sort = 0; // Global variable to control sorting in rendering method
-#define SortFrequency 2 // Sort every 4 frames
+struct ThreadSync {
+    volatile int ready;
+    volatile int done;
+    volatile int collisionReady;
+    volatile int renderReady;
+} __attribute__((aligned(64))) threadSync[NUM_THREADS];
 
-#define DISABLE_MP_PROJECT_PARTICLES 0
+#define DISABLE_MP_PROJECT_PARTICLES 1
 struct ThreadData* threadData[NUM_THREADS];
-volatile int ready[NUM_THREADS];
-volatile int done[NUM_THREADS];
+// volatile int ready[NUM_THREADS];
+// volatile int done[NUM_THREADS];
 static int threadIds[NUM_THREADS];
 
-#define DISABLE_MP_COLLIDE_PARTICLES 0
+#define DISABLE_MP_COLLIDE_PARTICLES 1
 struct ThreadDataCollideParticles {
     struct PointSOA *particles;
     int startGridId;  // Changed from startIdx/endIdx to gridId range
     int endGridId;
-    pthread_t thread;  // Add thread handle
+    pthread_t thread;
+};
+
+#define DISABLE_MP_RENDER_PARTICLES 1
+// volatile int renderReady[NUM_THREADS];
+// volatile int renderDone[NUM_THREADS];
+struct RenderThreadData* renderThreadData[NUM_THREADS];
+struct ThreadScreen* threadScreens[NUM_THREADS];
+
+
+struct ThreadScreen {
+    uint8_t distance[ScreenWidth][ScreenHeight];
+    uint8_t velocity[ScreenWidth][ScreenHeight];
+    uint16_t particleCount[ScreenWidth][ScreenHeight];
 };
 
 
-volatile int collisionReady[NUM_THREADS];
-volatile int collisionDone[NUM_THREADS];
+struct RenderThreadData {
+    struct PointSOA *particles;
+    struct ParticleIndexes *particleIndexes;
+    struct Camera *camera;
+    struct ThreadScreen *threadScreen;
+    int startParticle;
+    int endParticle;
+    int validParticles;
+    float maxVelocity;
+    float maxDistance;
+    int threadId;
+};
+
+// Initialize render thread system
+void initializeRenderThreads() {
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threadSync[i].renderReady = 0;
+        
+        // Allocate thread screen buffer
+        threadScreens[i] = (struct ThreadScreen*)malloc(sizeof(struct ThreadScreen));
+        if (!threadScreens[i]) {
+            printf("Failed to allocate thread screen for thread %d\n", i);
+            exit(1);
+        }
+        
+        // Allocate render thread data
+        renderThreadData[i] = (struct RenderThreadData*)malloc(sizeof(struct RenderThreadData));
+        if (!renderThreadData[i]) {
+            printf("Failed to allocate render thread data for thread %d\n", i);
+            exit(1);
+        }
+        renderThreadData[i]->threadId = i;
+        renderThreadData[i]->threadScreen = threadScreens[i];
+    }
+}
+
+// volatile int collisionReady[NUM_THREADS];
+// volatile int collisionDone[NUM_THREADS];
 struct ThreadDataCollideParticles* collisionThreadData[NUM_THREADS];
 
 void initializeCollisionThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
-        collisionReady[i] = 0;
-        collisionDone[i] = 0;
+        threadSync[i].collisionReady = 0;
         collisionThreadData[i] = (struct ThreadDataCollideParticles*)malloc(sizeof(struct ThreadDataCollideParticles));
         if (!collisionThreadData[i]) {
             printf("Failed to allocate collision thread data for thread %d\n", i);
@@ -62,22 +114,29 @@ void initializeCollisionThreads() {
 void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
 void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
+void renderParticlesToBuffer(struct RenderThreadData *data);
 
 void createThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
-        ready[i] = 0;
-        done[i] = 0;
-        threadIds[i] = i;  // Use the static array instead of malloc
+        threadSync[i].ready = 0;
+        threadSync[i].done = 0;
+        threadSync[i].collisionReady = 0;
+        threadSync[i].renderReady = 0;
+        threadIds[i] = i;
         pthread_create(&threads[i], NULL, threadFunction, &threadIds[i]);
     }
 }
 
+
 void *threadFunction(void *arg) {
     int threadId = *(int *)arg;
     
-    while (!done[threadId]) {
-        // Wait for either projection or collision work
-        while (!ready[threadId] && !collisionReady[threadId] && !done[threadId]) {
+    while (!threadSync[threadId].done) {
+        // Wait for any type of work
+        while (!threadSync[threadId].ready && 
+               !threadSync[threadId].collisionReady && 
+               !threadSync[threadId].renderReady && 
+               !threadSync[threadId].done) {
             #if defined(__x86_64__) || defined(__i386__)
                 __builtin_ia32_pause();
             #else
@@ -85,22 +144,27 @@ void *threadFunction(void *arg) {
             #endif
         }
         
-        if (done[threadId]) {
+        if (threadSync[threadId].done) {
             break;
         }
         
         // Handle projection work
         if (DISABLE_MP_PROJECT_PARTICLES == 1) {
-            if (ready[threadId]) {
+            if (threadSync[threadId].ready) {
                 calculateParticleScreenCoordinates(threadData[threadId]);
-                ready[threadId] = 0;
+                threadSync[threadId].ready = 0;
             }
         }
         
         // Handle collision work
-        if (collisionReady[threadId]) {
+        if (threadSync[threadId].collisionReady) {
             CollideParticlesInGridInThread(collisionThreadData[threadId]);
-            collisionReady[threadId] = 0;
+            threadSync[threadId].collisionReady = 0;
+        }
+
+        if (threadSync[threadId].renderReady) {
+            renderParticlesToBuffer(renderThreadData[threadId]);
+            threadSync[threadId].renderReady = 0;
         }
     }
     
@@ -110,12 +174,17 @@ void *threadFunction(void *arg) {
 
 void joinThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
-        done[i] = 1;
+        threadSync[i].done = 1;
         pthread_join(threads[i], NULL);
         
         // Free collision thread data
         if (collisionThreadData[i]) {
             free(collisionThreadData[i]);
+        }
+
+         // Free thread screen buffers
+        if (threadScreens[i]) {
+            free(threadScreens[i]);
         }
     }
 }
@@ -725,12 +794,12 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
         
         // Signal threads to start collision processing
         for (int i = 0; i < NUM_THREADS; i++) {
-            collisionReady[i] = 1;
+            threadSync[i].collisionReady = 1;
         }
         
         // Wait for all threads to complete collision work
         for (int i = 0; i < NUM_THREADS; i++) {
-            while (collisionReady[i]) {
+            while (threadSync[i].collisionReady) {
                 #if defined(__x86_64__) || defined(__i386__)
                     __builtin_ia32_pause();
                 #else
@@ -738,7 +807,6 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
                 #endif
             }
         }
-        // printf("Time taken to collide particles MultiTreaded: %f seconds\n", (float)(clock() - startTime) / CLOCKS_PER_SEC);
     }
     else {
         // Constants as AVX vectors
@@ -1867,6 +1935,150 @@ float fastInvSqrt(float x) {
     return y * (1.5f - 0.5f * x * y * y);
 };
 
+void renderParticlesToBuffer(struct RenderThreadData *data) {
+    struct ThreadScreen *screen = data->threadScreen;
+    struct PointSOA *particles = data->particles;
+    struct ParticleIndexes *particleIndexes = data->particleIndexes;
+    struct Camera *camera = data->camera;
+    
+    // Clear thread's screen buffer
+    memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->particleCount, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
+    
+    // Pre-calculate camera vectors and constants (same as before)
+    const float halfWidth = ScreenWidth * 0.5f;
+    const float halfHeight = ScreenHeight * 0.5f;
+    
+    float right[3], trueUp[3];
+    float up[3] = {0, 1, 0};
+    
+    right[0] = camera->ray.direction[1] * up[2] - camera->ray.direction[2] * up[1];
+    right[1] = camera->ray.direction[2] * up[0] - camera->ray.direction[0] * up[2];
+    right[2] = camera->ray.direction[0] * up[1] - camera->ray.direction[1] * up[0];
+    
+    trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
+    trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
+    trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
+
+    const float camX = camera->ray.origin[0];
+    const float camY = camera->ray.origin[1];
+    const float camZ = camera->ray.origin[2];
+    
+    // Render assigned particle range back-to-front
+    for (int i = data->endParticle - 1; i >= data->startParticle; i--) {
+        int index = particleIndexes->particleIndexes[i].index;
+        
+        int screenX = particles->screenX[index];
+        int screenY = particles->screenY[index];
+
+        // Fast distance approximation using squared distance
+        float distSquared = particleIndexes->particleIndexes[i].distance;
+        float invDist = fastInvSqrt(distSquared);
+
+        int particleRadius = (int)(PARTICLE_RADIUS * 100.0f * invDist);
+        particleRadius = particleRadius < 1 ? 1 : (particleRadius > PARTICLE_RADIUS * 3 ? PARTICLE_RADIUS * 3 : particleRadius);
+
+        // Calculate drawing bounds
+        int minX = screenX - particleRadius;
+        int maxX = screenX + particleRadius;
+        int minY = screenY - particleRadius;
+        int maxY = screenY + particleRadius;
+        
+        // Quick bounds check
+        if (minX < 0 || maxX >= ScreenWidth || minY < 0 || maxY >= ScreenHeight) continue;
+        
+        // Calculate particle color once
+        uint8_t normalizedVelocity = (uint8_t)(255 * (1.0f - (particles->totalVelocity[index] / data->maxVelocity)));
+        uint8_t distanceNormalized = (uint8_t)(255 * (1.0f - (distSquared / data->maxDistance)));
+
+        // Draw filled circle and count particles per pixel
+        int radiusSquared = particleRadius * particleRadius;
+        for (int dy = -particleRadius; dy <= particleRadius; dy++) {
+            int py = screenY + dy;
+            if (py < 0 || py >= ScreenHeight) continue;
+            
+            int dy2 = dy * dy;
+            int maxDx = (int)sqrtf((float)(radiusSquared - dy2));
+            
+            int startX = screenX - maxDx;
+            int endX = screenX + maxDx;
+            
+            if (startX < 0) startX = 0;
+            if (endX >= ScreenWidth) endX = ScreenWidth - 1;
+            
+            for (int px = startX; px <= endX; px++) {
+                // For depth compositing, only update if this particle is closer or first
+                if (screen->particleCount[px][py] == 0 || distanceNormalized > screen->distance[px][py]) {
+                    screen->distance[px][py] = distanceNormalized;
+                    screen->velocity[px][py] = normalizedVelocity;
+                }
+                // Count this particle at this pixel
+                screen->particleCount[px][py]++;
+            }
+        }
+    }
+}
+
+void compositeThreadBuffers(struct Screen *finalScreen) {
+    uint16_t globalMaxParticleCount = 0;
+    
+    // Single pass: accumulate particle counts and find max distance/velocity per pixel
+    for (int x = 0; x < ScreenWidth; x++) {
+        for (int y = 0; y < ScreenHeight; y++) {
+            uint32_t totalParticleCount = 0;
+            uint8_t maxDistance = 0;
+            uint8_t maxDistanceVelocity = 0;
+            
+            // Accumulate from all threads
+            for (int t = 0; t < NUM_THREADS; t++) {
+                uint16_t particleCount = threadScreens[t]->particleCount[x][y];
+                if (particleCount > 0) {
+                    totalParticleCount += particleCount;
+                    
+                    // Use distance/velocity from thread with farthest particle
+                    if (threadScreens[t]->distance[x][y] > maxDistance) {
+                        maxDistance = threadScreens[t]->distance[x][y];
+                        maxDistanceVelocity = threadScreens[t]->velocity[x][y];
+                    }
+                }
+            }
+            
+            if (totalParticleCount > 0) {
+                // Store results
+                finalScreen->distance[x][y] = maxDistance;
+                finalScreen->velocity[x][y] = maxDistanceVelocity;
+                
+                // Clamp and store opacity
+                uint16_t clampedCount = (totalParticleCount > 65535) ? 65535 : (uint16_t)totalParticleCount;
+                finalScreen->opacity[x][y] = clampedCount;
+                
+                // Track global maximum
+                if (clampedCount > globalMaxParticleCount) {
+                    globalMaxParticleCount = clampedCount;
+                }
+            }
+        }
+    }
+    
+    // Early exit if no particles
+    if (globalMaxParticleCount == 0) return;
+    
+    // Pre-calculate normalization factor
+    float invLogMaxParticleCount = 1.0f / logf((float)globalMaxParticleCount + 1.0f);
+    
+    // Second pass: calculate normalized opacity only where needed
+    for (int x = 0; x < ScreenWidth; x++) {
+        for (int y = 0; y < ScreenHeight; y++) {
+            uint16_t opacity = finalScreen->opacity[x][y];
+            if (opacity > 0) {
+                float logParticleCount = logf((float)opacity + 1.0f) * invLogMaxParticleCount;
+                finalScreen->normalizedOpacity[x][y] = (uint8_t)(255.0f * logParticleCount);
+            }
+        }
+    }
+}
+
 void projectParticles(struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes) {
     // Pre-calculate camera vectors and constants
     const float halfWidth = ScreenWidth * 0.5f;
@@ -1922,21 +2134,11 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     
     // Skip sort if no particles are visible
     if (validParticles == 0) return;
-    
-    // Sort particles using quick sort
-    // quickSortParticles(particles, 0, validParticles - 1, particles->distance);
-    // Use heap sort for better performance with large datasets
-    // float *distances = particles->distance;
+
     // heapSortParticles(particles, distances, validParticles);
 
     // Use qsort for simplicity
-    // sort each 4. frame
-    if (Sort == 0) {
-        qsort(particleIndexes->particleIndexes, validParticles, sizeof(struct ParticleIndex), compareParticlesByDistance);
-    }
-    Sort = (Sort + 1) % SortFrequency; // Cycle through sorting methods every 4 frames
-
-
+    qsort(particleIndexes->particleIndexes, validParticles, sizeof(struct ParticleIndex), compareParticlesByDistance);
 
     clock_t endSortTime = clock();
     float dt = (float)(endSortTime - start) / (float)CLOCKS_PER_SEC;
@@ -2041,135 +2243,141 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
     // printf("Projection time: %f\n", dt);
     timePartition->projectionTime += dt;
 
-    float maxOpacity = 0;
-    // Process particles back-to-front (furthest to nearest)
-    for (int i = validParticles - 1; i >= 0; i--) {    
-        int index = particleIndexes->particleIndexes[i].index;
-        
-        int screenX = particles->screenX[index];
-        int screenY = particles->screenY[index];
-
-        // Fast distance approximation using squared distance
-        float distSquared = particleIndexes->particleIndexes[i].distance;
-        
-        // Use inverse square root approximation if available for speed
-        // clock_t startRenderTime = clock();
-        // float invDist = 1.0f / (sqrtf(distSquared) + 10.0f);
-        // clock_t endRenderTime = clock();
-        // float dt = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
-        // printf("Distance calculation time for particle %d: %f\n", i, dt);
-        // startRenderTime = clock();
-        // Use fast inverse square root if available
-        float invDist = fastInvSqrt(distSquared);
-        // endRenderTime = clock();
-        // dt = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
-        // printf("Fast inverse square root time for particle %d: %f\n", i, dt);
-
-        int particleRadius = (int)(PARTICLE_RADIUS * 100.0f * invDist);
-        
-        // Apply bounds without branching
-        particleRadius = particleRadius < 1 ? 1 : (particleRadius > PARTICLE_RADIUS * 3 ? PARTICLE_RADIUS * 3 : particleRadius);
-
-        // Calculate drawing bounds
-        int minX = screenX - particleRadius;
-        int maxX = screenX + particleRadius;
-        int minY = screenY - particleRadius;
-        int maxY = screenY + particleRadius;
-        
-        // Quick bounds check
-        if (minX < 0 || maxX >= ScreenWidth || minY < 0 || maxY >= ScreenHeight) continue;
-        
-        // Calculate particle color once
-        uint8_t NormalizedVelocity = (uint8_t)(255 * (1.0f - (particles->totalVelocity[index] / maxVelocity)));
-        uint8_t distanceNormalized = (uint8_t)(255 * (1.0f - (distSquared / maxDistance)));
-
-        // Track maximum values
-        float currentOpacity = (float)(screen->opacity[screenX][screenY]) + 1.0f;
-        if (currentOpacity > maxOpacity) maxOpacity = currentOpacity;
-
-        // for (int px = minX; px <= maxX; px++) {
-        //     for (int py = minY; py <= maxY; py++) {
-        //         screen->distance[px][py] = distanceNormalized;
-        //         screen->velocity[px][py] = NormalizedVelocity;
-        //         screen->opacity[px][py]++;
-        //     }
-        // }
-        // Draw a filled circle centered at (screenX, screenY)
-        // clock_t renderDistanceVelocityStart = clock();
-        int radiusSquared = particleRadius * particleRadius;
-        // for (int dy = -particleRadius; dy <= particleRadius; dy++) {
-        //     int py = screenY + dy;
-        //     if (py < 0 || py >= ScreenHeight) continue;
-
-        //     // Precompute dy^2
-        //     int dy2 = dy * dy;
-
-        //     for (int dx = -particleRadius; dx <= particleRadius; dx++) {
-        //         int dx2 = dx * dx;
-        //         if (dx2 + dy2 > radiusSquared) continue; // skip outside circle
-
-        //         int px = screenX + dx;
-        //         if (px < 0 || px >= ScreenWidth) continue;
-
-        //         screen->distance[px][py] = distanceNormalized;
-        //         screen->velocity[px][py] = NormalizedVelocity;
-        //         screen->opacity[px][py]++;
-        //     }
-        // }
-        // clock_t renderDistanceVelocityEnd = clock();
-        // float dt = (float)(renderDistanceVelocityEnd - renderDistanceVelocityStart) / (float)CLOCKS_PER_SEC;
-        // printf("Render distance and velocity time for particle (Old) %d: %f\n", i, dt);
-        // int radiusSquared = particleRadius * particleRadius;
-        for (int dy = -particleRadius; dy <= particleRadius; dy++) {
-            int py = screenY + dy;
-            if (py < 0 || py >= ScreenHeight) continue;
+    if (DISABLE_MP_RENDER_PARTICLES == 1) {
+        float maxOpacity = 0;
+        // Process particles back-to-front (furthest to nearest)
+        for (int i = validParticles - 1; i >= 0; i--) {    
+            int index = particleIndexes->particleIndexes[i].index;
             
-            int dy2 = dy * dy;
-            int maxDx = (int)sqrtf((float)(radiusSquared - dy2)); // Calculate span once per row
+            int screenX = particles->screenX[index];
+            int screenY = particles->screenY[index];
+
+            // Fast distance approximation using squared distance
+            float distSquared = particleIndexes->particleIndexes[i].distance;
+            float invDist = fastInvSqrt(distSquared);
+
+            int particleRadius = (int)(PARTICLE_RADIUS * 100.0f * invDist);
             
-            int startX = screenX - maxDx;
-            int endX = screenX + maxDx;
+            // Apply bounds without branching
+            particleRadius = particleRadius < 1 ? 1 : (particleRadius > PARTICLE_RADIUS * 3 ? PARTICLE_RADIUS * 3 : particleRadius);
+
+            // Calculate drawing bounds
+            int minX = screenX - particleRadius;
+            int maxX = screenX + particleRadius;
+            int minY = screenY - particleRadius;
+            int maxY = screenY + particleRadius;
             
-            // Clamp to screen bounds
-            if (startX < 0) startX = 0;
-            if (endX >= ScreenWidth) endX = ScreenWidth - 1;
+            // Quick bounds check
+            if (minX < 0 || maxX >= ScreenWidth || minY < 0 || maxY >= ScreenHeight) continue;
             
-            // Fill the entire span at once
-            for (int px = startX; px <= endX; px++) {
-                screen->distance[px][py] = distanceNormalized;
-                screen->velocity[px][py] = NormalizedVelocity;
-                screen->opacity[px][py]++;
+            // Calculate particle color once
+            uint8_t NormalizedVelocity = (uint8_t)(255 * (1.0f - (particles->totalVelocity[index] / maxVelocity)));
+            uint8_t distanceNormalized = (uint8_t)(255 * (1.0f - (distSquared / maxDistance)));
+
+            // Track maximum values
+            float currentOpacity = (float)(screen->opacity[screenX][screenY]) + 1.0f;
+            if (currentOpacity > maxOpacity) maxOpacity = currentOpacity;
+
+            int radiusSquared = particleRadius * particleRadius;
+            for (int dy = -particleRadius; dy <= particleRadius; dy++) {
+                int py = screenY + dy;
+                if (py < 0 || py >= ScreenHeight) continue;
+                
+                int dy2 = dy * dy;
+                int maxDx = (int)sqrtf((float)(radiusSquared - dy2)); // Calculate span once per row
+                
+                int startX = screenX - maxDx;
+                int endX = screenX + maxDx;
+                
+                // Clamp to screen bounds
+                if (startX < 0) startX = 0;
+                if (endX >= ScreenWidth) endX = ScreenWidth - 1;
+                
+                // Fill the entire span at once
+                for (int px = startX; px <= endX; px++) {
+                    screen->distance[px][py] = distanceNormalized;
+                    screen->velocity[px][py] = NormalizedVelocity;
+                    screen->opacity[px][py]++;
+                }
             }
         }
-        // clock_t endProjectTime = clock();
-        // dt = (float)(endProjectTime - renderDistanceVelocityStart) / (float)CLOCKS_PER_SEC;
-        // printf("Render distance and velocity time for particle (New) %d: %f\n", i, dt);
-    }
+        clock_t renderDistanceVelocity = clock();
+        dt = (float)(renderDistanceVelocity - endProjectTime) / (float)CLOCKS_PER_SEC;
+        timePartition->renderDistanceVelocityTime += dt;
 
-    clock_t renderDistanceVelocity = clock();
-    dt = (float)(renderDistanceVelocity - endProjectTime) / (float)CLOCKS_PER_SEC;
-    timePartition->renderDistanceVelocityTime += dt;
-    // printf("Render distance and velocity time: %f\n", dt);
-    
-
-    // Pre-calculate normalization factors to avoid repeated calculations
-    float invLogMaxOpacity = 1.0f / logf(maxOpacity + 1.0f);
-    float invLogMaxVelocity = 1.0f / logf(maxVelocity + 1.0f);
-    
-    // Normalize opacity and velocity in a single pass
-    for (int px = 0; px < ScreenWidth; px++) {
-        for (int py = 0; py < ScreenHeight; py++) {
-            uint16_t opacity = screen->opacity[px][py];
-            if (opacity != 0) {
-                float logOpacity = logf((float)opacity + 1.0f) * invLogMaxOpacity;
-                screen->normalizedOpacity[px][py] = (uint8_t)(255 * (1.0f - logOpacity));
+         // Pre-calculate normalization factors to avoid repeated calculations
+        float invLogMaxOpacity = 1.0f / logf(maxOpacity + 1.0f);
+        float invLogMaxVelocity = 1.0f / logf(maxVelocity + 1.0f);
+        
+        // Normalize opacity and velocity in a single pass
+        for (int px = 0; px < ScreenWidth; px++) {
+            for (int py = 0; py < ScreenHeight; py++) {
+                uint16_t opacity = screen->opacity[px][py];
+                if (opacity != 0) {
+                    float logOpacity = logf((float)opacity + 1.0f) * invLogMaxOpacity;
+                    screen->normalizedOpacity[px][py] = (uint8_t)(255 * (1.0f - logOpacity));
+                }
             }
         }
+        clock_t renderOpacityTime = clock();
+        dt = (float)(renderOpacityTime - renderDistanceVelocity) / (float)CLOCKS_PER_SEC;
+        timePartition->renderOpacityTime += dt;
+        // printf("Render opacity time: %f\n", dt);
+    } else {
+    // Multithreaded rendering of particles
+        clock_t renderStart = clock();
+        
+        // Divide particles among threads
+        int particlesPerThread = validParticles / NUM_THREADS;
+        int remainder = validParticles % NUM_THREADS;
+        
+        int startParticle = 0;
+        for (int i = 0; i < NUM_THREADS; i++) {
+            int particlesForThisThread = particlesPerThread + (i < remainder ? 1 : 0);
+            
+            // Set up render thread data
+            renderThreadData[i]->particles = particles;
+            renderThreadData[i]->particleIndexes = particleIndexes;
+            renderThreadData[i]->camera = camera;
+            renderThreadData[i]->startParticle = startParticle;
+            renderThreadData[i]->endParticle = startParticle + particlesForThisThread;
+            renderThreadData[i]->validParticles = validParticles;
+            renderThreadData[i]->maxVelocity = maxVelocity;
+            renderThreadData[i]->maxDistance = maxDistance;
+            
+            startParticle += particlesForThisThread;
+        }
+        
+        // Signal all threads to start rendering
+        for (int i = 0; i < NUM_THREADS; i++) {
+            threadSync[i].renderReady = 1;
+        }
+
+        // Wait for all threads to complete rendering
+        for (int i = 0; i < NUM_THREADS; i++) {
+            while (threadSync[i].renderReady) {
+                #if defined(__x86_64__) || defined(__i386__)
+                    __builtin_ia32_pause();
+                #else
+                    usleep(100);
+                #endif
+            }
+        }
+
+        clock_t renderDistanceVelocity = clock();
+        dt = (float)(renderDistanceVelocity - renderStart) / (float)CLOCKS_PER_SEC;
+        timePartition->renderDistanceVelocityTime += dt;
+        // printf("Render distance and velocity time: %f\n", dt);
+
+
+        // Composite all thread buffers into final screen
+        clock_t compositeStart = clock();
+        compositeThreadBuffers(screen);
+        clock_t compositeEnd = clock();
+        
+        dt = (float)(compositeEnd - compositeStart) / (float)CLOCKS_PER_SEC;
+        timePartition->renderOpacityTime += dt;
     }
-    clock_t renderOpacityTime = clock();
-    dt = (float)(renderOpacityTime - renderDistanceVelocity) / (float)CLOCKS_PER_SEC;
-    timePartition->renderOpacityTime += dt;
-    // printf("Render opacity time: %f\n", dt);
 }
 
 
@@ -2357,6 +2565,8 @@ int main() {
 
     // Initialize collision thread system
     initializeCollisionThreads();
+    // Initialize render thread system
+    initializeRenderThreads();
 
     // Initialize threadData array before creating threads
     for (int i = 0; i < NUM_THREADS; i++) {
