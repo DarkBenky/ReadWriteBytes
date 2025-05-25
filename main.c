@@ -10,7 +10,7 @@
 #include <omp.h>        // for OpenMP
 #include <pthread.h> // for pthreads
 
-#define NUM_PARTICLES 100000
+#define NUM_PARTICLES 150000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
