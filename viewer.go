@@ -47,22 +47,35 @@ const (
 	renderVelocity
 	renderOpacity
 	renderNormal
+	renderFluid
 )
 
 type Game struct {
-	pixels           [screenWidth * screenHeight * 4]uint8
-	shaders          []Shader
-	normalShader     *ebiten.Shader
-	img              *ebiten.Image
-	selectedOption   string
-	optionChangeRate float64
-	lastUpdate       time.Time
-	camera           Camera
-	cursor           Cursor
-	mode             uint8
-	renderMode       uint8 // will be one of renderDistance, renderVelocity, renderOpacity
-	selectedShader   uint8
-	pause            bool
+	cameraImageData                    *CameraImageData // Struct to hold camera image data
+	pixels                             [screenWidth * screenHeight * 4]uint8
+	pixelsVelocity                     [screenWidth * screenHeight * 4]uint8
+	pixelsOpacity                      [screenWidth * screenHeight * 4]uint8
+	pixelsDistance                     [screenWidth * screenHeight * 4]uint8
+	pixelsOpacityFromCameraPerspective [screenWidth * screenHeight * 4]uint8
+	shaders                            []Shader
+	normalShader                       *ebiten.Shader
+	gaussianBlurShader                 *ebiten.Shader
+	waterShader                        *ebiten.Shader
+	img                                *ebiten.Image
+	imgVelocity                        *ebiten.Image
+	imgOpacity                         *ebiten.Image
+	imgNormal                          *ebiten.Image
+	imgDistance                        *ebiten.Image
+	selectedOption                     string
+	optionChangeRate                   float64
+	lastUpdate                         time.Time
+	camera                             Camera
+	cursor                             Cursor
+	mode                               uint8
+	renderMode                         uint8 // will be one of renderDistance, renderVelocity, renderOpacity
+	selectedShader                     uint8
+	pause                              bool
+	CameraOrLightPosition              bool
 }
 
 //	struct TimePartition {
@@ -249,8 +262,6 @@ func PlotFPS(screen *ebiten.Image) {
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.1f", minFPS), graphX-30, int(graphY))
 }
 
-var NormalBuffer = [800 * 600 * 4]uint8{}
-
 // func (g *Game) CalculateNormalShader() {
 // 	const chucks = 8
 // 	wg := sync.WaitGroup{}
@@ -305,6 +316,63 @@ var NormalBuffer = [800 * 600 * 4]uint8{}
 // 	g.img.WritePixels(NormalBuffer[:])
 // }
 
+type CameraImageData struct {
+	pixelsDistance [screenWidth * screenHeight * 4]uint8
+	pixelsVelocity [screenWidth * screenHeight * 4]uint8
+	pixelsOpacity  [screenWidth * screenHeight * 4]uint8
+	imgDistance    *ebiten.Image
+	imgVelocity    *ebiten.Image
+	imgOpacity     *ebiten.Image
+}
+
+func (g *Game) UpdatePixelsGeneral(fileName string) error {
+	// Open file for binary reading
+	data, err := os.ReadFile(fileName)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	for y := 0; y < screenHeight-1; y++ {
+		for x := 0; x < screenWidth-1; x++ {
+			srcPos := (y*screenWidth + x) * 3 // Changed from 4 to 3 bytes per pixel
+			dstPos := (y*screenWidth + x) * 4
+
+			if srcPos+3 > len(data) {
+				continue // Skip if not enough data
+			}
+
+			// Fill all 4 channels (RGBA) for each buffer
+			for i := 0; i < 3; i++ {
+				if dstPos+i < len(g.cameraImageData.pixelsDistance) {
+					g.cameraImageData.pixelsDistance[dstPos+i] = data[srcPos]   // Distance
+					g.cameraImageData.pixelsVelocity[dstPos+i] = data[srcPos+1] // Velocity
+					g.cameraImageData.pixelsOpacity[dstPos+i] = data[srcPos+2]  // Opacity
+				}
+			}
+			// Set alpha channel
+			if dstPos+3 < len(g.cameraImageData.pixelsDistance) {
+				g.cameraImageData.pixelsDistance[dstPos+3] = 255
+				g.cameraImageData.pixelsVelocity[dstPos+3] = 255
+				g.cameraImageData.pixelsOpacity[dstPos+3] = 255
+			}
+		}
+	}
+
+	if g.cameraImageData.imgDistance == nil {
+		g.cameraImageData.imgDistance = ebiten.NewImage(screenWidth, screenHeight)
+	}
+	if g.cameraImageData.imgVelocity == nil {
+		g.cameraImageData.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
+	}
+	if g.cameraImageData.imgOpacity == nil {
+		g.cameraImageData.imgOpacity = ebiten.NewImage(screenWidth, screenHeight)
+	}
+	g.cameraImageData.imgDistance.WritePixels(g.cameraImageData.pixelsDistance[:])
+	g.cameraImageData.imgVelocity.WritePixels(g.cameraImageData.pixelsVelocity[:])
+	g.cameraImageData.imgOpacity.WritePixels(g.cameraImageData.pixelsOpacity[:])
+	return nil
+}
+
 func (g *Game) UpdatePixels() error {
 	// Open file for binary reading
 	data, err := os.ReadFile("output.bin")
@@ -325,6 +393,7 @@ func (g *Game) UpdatePixels() error {
 			if srcPos+3 > len(data) {
 				continue // Skip if not enough data
 			}
+
 			var value uint8
 			switch g.renderMode {
 			case renderDistance:
@@ -337,6 +406,12 @@ func (g *Game) UpdatePixels() error {
 				value = data[srcPos] // Use distance for grayscale
 				// Calculate normal shader
 				// g.CalculateNormalShader()
+			case renderFluid:
+				for i := 0; i < 3; i++ {
+					g.pixelsOpacity[dstPos+i] = data[srcPos+2]
+					g.pixelsVelocity[dstPos+i] = data[srcPos+1]
+					g.pixelsDistance[dstPos+i] = data[srcPos]
+				}
 			}
 
 			// Build a grayscale pixel based on the chosen channel
@@ -351,6 +426,41 @@ func (g *Game) UpdatePixels() error {
 	if g.img == nil {
 		g.img = ebiten.NewImage(screenWidth, screenHeight)
 	}
+	if renderFluid == g.renderMode {
+		if g.imgVelocity == nil {
+			g.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
+		}
+		if g.imgOpacity == nil {
+			g.imgOpacity = ebiten.NewImage(screenWidth, screenHeight)
+		}
+		if g.imgDistance == nil {
+			g.imgDistance = ebiten.NewImage(screenWidth, screenHeight)
+		}
+		g.imgVelocity.WritePixels(g.pixelsVelocity[:])
+		g.imgOpacity.WritePixels(g.pixelsOpacity[:])
+		g.imgDistance.WritePixels(g.pixelsDistance[:])
+
+		newImage := ebiten.NewImageFromImage(g.imgDistance)
+
+		opts := &ebiten.DrawRectShaderOptions{}
+		opts.Images[0] = g.img
+		// assign the camera direction to the shader options
+		opts.Uniforms = map[string]interface{}{
+			"cameraDirX": g.camera.DirX,
+			"cameraDirY": g.camera.DirY,
+			"cameraDirZ": g.camera.DirZ,
+		}
+		newImage.DrawRectShader(
+			newImage.Bounds().Dx(),
+			newImage.Bounds().Dy(),
+			g.normalShader,
+			opts,
+		)
+		g.imgNormal = newImage
+
+		return nil
+	}
+
 	g.img.WritePixels(g.pixels[:])
 	return nil
 }
@@ -681,11 +791,15 @@ func (g *Game) handleCameraMovement() {
 func (g *Game) Update() error {
 	// Toggle render mode between distance, velocity and opacity
 	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-		g.renderMode = (g.renderMode + 1) % 4
+		g.renderMode = (g.renderMode + 1) % 5
 		fmt.Println("Render mode changed to", g.renderMode)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		g.mode = (g.mode + 1) % 2
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyC) {
+		fmt.Println("C key pressed, toggling camera/light position")
+		g.CameraOrLightPosition = !g.CameraOrLightPosition // Toggle between camera and light position
 	}
 
 	// select shader with number keys
@@ -759,6 +873,11 @@ func (g *Game) Update() error {
 		if err := g.UpdatePixels(); err != nil {
 			fmt.Printf("Error updating pixels: %v\n", err)
 		}
+		// fmt.Println("Pixels updated")
+		if err := g.UpdatePixelsGeneral("light.bin"); err != nil {
+			fmt.Printf("Error updating camera pixels: %v\n", err)
+		}
+		// fmt.Println("Camera pixels updated")
 		g.lastUpdate = now
 
 		// write pause state to file
@@ -807,8 +926,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 		if g.renderMode == renderNormal {
 			newImage := ebiten.NewImageFromImage(g.img)
+
 			opts := &ebiten.DrawRectShaderOptions{}
 			opts.Images[0] = g.img
+			// assign the camera direction to the shader options
+			opts.Uniforms = map[string]interface{}{
+				"cameraDirX": g.camera.DirX,
+				"cameraDirY": g.camera.DirY,
+				"cameraDirZ": g.camera.DirZ,
+			}
 			newImage.DrawRectShader(
 				newImage.Bounds().Dx(),
 				newImage.Bounds().Dy(),
@@ -816,12 +942,94 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				opts,
 			)
 			g.img = newImage
-			// for _, shader := range g.shaders {
-			// 	g.img = ApplyShader(g.img, &shader)
+		}
+		if g.renderMode == renderFluid {
+			for _, shader := range g.shaders {
+				g.imgNormal = ApplyShader(g.imgNormal, &shader)
+				g.imgOpacity = ApplyShader(g.imgOpacity, &shader)
+			}
+
+			newImage := ebiten.NewImage(screenWidth, screenHeight) // Create clean image instead of copying from g.img
+			opts := &ebiten.DrawRectShaderOptions{}
+			opts.Images[0] = g.imgNormal
+			opts.Images[1] = g.imgOpacity
+			opts.Images[2] = g.imgVelocity
+			opts.Images[3] = g.cameraImageData.imgOpacity
+			opts.Uniforms = map[string]interface{}{
+				"CameraDirX":  g.camera.DirX,
+				"CameraDirY":  g.camera.DirY,
+				"CameraDirZ":  g.camera.DirZ,
+				"CameraPosX":  g.camera.PosX,
+				"CameraPosY":  g.camera.PosY,
+				"CameraPosZ":  g.camera.PosZ,
+				"WaterColorR": 0.4,
+				"WaterColorG": 0.85,
+				"WaterColorB": 0.95,
+			}
+			newImage.DrawRectShader(
+				newImage.Bounds().Dx(),
+				newImage.Bounds().Dy(),
+				g.waterShader,
+				opts,
+			)
+			g.img = newImage
+		}
+
+		if g.CameraOrLightPosition {
+			screen.DrawImage(g.img, nil)
+		} else {
+			screen.DrawImage(g.cameraImageData.imgOpacity, nil)
+			// switch g.renderMode {
+			// case renderDistance:
+			// 	tempImg := g.cameraImageData.imgDistance
+			// 	for _, shader := range g.shaders {
+			// 		tempImg = ApplyShader(tempImg, &shader)
+			// 	}
+			// 	screen.DrawImage(tempImg, nil)
+			// 	fmt.Println("Drawing distance image")
+			// case renderVelocity:
+			// 	tempImg := g.cameraImageData.imgVelocity
+			// 	for _, shader := range g.shaders {
+			// 		tempImg = ApplyShader(tempImg, &shader)
+			// 	}
+			// 	screen.DrawImage(tempImg, nil)
+			// 	fmt.Println("Drawing velocity image")
+			// case renderOpacity:
+			// 	tempImg := g.cameraImageData.imgOpacity
+			// 	for _, shader := range g.shaders {
+			// 		tempImg = ApplyShader(tempImg, &shader)
+			// 	}
+			// 	screen.DrawImage(tempImg, nil)
+			// 	fmt.Println("Drawing opacity image")
+			// case renderNormal:
+			// 	tempImg := g.cameraImageData.imgDistance
+			// 	for _, shader := range g.shaders {
+			// 		tempImg = ApplyShader(tempImg, &shader)
+			// 	}
+			// 	newImage := ebiten.NewImageFromImage(tempImg)
+
+			// 	opts := &ebiten.DrawRectShaderOptions{}
+			// 	opts.Images[0] = tempImg
+			// 	// assign the camera direction to the shader options
+			// 	opts.Uniforms = map[string]interface{}{
+			// 		"cameraDirX": g.camera.DirX,
+			// 		"cameraDirY": g.camera.DirY,
+			// 		"cameraDirZ": g.camera.DirZ,
+			// 	}
+			// 	newImage.DrawRectShader(
+			// 		newImage.Bounds().Dx(),
+			// 		newImage.Bounds().Dy(),
+			// 		g.normalShader,
+			// 		opts,
+			// 	)
+			// 	screen.DrawImage(newImage, nil)
+			// 	fmt.Println("Drawing normal image")
 			// }
 		}
-		screen.DrawImage(g.img, nil)
 
+		// screen.DrawImage(g.cameraImageData.imgDistance, nil)
+		// screen.DrawImage(g.cameraImageData.imgVelocity, nil)
+		// screen.DrawImage(g.cameraImageData.imgOpacity, nil)
 	}
 	PlotFPS(screen)
 	PlotTimePartition(screen)
@@ -838,6 +1046,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				return "Normalized Opacity"
 			case renderNormal:
 				return "Normal"
+			case renderFluid:
+				return "Fluid"
 			}
 			return ""
 		}()))
@@ -857,6 +1067,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Opacity (Press R to cycle)", 0, 110)
 	} else if g.renderMode == renderNormal {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Normal (Press R to cycle)", 0, 110)
+	} else if g.renderMode == renderFluid {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Fluid (Press R to cycle)", 0, 110)
+	} else {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Unknown", 0, 110)
 	}
 	// print shaders and how to change them
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Shader Menu (Press M/N to cycle, O to select option, scroll to adjust)"), 0, 130)
@@ -878,6 +1092,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		} else {
 			ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Shader %d: %s shader options %s", i+1, shader.name, optionsStr), 0, 150+i*20)
 		}
+	}
+	// print if the camera or light position is being rendered
+	if g.CameraOrLightPosition {
+		ebitenutil.DebugPrintAt(screen, "Rendering Camera Position (Switch with C)", 0, 200)
+	} else {
+		ebitenutil.DebugPrintAt(screen, "Rendering Light Position (Switch with C)", 0, 200)
 	}
 
 }
@@ -966,6 +1186,28 @@ func main() {
 		panic(err)
 	}
 
+	src, err = loadShader("shaders/gaussianBlur.kage")
+	if err != nil {
+		fmt.Printf("Error loading shader: %v\n", err)
+		panic(err)
+	}
+	gaussianBlurShader, err := ebiten.NewShader(src)
+	if err != nil {
+		fmt.Printf("Error creating shader: %v\n", err)
+		panic(err)
+	}
+
+	waterShaderSrc, err := loadShader("shaders/water.kage")
+	if err != nil {
+		fmt.Printf("Error loading water shader: %v\n", err)
+		panic(err)
+	}
+	waterShader, err := ebiten.NewShader(waterShaderSrc)
+	if err != nil {
+		fmt.Printf("Error creating water shader: %v\n", err)
+		panic(err)
+	}
+
 	// src, err = loadShader("shaders/example.kage")
 	// if err != nil {
 	// 	fmt.Printf("Error loading shader: %v\n", err)
@@ -979,9 +1221,10 @@ func main() {
 
 	shaders := []Shader{
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 2.0, "SigmaRange": 1.5}, name: "Blur"},
-		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.15, "SigmaRange": 0.5}, name: "Blur"},
-		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.25, "SigmaRange": 0.5}, name: "Blur"},
-		// {shader: example, name: "ExampleShader"},
+		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.45, "SigmaRange": 0.5}, name: "Blur"},
+		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.65, "SigmaRange": 0.5}, name: "Blur"},
+		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.85, "SigmaRange": 0.5}, name: "Blur"},
+		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 1.05, "SigmaRange": 0.5}, name: "Blur"},
 	}
 
 	game := &Game{
@@ -995,15 +1238,19 @@ func main() {
 		cursor: Cursor{
 			X: 0.0, Y: 0.0, Z: 0.0,
 			active:    false,
-			force:     100.0,
+			force:     10.0,
 			rightDrag: false,
 		},
-		renderMode:       renderDistance,
-		shaders:          shaders,
-		selectedShader:   0,
-		selectedOption:   "",
-		optionChangeRate: 0.075, // 7.5% change per scroll event
-		normalShader:     calculateNormalShader,
+		renderMode:            renderDistance,
+		shaders:               shaders,
+		selectedShader:        0,
+		selectedOption:        "",
+		optionChangeRate:      0.075, // 7.5% change per scroll event
+		normalShader:          calculateNormalShader,
+		gaussianBlurShader:    gaussianBlurShader,
+		waterShader:           waterShader,
+		cameraImageData:       &CameraImageData{},
+		CameraOrLightPosition: true,
 	}
 
 	// write cursor data to file

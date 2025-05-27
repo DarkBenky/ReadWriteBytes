@@ -1,0 +1,127 @@
+package blur
+
+var CameraDirX float
+var CameraDirY float
+var CameraDirZ float
+var CameraPosX float
+var CameraPosY float
+var CameraPosZ float
+var WaterColorR float
+var WaterColorG float
+var WaterColorB float
+
+
+// light parameters
+const LightDirX = -0.148
+const LightDirY = -0.721
+const LightDirZ = 0.680
+const LightPosX = 50.142
+const LightPosY = 142.607
+const LightPosZ = -62.493
+
+func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
+    //    image 0 = Normal map
+    //    image 1 = Opacity map (Depth map normalized to [0,1] range in Logarithmic scale)
+    //    image 2 = Velocity map (if the particle is moving fast draw it as a foam particle)
+    //    image 3 = Opacity map from Light Perspective (Depth map normalized to [0,1] range in Logarithmic scale from light source)
+
+    normal := imageSrc0At(texCoord)
+    opacityFromCamera := imageSrc1At(texCoord)
+    velocity := imageSrc2At(texCoord)
+    opacityFromLightSource := imageSrc3At(texCoord)
+
+    velocity = velocity*0.55
+
+    if opacityFromCamera.r < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0) // Fully transparent
+    }
+
+    // Convert normal from [0,1] to [-1,1] range
+    normalWorld := normalize(normal.xyz * 2.0 - 1.0)
+    
+    // Light direction from light position
+    lightPos := vec3(LightPosX, LightPosY, LightPosZ)
+    // For directional lighting, normalize the light position as direction
+    lightDir := normalize(lightPos)
+    
+    // Camera direction
+    viewDir := normalize(vec3(CameraDirX, CameraDirY, CameraDirZ))
+    
+    // Water depth from camera (lighter opacity = shallower water, darker opacity = deeper water)
+    depthFromCamera := 1.0 - opacityFromCamera.r  // Invert: light opacity = shallow, dark opacity = deep
+    depthFromCamera = clamp(depthFromCamera, 0.125, 1.0)
+    
+    // Water depth from light source for shadows and light attenuation
+    depthFromLight := 1.0 - opacityFromLightSource.r
+    depthFromLight = clamp(depthFromLight, 0.0, 1.0)
+    
+    // Foam calculation based on velocity
+    velocityMagnitude := velocity.r
+    foamThreshold := 0.3
+    foamIntensity := smoothstep(foamThreshold, 1.0, velocityMagnitude)
+    
+    // Base water color that gets darker with depth
+    waterColor := vec3(WaterColorR, WaterColorG, WaterColorB)
+    deepWaterColor := waterColor * 0.1
+    
+    // Foam color
+    foamColor := vec3(0.75, 0.65, 0.9)
+    
+    // Mix between water color and foam color based on velocity
+    baseColor := mix(waterColor, foamColor, foamIntensity)
+    baseColor = mix(baseColor, deepWaterColor * (1.0 - foamIntensity), depthFromCamera * (1.0 - foamIntensity))
+    
+    // Different scattering coefficients for each color channel
+    // Red light penetrates least, blue light penetrates most
+    scatteringCoeff := vec3(3.5, 2.0, 1.2) // Red, Green, Blue scattering
+    
+    // Light attenuation through water with different scattering per channel
+    lightAttenuationR := mix(exp(-depthFromLight * scatteringCoeff.r), exp(-depthFromLight * scatteringCoeff.r * 0.3), foamIntensity)
+    lightAttenuationG := mix(exp(-depthFromLight * scatteringCoeff.g), exp(-depthFromLight * scatteringCoeff.g * 0.3), foamIntensity)
+    lightAttenuationB := mix(exp(-depthFromLight * scatteringCoeff.b), exp(-depthFromLight * scatteringCoeff.b * 0.3), foamIntensity)
+    lightAttenuation := vec3(lightAttenuationR, lightAttenuationG, lightAttenuationB)
+    
+    // Camera attenuation with different scattering per channel
+    cameraAttenuationR := mix(exp(-depthFromCamera * scatteringCoeff.r * 0.6), exp(-depthFromCamera * scatteringCoeff.r * 0.15), foamIntensity)
+    cameraAttenuationG := mix(exp(-depthFromCamera * scatteringCoeff.g * 0.6), exp(-depthFromCamera * scatteringCoeff.g * 0.15), foamIntensity)
+    cameraAttenuationB := mix(exp(-depthFromCamera * scatteringCoeff.b * 0.6), exp(-depthFromCamera * scatteringCoeff.b * 0.15), foamIntensity)
+    cameraAttenuation := vec3(cameraAttenuationR, cameraAttenuationG, cameraAttenuationB)
+    
+    // Combine both attenuations per channel
+    totalAttenuation := lightAttenuation * cameraAttenuation
+    
+    // Diffuse lighting
+    diffuse := max(0.0, dot(normalWorld, lightDir))
+    diffuse = mix(diffuse, diffuse * 1.5, foamIntensity)
+    diffuseColor := baseColor * diffuse * totalAttenuation
+    
+    // Fresnel effect
+    fresnel := pow(1.0 - max(0.0, dot(normalWorld, viewDir)), 2.0)
+    fresnel = mix(0.02, 0.8, fresnel)
+    fresnel = mix(fresnel, fresnel * 0.3, foamIntensity)
+    
+    // Sky reflection with wavelength-dependent reflection
+    skyColor := vec3(0.6, 0.8, 1.0)
+    reflectionColor := skyColor * fresnel * totalAttenuation
+    
+    // Specular highlight
+    halfVector := normalize(lightDir + viewDir)
+    specular := pow(max(0.0, dot(normalWorld, halfVector)), 32.0)
+    foamSpecular := pow(max(0.0, dot(normalWorld, halfVector)), mix(32.0, 8.0, foamIntensity))
+    specular = mix(specular, foamSpecular * 2.0, foamIntensity)
+    specularColor := vec3(1.0) * specular * totalAttenuation * 0.5
+    
+    // Ambient light with per-channel attenuation
+    ambientIntensity := mix(0.2, 0.6, foamIntensity)
+    ambientColor := baseColor * ambientIntensity * cameraAttenuation
+    
+    // Combine all lighting components
+    finalColor := ambientColor + diffuseColor + reflectionColor + specularColor
+    finalColor = finalColor * 2.9
+    finalColor = clamp(finalColor, 0.0, 1.0) // Ensure color is within [0,1] range
+    
+    // Alpha based on camera depth, with foam being more opaque
+    alpha := mix(depthFromCamera, min(1.0, depthFromCamera * 1.5), foamIntensity)
+
+    return vec4(finalColor, alpha)
+}

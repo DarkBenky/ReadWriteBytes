@@ -1,8 +1,7 @@
 package blur
 
 // Define constants for kernel size and sigma values
-const KernelSize = 9
-var SigmaSpatial float
+const KernelSize = 5
 var SigmaRange float
 
 func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
@@ -13,9 +12,6 @@ func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
     sum := vec4(0.0)
     weightSum := 0.0
 
-    // Get the color of the current pixel
-    centerColor := imageSrc0At(texCoord)
-
     // Loop over the kernel
     for y := -halfSize; y <= halfSize; y++ {
         for x := -halfSize; x <= halfSize; x++ {
@@ -25,16 +21,9 @@ func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
             // Get the color at the neighboring pixel
             sampleColor := imageSrc0At(texCoord + offset)
 
-            // Compute the spatial weight
-            spatialDist := float(x*x + y*y)
-            spatialWeight := exp(-spatialDist / (2.0 * SigmaSpatial * SigmaSpatial))
-
-            // Compute the range (color) weight
-            colorDiff := sampleColor.rgb - centerColor.rgb
-            rangeWeight := exp(-dot(colorDiff, colorDiff) / (2.0 * SigmaRange * SigmaRange))
-
-            // Combine the weights
-            weight := spatialWeight * rangeWeight
+            // Compute the spatial weight (distance-based Gaussian)
+            distance := float(x*x + y*y)
+            weight := exp(-distance / (2.0 * SigmaRange * SigmaRange))
 
             // Accumulate the weighted color and weight
             sum += sampleColor * weight

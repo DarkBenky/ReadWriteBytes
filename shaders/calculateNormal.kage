@@ -1,5 +1,9 @@
 package blur
 
+var DirX float
+var DirY float
+var DirZ float
+
 func Fragment(dstPos vec4, texCoord vec2, color vec4) vec4 {
     size := imageSrcTextureSize()
     XStep := 1.0 / size.x
