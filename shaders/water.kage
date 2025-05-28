@@ -29,6 +29,8 @@ func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
     opacityFromCamera := imageSrc1At(texCoord)
     velocity := imageSrc2At(texCoord)
     opacityFromLightSource := imageSrc3At(texCoord)
+    distanceFromCamera := imageSrc4At(texCoord)
+    distanceFromLightSource := imageSrc5At(texCoord)
 
     velocity = velocity*0.55
 
@@ -117,7 +119,7 @@ func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
     
     // Combine all lighting components
     finalColor := ambientColor + diffuseColor + reflectionColor + specularColor
-    finalColor = finalColor * 2.9
+    finalColor = finalColor * 2.5
     finalColor = clamp(finalColor, 0.0, 1.0) // Ensure color is within [0,1] range
     
     // Alpha based on camera depth, with foam being more opaque

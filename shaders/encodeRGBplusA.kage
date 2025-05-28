@@ -1,0 +1,13 @@
+package main
+
+func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
+    // Get RGB from first image (imageSrc0)
+    rgbData := imageSrc0At(texCoord)
+    
+    // Get Alpha from second image (imageSrc1) 
+    // Using the red channel of the second image as alpha
+    alphaData := imageSrc1At(texCoord)
+    
+    // Combine RGB from first image with Alpha from second image
+    return vec4(rgbData.rgb, alphaData.r)
+}

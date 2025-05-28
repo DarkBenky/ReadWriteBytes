@@ -24,7 +24,7 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] Update the MP code
+- [ ] Encode more data to the images for better fluid rendering
 - [ ] MP is slower
 
 ### Add Open GL to the go code to project particles on GPU directly
@@ -52,3 +52,4 @@ The results show that writing frames is faster than reading them, with write ope
 - [x] particle grid based on the Sebastian's video https://m.youtube.com/watch?v=pLwYMecqOxY
 - [X] more realistic attraction and repulsion
 - [X] optimized the sorting of the particles
+- [X] Update the MP code

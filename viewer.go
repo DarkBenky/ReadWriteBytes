@@ -947,6 +947,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			for _, shader := range g.shaders {
 				g.imgNormal = ApplyShader(g.imgNormal, &shader)
 				g.imgOpacity = ApplyShader(g.imgOpacity, &shader)
+				g.imgVelocity = ApplyShader(g.imgVelocity, &shader)
+				g.cameraImageData.imgOpacity = ApplyShader(g.cameraImageData.imgOpacity, &shader)
 			}
 
 			newImage := ebiten.NewImage(screenWidth, screenHeight) // Create clean image instead of copying from g.img
@@ -978,53 +980,53 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		if g.CameraOrLightPosition {
 			screen.DrawImage(g.img, nil)
 		} else {
-			screen.DrawImage(g.cameraImageData.imgOpacity, nil)
-			// switch g.renderMode {
-			// case renderDistance:
-			// 	tempImg := g.cameraImageData.imgDistance
-			// 	for _, shader := range g.shaders {
-			// 		tempImg = ApplyShader(tempImg, &shader)
-			// 	}
-			// 	screen.DrawImage(tempImg, nil)
-			// 	fmt.Println("Drawing distance image")
-			// case renderVelocity:
-			// 	tempImg := g.cameraImageData.imgVelocity
-			// 	for _, shader := range g.shaders {
-			// 		tempImg = ApplyShader(tempImg, &shader)
-			// 	}
-			// 	screen.DrawImage(tempImg, nil)
-			// 	fmt.Println("Drawing velocity image")
-			// case renderOpacity:
-			// 	tempImg := g.cameraImageData.imgOpacity
-			// 	for _, shader := range g.shaders {
-			// 		tempImg = ApplyShader(tempImg, &shader)
-			// 	}
-			// 	screen.DrawImage(tempImg, nil)
-			// 	fmt.Println("Drawing opacity image")
-			// case renderNormal:
-			// 	tempImg := g.cameraImageData.imgDistance
-			// 	for _, shader := range g.shaders {
-			// 		tempImg = ApplyShader(tempImg, &shader)
-			// 	}
-			// 	newImage := ebiten.NewImageFromImage(tempImg)
+			// screen.DrawImage(g.cameraImageData.imgOpacity, nil)
+			switch g.renderMode {
+			case renderDistance:
+				tempImg := g.cameraImageData.imgDistance
+				for _, shader := range g.shaders {
+					tempImg = ApplyShader(tempImg, &shader)
+				}
+				screen.DrawImage(tempImg, nil)
+				fmt.Println("Drawing distance image")
+			case renderVelocity:
+				tempImg := g.cameraImageData.imgVelocity
+				for _, shader := range g.shaders {
+					tempImg = ApplyShader(tempImg, &shader)
+				}
+				screen.DrawImage(tempImg, nil)
+				fmt.Println("Drawing velocity image")
+			case renderOpacity:
+				tempImg := g.cameraImageData.imgOpacity
+				for _, shader := range g.shaders {
+					tempImg = ApplyShader(tempImg, &shader)
+				}
+				screen.DrawImage(tempImg, nil)
+				fmt.Println("Drawing opacity image")
+			case renderNormal:
+				tempImg := g.cameraImageData.imgDistance
+				for _, shader := range g.shaders {
+					tempImg = ApplyShader(tempImg, &shader)
+				}
+				newImage := ebiten.NewImageFromImage(tempImg)
 
-			// 	opts := &ebiten.DrawRectShaderOptions{}
-			// 	opts.Images[0] = tempImg
-			// 	// assign the camera direction to the shader options
-			// 	opts.Uniforms = map[string]interface{}{
-			// 		"cameraDirX": g.camera.DirX,
-			// 		"cameraDirY": g.camera.DirY,
-			// 		"cameraDirZ": g.camera.DirZ,
-			// 	}
-			// 	newImage.DrawRectShader(
-			// 		newImage.Bounds().Dx(),
-			// 		newImage.Bounds().Dy(),
-			// 		g.normalShader,
-			// 		opts,
-			// 	)
-			// 	screen.DrawImage(newImage, nil)
-			// 	fmt.Println("Drawing normal image")
-			// }
+				opts := &ebiten.DrawRectShaderOptions{}
+				opts.Images[0] = tempImg
+				// assign the camera direction to the shader options
+				opts.Uniforms = map[string]interface{}{
+					"cameraDirX": g.camera.DirX,
+					"cameraDirY": g.camera.DirY,
+					"cameraDirZ": g.camera.DirZ,
+				}
+				newImage.DrawRectShader(
+					newImage.Bounds().Dx(),
+					newImage.Bounds().Dy(),
+					g.normalShader,
+					opts,
+				)
+				screen.DrawImage(newImage, nil)
+				fmt.Println("Drawing normal image")
+			}
 		}
 
 		// screen.DrawImage(g.cameraImageData.imgDistance, nil)
@@ -1221,8 +1223,8 @@ func main() {
 
 	shaders := []Shader{
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 2.0, "SigmaRange": 1.5}, name: "Blur"},
-		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.45, "SigmaRange": 0.5}, name: "Blur"},
-		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.65, "SigmaRange": 0.5}, name: "Blur"},
+		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.75, "SigmaRange": 0.5}, name: "Blur"},
+		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 1.25, "SigmaRange": 0.5}, name: "Blur"},
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.85, "SigmaRange": 0.5}, name: "Blur"},
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 1.05, "SigmaRange": 0.5}, name: "Blur"},
 	}
