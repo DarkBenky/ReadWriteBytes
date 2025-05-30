@@ -25,6 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Encode more data to the images for better fluid rendering
+- [ ] Build Rasterize - 3D
 - [ ] MP is slower
 
 ### Add Open GL to the go code to project particles on GPU directly
