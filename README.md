@@ -25,6 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Encode more data to the images for better fluid rendering
+- [ ] Idea we can render based on distance buffer we don't need to sort
 - [ ] share image as shared memory
 - [ ] Build Rasterize - 3D
 - [ ] MP is slower
