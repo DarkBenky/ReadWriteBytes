@@ -24,7 +24,7 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] Encode more data to the images for better fluid rendering
+- [ ] render fluid in c ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
 - [ ] Idea we can render based on distance buffer we don't need to sort
 - [ ] share image as shared memory
 - [ ] Build Rasterize - 3D
@@ -56,3 +56,4 @@ The results show that writing frames is faster than reading them, with write ope
 - [X] more realistic attraction and repulsion
 - [X] optimized the sorting of the particles
 - [X] Update the MP code
+- [X] Encode more data to the images for better fluid rendering
