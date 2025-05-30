@@ -61,6 +61,7 @@ type Game struct {
 	normalShader                       *ebiten.Shader
 	gaussianBlurShader                 *ebiten.Shader
 	waterShader                        *ebiten.Shader
+	mixShader                          *ebiten.Shader
 	img                                *ebiten.Image
 	imgVelocity                        *ebiten.Image
 	imgOpacity                         *ebiten.Image
@@ -918,66 +919,91 @@ func ApplyShader(image *ebiten.Image, shader *Shader) *ebiten.Image {
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	// Always draw g.img (which now represents the chosen channel)
-	if g.img != nil {
-		// apply shaders
-		for _, shader := range g.shaders {
-			g.img = ApplyShader(g.img, &shader)
-		}
 
-		if g.renderMode == renderNormal {
-			newImage := ebiten.NewImageFromImage(g.img)
-
-			opts := &ebiten.DrawRectShaderOptions{}
-			opts.Images[0] = g.img
-			// assign the camera direction to the shader options
-			opts.Uniforms = map[string]interface{}{
-				"cameraDirX": g.camera.DirX,
-				"cameraDirY": g.camera.DirY,
-				"cameraDirZ": g.camera.DirZ,
-			}
-			newImage.DrawRectShader(
-				newImage.Bounds().Dx(),
-				newImage.Bounds().Dy(),
-				g.normalShader,
-				opts,
-			)
-			g.img = newImage
-		}
-		if g.renderMode == renderFluid {
+	if g.CameraOrLightPosition {
+		if g.img != nil {
+			// apply shaders
 			for _, shader := range g.shaders {
-				g.imgNormal = ApplyShader(g.imgNormal, &shader)
-				g.imgOpacity = ApplyShader(g.imgOpacity, &shader)
-				g.imgVelocity = ApplyShader(g.imgVelocity, &shader)
-				g.cameraImageData.imgOpacity = ApplyShader(g.cameraImageData.imgOpacity, &shader)
+				g.img = ApplyShader(g.img, &shader)
 			}
 
-			newImage := ebiten.NewImage(screenWidth, screenHeight) // Create clean image instead of copying from g.img
-			opts := &ebiten.DrawRectShaderOptions{}
-			opts.Images[0] = g.imgNormal
-			opts.Images[1] = g.imgOpacity
-			opts.Images[2] = g.imgVelocity
-			opts.Images[3] = g.cameraImageData.imgOpacity
-			opts.Uniforms = map[string]interface{}{
-				"CameraDirX":  g.camera.DirX,
-				"CameraDirY":  g.camera.DirY,
-				"CameraDirZ":  g.camera.DirZ,
-				"CameraPosX":  g.camera.PosX,
-				"CameraPosY":  g.camera.PosY,
-				"CameraPosZ":  g.camera.PosZ,
-				"WaterColorR": 0.4,
-				"WaterColorG": 0.85,
-				"WaterColorB": 0.95,
-			}
-			newImage.DrawRectShader(
-				newImage.Bounds().Dx(),
-				newImage.Bounds().Dy(),
-				g.waterShader,
-				opts,
-			)
-			g.img = newImage
-		}
+			if g.renderMode == renderNormal {
+				newImage := ebiten.NewImageFromImage(g.img)
 
-		if g.CameraOrLightPosition {
+				opts := &ebiten.DrawRectShaderOptions{}
+				opts.Images[0] = g.img
+				// assign the camera direction to the shader options
+				opts.Uniforms = map[string]interface{}{
+					"cameraDirX": g.camera.DirX,
+					"cameraDirY": g.camera.DirY,
+					"cameraDirZ": g.camera.DirZ,
+				}
+				newImage.DrawRectShader(
+					newImage.Bounds().Dx(),
+					newImage.Bounds().Dy(),
+					g.normalShader,
+					opts,
+				)
+				g.img = newImage
+			}
+			if g.renderMode == renderFluid {
+				for _, shader := range g.shaders {
+					g.imgNormal = ApplyShader(g.imgNormal, &shader)
+					g.imgOpacity = ApplyShader(g.imgOpacity, &shader)
+					g.imgVelocity = ApplyShader(g.imgVelocity, &shader)
+					g.imgDistance = ApplyShader(g.imgDistance, &shader)
+					g.cameraImageData.imgOpacity = ApplyShader(g.cameraImageData.imgOpacity, &shader)
+					g.cameraImageData.imgDistance = ApplyShader(g.cameraImageData.imgDistance, &shader)
+				}
+
+				// encode normal and velocity images to one image
+				mixedData := ebiten.NewImage(screenWidth, screenHeight)
+				opts := &ebiten.DrawRectShaderOptions{}
+				opts.Images[0] = g.imgNormal
+				opts.Images[1] = g.imgDistance
+				mixedData.DrawRectShader(
+					mixedData.Bounds().Dx(),
+					mixedData.Bounds().Dy(),
+					g.mixShader,
+					opts,
+				)
+
+				mixedOpacityAndDistance := ebiten.NewImage(screenWidth, screenHeight)
+				opts = &ebiten.DrawRectShaderOptions{}
+				opts.Images[0] = g.cameraImageData.imgOpacity
+				opts.Images[1] = g.cameraImageData.imgDistance
+				mixedOpacityAndDistance.DrawRectShader(
+					mixedOpacityAndDistance.Bounds().Dx(),
+					mixedOpacityAndDistance.Bounds().Dy(),
+					g.mixShader,
+					opts,
+				)
+
+				newImage := ebiten.NewImage(screenWidth, screenHeight) // Create clean image instead of copying from g.img
+				opts = &ebiten.DrawRectShaderOptions{}
+				opts.Images[0] = mixedData
+				opts.Images[1] = g.imgOpacity
+				opts.Images[2] = g.imgVelocity
+				opts.Images[3] = mixedOpacityAndDistance
+				opts.Uniforms = map[string]interface{}{
+					"CameraDirX":  g.camera.DirX,
+					"CameraDirY":  g.camera.DirY,
+					"CameraDirZ":  g.camera.DirZ,
+					"CameraPosX":  g.camera.PosX,
+					"CameraPosY":  g.camera.PosY,
+					"CameraPosZ":  g.camera.PosZ,
+					"WaterColorR": 0.2,
+					"WaterColorG": 0.45,
+					"WaterColorB": 0.75,
+				}
+				newImage.DrawRectShader(
+					newImage.Bounds().Dx(),
+					newImage.Bounds().Dy(),
+					g.waterShader,
+					opts,
+				)
+				g.img = newImage
+			}
 			screen.DrawImage(g.img, nil)
 		} else {
 			// screen.DrawImage(g.cameraImageData.imgOpacity, nil)
@@ -1210,6 +1236,17 @@ func main() {
 		panic(err)
 	}
 
+	mixShaderSrc, err := loadShader("shaders/encodeRGBplusA.kage")
+	if err != nil {
+		fmt.Printf("Error loading mix shader: %v\n", err)
+		panic(err)
+	}
+	mixShader, err := ebiten.NewShader(mixShaderSrc)
+	if err != nil {
+		fmt.Printf("Error creating mix shader: %v\n", err)
+		panic(err)
+	}
+
 	// src, err = loadShader("shaders/example.kage")
 	// if err != nil {
 	// 	fmt.Printf("Error loading shader: %v\n", err)
@@ -1253,6 +1290,7 @@ func main() {
 		waterShader:           waterShader,
 		cameraImageData:       &CameraImageData{},
 		CameraOrLightPosition: true,
+		mixShader:             mixShader,
 	}
 
 	// write cursor data to file

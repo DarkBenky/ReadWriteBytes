@@ -1,7 +1,7 @@
 package blur
 
 // Define constants for kernel size and sigma values
-const KernelSize = 5
+const KernelSize = 9
 var SigmaRange float
 
 func Fragment(position vec4, texCoord vec2, color vec4) vec4 {

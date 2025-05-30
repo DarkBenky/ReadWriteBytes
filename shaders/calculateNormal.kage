@@ -23,12 +23,12 @@ func Fragment(dstPos vec4, texCoord vec2, color vec4) vec4 {
     dx := (hR - hL)
     dy := (hU - hD)
 
-
     if dx == 0 && dy == 0 {
         return vec4(0.5, 0.5, 1.0, 1.0) // Neutral normal pointing outwards
     }
 
     n := normalize(vec3(-dx, -dy, 1.0))
+    // Calculate normal vector
 
     // Output normal in RGB
     return vec4(n * 0.5 + 0.5, 1.0)  // map [-1, 1] to [0, 1] for display
