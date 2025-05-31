@@ -6,193 +6,49 @@ var CameraDirZ float
 var CameraPosX float
 var CameraPosY float
 var CameraPosZ float
-var WaterColorR float
-var WaterColorG float
-var WaterColorB float
-
-
-// light parameters
-const LightDirX = -0.148
-const LightDirY = -0.721
-const LightDirZ = 0.680
+var LightAbsorptionR float
+var LightAbsorptionG float
+var LightAbsorptionB float
 
 func Fragment(position vec4, texCoord vec2, color vec4) vec4 {
-    // normalFromCamera := imageSrc0At(texCoord).rgb
-    // depthMapFromCamera = clamp(depthMapFromCamera, 0.0, 1.0) // Ensure depth is within [0,1] range
-    // velocityFromCamera := imageSrc2At(texCoord)
-    // opacityFromLightSource := imageSrc3At(texCoord).rgb
-    // distanceFromLightSource := imageSrc3At(texCoord).a
+    // Sample input textures
+    normalFromCamera := imageSrc0At(texCoord).rgb * 2.0 - 1.0 // Normals [-1,1]
+    particleDensity := imageSrc1At(texCoord) // 0 no particles, darker is less particles (linear scale)
+    distanceToSurface := imageSrc2At(texCoord).r // darker is farther from surface (linear scale)
 
-    distanceFromCamera := imageSrc0At(texCoord).a
-    // depthMapFromCamera := imageSrc1At(texCoord).r * 0.5
-   
-   if !(distanceFromCamera > 0.99) {
-        return vec4(1.0, 1.0, 0.0, 0.0) // Fully transparent if too close
-    }
-
-    // Screen resolution (replace with actual values or uniform variables if needed)
-    screen := imageSrc0Size()
-
-    dx := 1.0 / screen.x
-    dy := 1.0 / screen.y
-
-    depthC := imageSrc1At(texCoord).r
-    depthX := imageSrc1At(texCoord + vec2(dx, 0.0)).r
-    depthY := imageSrc1At(texCoord + vec2(0.0, dy)).r
-
-    pC := vec3(texCoord.x, texCoord.y, depthC)
-    pX := vec3(texCoord.x + dx, texCoord.y, depthX)
-    pY := vec3(texCoord.x, texCoord.y + dy, depthY)
-
-    dX := pX - pC
-    dY := pY - pC
-
-    normal := cross(dX, dY)
-    if length(normal) == 0.0 {
-        return vec4(1.0, 0.5, 1.0, 1.0) // Neutral normal pointing outwards
-    }
-    normal = normalize(normal)
-
-    return vec4(normal, 1.0,)
-
-    // // fix velocity scaling
-    // velocityFromCamera *= 0.5
-
-    // if depthMapFromCamera < 0.01 {
-    //     return vec4(0.0, 0.0, 0.0, 0.0) // Fully transparent
-    // }
-
-    // // Convert normal from [0,1] to [-1,1] range
-    // normalWorld := normalize(normalFromCamera * 2.0 - 1.0)
+    // Camera direction vector
+    cameraDir := vec3(CameraDirX, CameraDirY, CameraDirZ)
     
-    // // Light direction from light position
-    // // For directional lighting, use the LightDir constants:
-    // lightDir := normalize(vec3(LightDirX, LightDirY, LightDirZ))
+    // Calculate view-dependent effects
+    viewDotNormal := dot(normalize(cameraDir), normalize(normalFromCamera))
     
-    // // Camera direction
-    // viewDir := normalize(vec3(CameraDirX, CameraDirY, CameraDirZ))
+    // Base water color (blue-green) - Fix: values should be 0.0-1.0
+    baseWaterColor := vec3(0.2, 0.6, 0.9)
     
-    // // add absorption & soft shadow settings
-    // AbsorptionCoeff := vec3(0.15, 0.07, 0.03) // per‐meter for R, G, B
-
-    // // restore Beer–Lambert transmittance (camera side)
-    // transmittance := exp(-AbsorptionCoeff * distanceFromCamera)
-
-    // // 4-tap PCF soft shadow from the light’s opacity map:
-    // pcfRadius := 1.0 / 512.0    // assumes a 512² shadow map
-    // bias      := 0.005
-
-    // shadow0 := 1.0
-    // if distanceFromLightSource > (1.0 - imageSrc3At(texCoord + vec2( pcfRadius,  pcfRadius)).a) + bias {
-    //     shadow0 = 0.3
-    // }
-    // shadow1 := 1.0
-    // if distanceFromLightSource > (1.0 - imageSrc3At(texCoord + vec2(-pcfRadius,  pcfRadius)).a) + bias {
-    //     shadow1 = 0.3
-    // }
-    // shadow2 := 1.0
-    // if distanceFromLightSource > (1.0 - imageSrc3At(texCoord + vec2( pcfRadius, -pcfRadius)).a) + bias {
-    //     shadow2 = 0.3
-    // }
-    // shadow3 := 1.0
-    // if distanceFromLightSource > (1.0 - imageSrc3At(texCoord + vec2(-pcfRadius, -pcfRadius)).a) + bias {
-    //     shadow3 = 0.3
-    // }
-    // shadowFactor := (shadow0 + shadow1 + shadow2 + shadow3) * 0.25
-
-    // // Water depth from light source for shadows and light attenuation
-    // // Use opacity from light perspective for shadow mapping
-    // lightDepthMap := 1.0 - opacityFromLightSource.r
-    // depthFromLight := distanceFromLightSource * 0.1
+    // Calculate attenuation based on distance and particles
+    // densityFactor := 1.0 - particleDensity.r
+    distanceFactor := distanceToSurface
     
-    // // Shadow comparison - compare actual distance vs depth map
-    // shadowBias := 0.005
-    // shadowOcclusion := 1.0
-    // if distanceFromLightSource > (lightDepthMap + shadowBias) {
-    //     shadowOcclusion = 0.3
-    // }
+    // Simple color mixing instead of exponential absorption
+    deepWaterColor := vec3(0.1, 0.3, 0.6)
+    waterColor := mix(baseWaterColor, deepWaterColor, distanceFactor * 0.5)
     
-    // // Foam calculation based on velocity
-    // velocityMagnitude := velocityFromCamera.r
-    // foamThreshold := 0.3
-    // foamIntensity := smoothstep(foamThreshold, 1.0, velocityMagnitude)
+    // Add particle scattering effect (increase intensity)
+    scatteringEffect := particleDensity.r * 0.3
+    scatteredLight := vec3(0.8, 0.9, 1.0) * scatteringEffect
     
-    // // Base water color that gets darker with depth
-    // waterColor := vec3(WaterColorR, WaterColorG, WaterColorB)
-    // deepWaterColor := waterColor * 0.1
+    // Fresnel-like effect based on viewing angle (increase base reflection)
+    fresnel := pow(1.0 - abs(viewDotNormal), 2.0)
+    surfaceReflection := vec3(0.9, 0.95, 1.0) * fresnel * 0.2
     
-    // // Foam color
-    // foamColor := vec3(0.75, 0.65, 0.9)
+    // Combine all effects
+    finalColor := waterColor + scatteredLight + surfaceReflection
     
-    // // Mix between water color and foam color based on velocity
-    // baseColor := mix(waterColor, foamColor, foamIntensity)
-    // baseColor = mix(baseColor, deepWaterColor * (1.0 - foamIntensity), distanceFromCamera * 0.1 * (1.0 - foamIntensity))
+    // Clamp to valid range
+    finalColor = clamp(finalColor, 0.0, 1.0)
     
-    // // Different scattering coefficients for each color channel
-    // // Red light penetrates least, blue light penetrates most
-    // scatteringCoeff := vec3(3.5, 2.0, 1.2) // Red, Green, Blue scattering
+    // Much more opaque alpha
+    alpha := 0.9
     
-    // // Light attenuation through water with different scattering per channel
-    // // Enhanced light attenuation with shadow occlusion
-    // lightAttenuationR := mix(exp(-depthFromLight * scatteringCoeff.r), exp(-depthFromLight * scatteringCoeff.r * 0.3), foamIntensity) * shadowOcclusion
-    // lightAttenuationG := mix(exp(-depthFromLight * scatteringCoeff.g), exp(-depthFromLight * scatteringCoeff.g * 0.3), foamIntensity) * shadowOcclusion
-    // lightAttenuationB := mix(exp(-depthFromLight * scatteringCoeff.b), exp(-depthFromLight * scatteringCoeff.b * 0.3), foamIntensity) * shadowOcclusion
-    // lightAttenuation := vec3(lightAttenuationR, lightAttenuationG, lightAttenuationB)
-    
-    // // Camera attenuation with different scattering per channel
-    // cameraAttenuationR := mix(exp(-distanceFromCamera * scatteringCoeff.r * 0.6), exp(-distanceFromCamera * scatteringCoeff.r * 0.15), foamIntensity)
-    // cameraAttenuationG := mix(exp(-distanceFromCamera * scatteringCoeff.g * 0.6), exp(-distanceFromCamera * scatteringCoeff.g * 0.15), foamIntensity)
-    // cameraAttenuationB := mix(exp(-distanceFromCamera * scatteringCoeff.b * 0.6), exp(-distanceFromCamera * scatteringCoeff.b * 0.15), foamIntensity)
-    // cameraAttenuation := vec3(cameraAttenuationR, cameraAttenuationG, cameraAttenuationB)
-    
-    // // Combine both attenuations per channel
-    // totalAttenuation := lightAttenuation * cameraAttenuation
-    
-    // // Diffuse lighting
-    // diffuse := max(0.0, dot(normalWorld, lightDir))
-    // diffuse = mix(diffuse, diffuse * 1.5, foamIntensity)
-    
-    // // Subsurface scattering using RGB channels from light perspective
-    // subsurfaceR := opacityFromLightSource.r * 0.4
-    // subsurfaceG := opacityFromLightSource.g * 0.6
-    // subsurfaceB := opacityFromLightSource.b * 0.8
-    // subsurface := vec3(subsurfaceR, subsurfaceG, subsurfaceB) * (1.0 - foamIntensity)
-    
-    // diffuseColor := baseColor * diffuse * totalAttenuation * transmittance * shadowFactor + subsurface
-    
-    // // Fresnel effect
-    // F0 := vec3(0.02)
-    // cosTheta := max(0.0, dot(normalWorld, viewDir))
-    // fresnel := F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0)
-    // fresnel = mix(fresnel, fresnel * 0.3, foamIntensity)
-    
-    // // Sky reflection with wavelength-dependent reflection
-    // skyColor := vec3(0.6, 0.8, 1.0)
-    
-    // // Volumetric lighting effect using light perspective data
-    // volumetricIntensity := (opacityFromLightSource.r + opacityFromLightSource.g + opacityFromLightSource.b) / 3.0
-    // volumetricColor := vec3(0.8, 0.9, 1.0) * volumetricIntensity * 0.2 * shadowFactor
-    
-    // reflectionColor := skyColor * fresnel * totalAttenuation + volumetricColor
-    
-    // // Specular highlight
-    // halfVector := normalize(lightDir + viewDir)
-    // specular := pow(max(0.0, dot(normalWorld, halfVector)), 32.0)
-    // foamSpecular := pow(max(0.0, dot(normalWorld, halfVector)), mix(32.0, 8.0, foamIntensity))
-    // specular = mix(specular, foamSpecular * 2.0, foamIntensity)
-    // specularColor := vec3(1.0) * specular * totalAttenuation * 0.5
-    
-    // // Ambient light with per-channel attenuation
-    // ambientIntensity := mix(0.2, 0.6, foamIntensity)
-    // ambientColor := baseColor * ambientIntensity * cameraAttenuation
-    
-    // // Combine all lighting components
-    // finalColor := ambientColor + diffuseColor + reflectionColor + specularColor
-    // finalColor = finalColor
-    // finalColor = clamp(finalColor, 0.0, 1.0) // Ensure color is within [0,1] range
-    
-    // // Alpha based on camera depth, with foam being more opaque
-    // alpha := mix(depthMapFromCamera, min(1.0, depthMapFromCamera * 1.2), foamIntensity)
-
-    // return vec4(finalColor, alpha)
+    return vec4(finalColor, alpha)
 }

@@ -2243,8 +2243,31 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
                 if (endX >= ScreenWidth) endX = ScreenWidth - 1;
                 
                 // Fill the entire span at once
+                // NOTE: this is rendering it as 2d not as spherical particles
+                // for (int px = startX; px <= endX; px++) {
+                //     screen->distance[px][py] = distanceNormalized;
+                //     screen->velocity[px][py] = NormalizedVelocity;
+                //     screen->opacity[px][py]++;
+                // }
                 for (int px = startX; px <= endX; px++) {
-                    screen->distance[px][py] = distanceNormalized;
+                    int dx = px - screenX;
+                    int dy = py - screenY;
+                    int r2 = dx*dx + dy*dy;
+                    
+                    // Calculate sphere depth offset at this pixel
+                    float dz = sqrtf((float)(radiusSquared - r2));
+                    
+                    // The surface depth is the center depth minus the z-offset (closer to camera)
+                    // Assuming camera looks along +Z, closer objects have smaller depth values
+                    float surfaceDepth = distSquared - (dz * dz * 1000.0f); // Scale factor for depth variation
+                    
+                    // Ensure surface depth doesn't go negative
+                    if (surfaceDepth < 0.0f) surfaceDepth = 0.0f;
+                    
+                    // Convert surface depth to normalized distance
+                    uint8_t surfaceDistanceNormalized = (uint8_t)(255 * (1.0f - (surfaceDepth / maxDistance)));
+                    
+                    screen->distance[px][py] = surfaceDistanceNormalized;
                     screen->velocity[px][py] = NormalizedVelocity;
                     screen->opacity[px][py]++;
                 }
@@ -2255,15 +2278,15 @@ void projectParticles(struct PointSOA *particles, struct Camera *camera, struct 
         timePartition->renderDistanceVelocityTime += dt;
 
          // Pre-calculate normalization factors to avoid repeated calculations
-        float invLogMaxOpacity = 1.0f / logf(maxOpacity + 1.0f);
+        float invMaxOpacity = 1.0f / (float)maxOpacity;
         
         // Normalize opacity and velocity in a single pass
         for (int px = 0; px < ScreenWidth; px++) {
             for (int py = 0; py < ScreenHeight; py++) {
                 uint16_t opacity = screen->opacity[px][py];
                 if (opacity != 0) {
-                    float logOpacity = logf((float)opacity + 1.0f) * invLogMaxOpacity;
-                    screen->normalizedOpacity[px][py] = (uint8_t)(255 * (1.0f - logOpacity));
+                    float linearOpacity = (float)opacity * invMaxOpacity;
+                    screen->normalizedOpacity[px][py] = (uint8_t)(255 * linearOpacity);
                 }
             }
         }
@@ -2403,7 +2426,7 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     timePartition->projectParticlesTime += dt;
     // printf("Project particles time: %f\n", dt);
 
-    projectParticles(particles, lightCamera, lightScreen, timePartition, threadsData, particleIndexes);
+    // projectParticles(particles, lightCamera, lightScreen, timePartition, threadsData, particleIndexes);
     clock_t projectLightParticlesTime = clock();
 
     dt = (float)(projectLightParticlesTime - projectParticlesTime) / (float)CLOCKS_PER_SEC;
@@ -2425,7 +2448,7 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     // printf("Draw bounding box time: %f\n", dt);
     
     saveScreen(screen, "output.bin");
-    saveScreen(lightScreen, "light.bin");
+    // saveScreen(lightScreen, "light.bin");
     clock_t saveScreenTime = clock();
     dt = (float)(saveScreenTime - drawBoundingBoxTime) / (float)CLOCKS_PER_SEC;
     timePartition->saveScreenTime += dt;
