@@ -24,7 +24,7 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] render fluid in c ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
+- [ ] render fluid in c (open gl) ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
 - [ ] Idea we can render based on distance buffer we don't need to sort
 - [ ] share image as shared memory
 - [ ] Build Rasterize - 3D
