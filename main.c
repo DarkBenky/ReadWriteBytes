@@ -9,6 +9,7 @@
 #include <immintrin.h> // for AVX intrinsics
 #include <omp.h>        // for OpenMP
 #include <pthread.h> // for pthreads
+#include <CL/cl.h>     // Add this line for OpenCL
 
 #define NUM_PARTICLES 150000
 #define GRAVITY 10.0f
@@ -22,6 +23,7 @@
 #define pressure  temperature * 0.1f
 #define FrameCount 30
 #define NUM_THREADS 0
+#define USE_GPU 1
 pthread_t threads[NUM_THREADS];
 
 struct ThreadSync {
@@ -110,11 +112,63 @@ void initializeCollisionThreads() {
     }
 }
 
+
+struct Screen {
+    uint8_t distance[ScreenWidth][ScreenHeight];
+    uint8_t velocity[ScreenWidth][ScreenHeight];
+    uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
+    uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
+    uint16_t particleCount[ScreenWidth][ScreenHeight];
+    uint16_t opacity[ScreenWidth][ScreenHeight];
+};
+
+struct TimePartition {
+    float collisionTime;
+    float applyPressureTime;
+    float updateParticlesTime;
+    float moveToBoxTime;
+    float updateGridTime;
+    float renderTime;
+    float clearScreenTime;
+    float projectParticlesTime;
+    float drawCursorTime;
+    float drawBoundingBoxTime;
+    float saveScreenTime;
+    float sortTime;
+    float projectionTime;
+    float renderDistanceVelocityTime;
+    float renderOpacityTime;
+    float readDataTime;
+    float projectLightParticlesTime;
+};
+
+struct OpenCLContext {
+    cl_platform_id platform;
+    cl_device_id device;
+    cl_context context;
+    cl_command_queue queue;
+    cl_program program;
+    cl_kernel kernel;
+    cl_mem buffer_points;
+    cl_mem buffer_velocities;
+    cl_mem buffer_distances;
+    cl_mem buffer_opacities;
+    cl_mem buffer_velocities_screen;
+    
+    // Add pre-allocated host memory buffers
+    float *host_points_data;
+    float *host_velocities_data;
+    float *host_distances_result;
+    float *host_opacities_result;
+    float *host_velocities_result;
+};
+
 // Function prototypes
 void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
 void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
 void renderParticlesToBuffer(struct RenderThreadData *data);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen);
 
 void createThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -196,14 +250,7 @@ struct Light {
 };
 
 
-struct Screen {
-    uint8_t distance[ScreenWidth][ScreenHeight];
-    uint8_t velocity[ScreenWidth][ScreenHeight];
-    uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
-    uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
-    uint16_t particleCount[ScreenWidth][ScreenHeight];
-    uint16_t opacity[ScreenWidth][ScreenHeight];
-};
+
 
 struct Ray {
     float origin[3];
@@ -221,26 +268,6 @@ struct Cursor {
     float z;
     float force;
     bool active;
-};
-
-struct TimePartition {
-    float collisionTime;
-    float applyPressureTime;
-    float updateParticlesTime;
-    float moveToBoxTime;
-    float updateGridTime;
-    float renderTime;
-    float clearScreenTime;
-    float projectParticlesTime;
-    float drawCursorTime;
-    float drawBoundingBoxTime;
-    float saveScreenTime;
-    float sortTime;
-    float projectionTime;
-    float renderDistanceVelocityTime;
-    float renderOpacityTime;
-    float readDataTime;
-    float projectLightParticlesTime;
 };
 
 
@@ -2408,7 +2435,7 @@ void saveScreen(struct Screen *screen, const char *filename) {
     fclose(file);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
     clearScreen(screen);
@@ -2418,8 +2445,11 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     float dt = (float)(clearScreenTime - start) / (float)CLOCKS_PER_SEC;
     timePartition->clearScreenTime += dt;
     // printf("Clear screen time: %f\n", dt);
-
-    projectParticles(particles, camera, screen, timePartition, threadsData, particleIndexes);
+    if (USE_GPU == 1) {
+        projectParticlesOpenCL(openCLContext, particles, camera, screen);
+    } else {
+        projectParticles(particles, camera, screen, timePartition, threadsData, particleIndexes);
+    }
     clock_t projectParticlesTime = clock();
 
     dt = (float)(projectParticlesTime - clearScreenTime) / (float)CLOCKS_PER_SEC;
@@ -2525,8 +2555,354 @@ void readPauseData(bool *paused) {
     fclose(file);
 }
 
+int initializeOpenCL(struct OpenCLContext *ocl) {
+    cl_int err;
+    
+    // Get platform
+    err = clGetPlatformIDs(1, &ocl->platform, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error getting OpenCL platform: %d\n", err);
+        return 0;
+    }
+    
+    // Get device
+    err = clGetDeviceIDs(ocl->platform, CL_DEVICE_TYPE_GPU, 1, &ocl->device, NULL);
+    if (err != CL_SUCCESS) {
+        // Fallback to CPU if GPU not available
+        err = clGetDeviceIDs(ocl->platform, CL_DEVICE_TYPE_CPU, 1, &ocl->device, NULL);
+        if (err != CL_SUCCESS) {
+            printf("Error getting OpenCL device: %d\n", err);
+            return 0;
+        }
+    }
+    
+    // Create context
+    ocl->context = clCreateContext(NULL, 1, &ocl->device, NULL, NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating OpenCL context: %d\n", err);
+        return 0;
+    }
+    
+    // Create command queue
+    ocl->queue = clCreateCommandQueue(ocl->context, ocl->device, 0, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating OpenCL command queue: %d\n", err);
+        return 0;
+    }
+    
+    // Read kernel source
+    FILE *file = fopen("openGlShaders/screenCordinates.cl", "r");
+    if (!file) {
+        printf("Error opening kernel file\n");
+        return 0;
+    }
+    
+    fseek(file, 0, SEEK_END);
+    size_t source_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    char *source = (char*)malloc(source_size + 1);
+    fread(source, 1, source_size, file);
+    source[source_size] = '\0';
+    fclose(file);
+    
+    // Create program
+    ocl->program = clCreateProgramWithSource(ocl->context, 1, (const char**)&source, &source_size, &err);
+    free(source);
+    if (err != CL_SUCCESS) {
+        printf("Error creating OpenCL program: %d\n", err);
+        return 0;
+    }
+    
+    // Build program
+    err = clBuildProgram(ocl->program, 1, &ocl->device, NULL, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error building OpenCL program: %d\n", err);
+        
+        // Get build log
+        size_t log_size;
+        clGetProgramBuildInfo(ocl->program, ocl->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char *log = (char*)malloc(log_size);
+        clGetProgramBuildInfo(ocl->program, ocl->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        printf("Build log: %s\n", log);
+        free(log);
+        return 0;
+    }
+    
+    // Create kernel
+    ocl->kernel = clCreateKernel(ocl->program, "project_points_to_screen", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating OpenCL kernel: %d\n", err);
+        return 0;
+    }
+    
+    // Create buffers
+    ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                       NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating points buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_velocities = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                           NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating velocities buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_distances = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
+                                          ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating distances buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_opacities = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
+                                          ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating opacities buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_velocities_screen = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
+                                                  ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating screen velocities buffer: %d\n", err);
+        return 0;
+    }
+    
+    // Pre-allocate host memory buffers
+    ocl->host_points_data = (float*)malloc(NUM_PARTICLES * 3 * sizeof(float));
+    ocl->host_velocities_data = (float*)malloc(NUM_PARTICLES * 3 * sizeof(float));
+    ocl->host_distances_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
+    ocl->host_opacities_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
+    ocl->host_velocities_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
+    
+    // Check for allocation failures
+    if (!ocl->host_points_data || !ocl->host_velocities_data || 
+        !ocl->host_distances_result || !ocl->host_opacities_result || 
+        !ocl->host_velocities_result) {
+        printf("Failed to allocate host memory for OpenCL\n");
+        return 0;
+    }
+    
+    printf("OpenCL initialized successfully\n");
+    return 1;
+}
+
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen) {
+    cl_int err;
+    
+    // Use pre-allocated buffers instead of malloc
+    float *points_data = ocl->host_points_data;
+    float *velocities_data = ocl->host_velocities_data;
+    
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        points_data[i * 3 + 0] = particles->x[i];
+        points_data[i * 3 + 1] = particles->y[i];
+        points_data[i * 3 + 2] = particles->z[i];
+        
+        velocities_data[i * 3 + 0] = particles->xVelocity[i];
+        velocities_data[i * 3 + 1] = particles->yVelocity[i];
+        velocities_data[i * 3 + 2] = particles->zVelocity[i];
+    }
+    
+    // Write data to GPU buffers
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_points, CL_TRUE, 0, 
+                              NUM_PARTICLES * 3 * sizeof(float), points_data, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing points buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_velocities, CL_TRUE, 0, 
+                              NUM_PARTICLES * 3 * sizeof(float), velocities_data, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing velocities buffer: %d\n", err);
+        return;
+    }
+    
+    // Clear screen buffers on GPU
+    float zero = 0.0f;
+    err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances, &zero, sizeof(float), 0, 
+                             ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error clearing distances buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_opacities, &zero, sizeof(float), 0, 
+                             ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error clearing opacities buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_velocities_screen, &zero, sizeof(float), 0, 
+                             ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error clearing screen velocities buffer: %d\n", err);
+        return;
+    }
+    
+    // Set kernel arguments
+    cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+    cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+    cl_float3 cam_up = {0.0f, 1.0f, 0.0f};
+    cl_float fov = camera->fov;
+    cl_int screen_width = ScreenWidth;
+    cl_int screen_height = ScreenHeight;
+    cl_int num_points = NUM_PARTICLES;
+    cl_int particle_radius = PARTICLE_RADIUS * 100.0f;
+    
+    err = clSetKernelArg(ocl->kernel, 0, sizeof(cl_mem), &ocl->buffer_points);
+    err |= clSetKernelArg(ocl->kernel, 1, sizeof(cl_mem), &ocl->buffer_velocities);
+    err |= clSetKernelArg(ocl->kernel, 2, sizeof(cl_mem), &ocl->buffer_distances);
+    err |= clSetKernelArg(ocl->kernel, 3, sizeof(cl_mem), &ocl->buffer_opacities);
+    err |= clSetKernelArg(ocl->kernel, 4, sizeof(cl_mem), &ocl->buffer_velocities_screen);
+    err |= clSetKernelArg(ocl->kernel, 5, sizeof(cl_float3), &cam_pos);
+    err |= clSetKernelArg(ocl->kernel, 6, sizeof(cl_float3), &cam_dir);
+    err |= clSetKernelArg(ocl->kernel, 7, sizeof(cl_float3), &cam_up);
+    err |= clSetKernelArg(ocl->kernel, 8, sizeof(cl_float), &fov);
+    err |= clSetKernelArg(ocl->kernel, 9, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->kernel, 10, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->kernel, 11, sizeof(cl_int), &num_points);
+    err |= clSetKernelArg(ocl->kernel, 12, sizeof(cl_int), &particle_radius);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting kernel arguments: %d\n", err);
+        return;
+    }
+    
+    // Execute kernel
+    size_t global_work_size = NUM_PARTICLES;
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->kernel, 1, NULL, &global_work_size, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error executing kernel: %d\n", err);
+        return;
+    }
+    
+    // Wait for kernel to finish
+    err = clFinish(ocl->queue);
+    if (err != CL_SUCCESS) {
+        printf("Error waiting for kernel to finish: %d\n", err);
+        return;
+    }
+    
+    // Use pre-allocated result buffers
+    float *distances_result = ocl->host_distances_result;
+    float *opacities_result = ocl->host_opacities_result;
+    float *velocities_result = ocl->host_velocities_result;
+    
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_distances, CL_TRUE, 0, 
+                             ScreenWidth * ScreenHeight * sizeof(float), distances_result, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error reading distances buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_opacities, CL_TRUE, 0, 
+                             ScreenWidth * ScreenHeight * sizeof(float), opacities_result, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error reading opacities buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_velocities_screen, CL_TRUE, 0, 
+                             ScreenWidth * ScreenHeight * sizeof(float), velocities_result, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error reading velocities buffer: %d\n", err);
+        return;
+    }
+    
+    // Clear the screen arrays first
+    memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
+    memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
+    
+    // Find max values for normalization (skip zero values)
+    float maxDistance = 0.0f, maxVelocity = 0.0f, maxOpacity = 0.0f;
+    for (int i = 0; i < ScreenWidth * ScreenHeight; i++) {
+        if (distances_result[i] > 0.001f && distances_result[i] > maxDistance) {
+            maxDistance = distances_result[i];
+        }
+        if (velocities_result[i] > maxVelocity) {
+            maxVelocity = velocities_result[i];
+        }
+        if (opacities_result[i] > maxOpacity) {
+            maxOpacity = opacities_result[i];
+        }
+    }
+    
+    // Debug output
+    printf("Debug: maxDistance=%.3f, maxVelocity=%.3f, maxOpacity=%.3f\n", 
+           maxDistance, maxVelocity, maxOpacity);
+    
+    // Count non-zero pixels
+    int nonZeroPixels = 0;
+    for (int i = 0; i < ScreenWidth * ScreenHeight; i++) {
+        if (opacities_result[i] > 0.0f) nonZeroPixels++;
+    }
+    printf("Debug: %d pixels have particles\n", nonZeroPixels);
+    
+    // Convert results to screen format with proper normalization
+    for (int y = 0; y < ScreenHeight; y++) {
+        for (int x = 0; x < ScreenWidth; x++) {
+            int idx = y * ScreenWidth + x;
+            
+            // Only process pixels that have particles
+            if (opacities_result[idx] > 0.0f) {
+                // Distance: closer = higher value (like your C code)
+                if (maxDistance > 0.0f) {
+                    screen->distance[x][y] = (uint8_t)(255 * (1.0f - distances_result[idx] / maxDistance));
+                }
+                
+                // Velocity: normalized linearly
+                if (maxVelocity > 0.0f) {
+                    screen->velocity[x][y] = (uint8_t)(255 * (velocities_result[idx] / maxVelocity));
+                }
+                
+                // Opacity: store raw count and calculate normalized later
+                screen->opacity[x][y] = (uint16_t)fminf(65535.0f, opacities_result[idx]);
+                
+                // Linear opacity normalization
+                if (maxOpacity > 0.0f) {
+                    screen->normalizedOpacity[x][y] = (uint8_t)(255 * (opacities_result[idx] / maxOpacity));
+                }
+            }
+        }
+    }
+}
+
+void cleanupOpenCL(struct OpenCLContext *ocl) {
+    // Free host memory
+    if (ocl->host_points_data) free(ocl->host_points_data);
+    if (ocl->host_velocities_data) free(ocl->host_velocities_data);
+    if (ocl->host_distances_result) free(ocl->host_distances_result);
+    if (ocl->host_opacities_result) free(ocl->host_opacities_result);
+    if (ocl->host_velocities_result) free(ocl->host_velocities_result);
+    
+    // Free OpenCL resources
+    if (ocl->buffer_points) clReleaseMemObject(ocl->buffer_points);
+    if (ocl->buffer_velocities) clReleaseMemObject(ocl->buffer_velocities);
+    if (ocl->buffer_distances) clReleaseMemObject(ocl->buffer_distances);
+    if (ocl->buffer_opacities) clReleaseMemObject(ocl->buffer_opacities);
+    if (ocl->buffer_velocities_screen) clReleaseMemObject(ocl->buffer_velocities_screen);
+    if (ocl->kernel) clReleaseKernel(ocl->kernel);
+    if (ocl->program) clReleaseProgram(ocl->program);
+    if (ocl->queue) clReleaseCommandQueue(ocl->queue);
+    if (ocl->context) clReleaseContext(ocl->context);
+}
 
 int main() {
+    struct OpenCLContext ocl;
+    int useOpenCL = initializeOpenCL(&ocl);
+    if (!useOpenCL) {
+        printf("Failed to initialize OpenCL, falling back to CPU\n");
+    }
+
     struct Camera camera;
     camera.ray.origin[0] = 50.0f;
     camera.ray.origin[1] = 50.0f;
@@ -2707,7 +3083,7 @@ int main() {
         float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
         
         clock_t startRenderTime = clock();
-        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen);
+        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl);
         clock_t endRenderTime = clock();
         dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
         timePartition->renderTime += dt1;

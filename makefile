@@ -1,7 +1,7 @@
 CC = clang
 # -g for debugging
 CFLAGS = -O3 -march=native
-LDFLAGS = -lm
+LDFLAGS = -lm -lOpenCL
 
 all: main
 
