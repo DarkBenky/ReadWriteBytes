@@ -2784,11 +2784,11 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     }
     
     // Wait for kernel to finish
-    err = clFinish(ocl->queue);
-    if (err != CL_SUCCESS) {
-        printf("Error waiting for kernel to finish: %d\n", err);
-        return;
-    }
+    // err = clFinish(ocl->queue);
+    // if (err != CL_SUCCESS) {
+    //     printf("Error waiting for kernel to finish: %d\n", err);
+    //     return;
+    // }
     
     // Use pre-allocated result buffers
     float *distances_result = ocl->host_distances_result;
