@@ -1,3 +1,5 @@
+// TODO: Fix Projection of 3D points to screen coordinates
+
 __kernel void project_points_to_screen(
     __global const float3* points,   // 3D points (coordinates) input
     __global const float3* pointsVelocities,   // 3D points (xv, yv, zv) input
