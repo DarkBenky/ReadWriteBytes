@@ -1,11 +1,12 @@
 // TODO: Fix Projection of 3D points to screen coordinates
 
 __kernel void project_points_to_screen(
-    __global const float3* points,   // 3D points (coordinates) input
-    __global const float3* pointsVelocities,   // 3D points (xv, yv, zv) input
-    __global float *ScreenDistances, // 800 * 600 screen distances
-    __global float *ScreenOpacities, // 800 * 600 screen opacities
-    __global float *ScreenVelocities,// 800 * 600 screen velocities
+    __global const float* points,
+    __global const float* velocities,
+    __global float *ScreenDistances,
+    __global float *ScreenOpacities,
+    __global float *ScreenVelocities,
+    __global float *ScreenNormals,      // 3 floats per pixel now!
     const float3 camPos,
     const float3 camDir,
     const float3 camUp,
@@ -18,13 +19,20 @@ __kernel void project_points_to_screen(
     int i = get_global_id(0);
     if (i >= numPoints) return;
 
+    // manually unpack
+    float3 point = (float3)( points[3*i+0],
+                             points[3*i+1],
+                             points[3*i+2] );
+    float3 vel   = (float3)( velocities[3*i+0],
+                             velocities[3*i+1],
+                             velocities[3*i+2] );
+
     // Compute camera basis
     float3 forward = normalize(camDir);
     float3 right = normalize(cross(forward, camUp));
     float3 up = cross(right, forward); // Ensure orthogonality
 
     // Compute Screen space coordinates
-    float3 point = points[i];
     
     // Transform point relative to camera
     float3 relativePoint = point - camPos;
@@ -79,7 +87,7 @@ __kernel void project_points_to_screen(
             
             // Calculate proper sphere depth offset
             float normalizedR2 = (float)r2 / (float)radiusSquared;
-            float sphereDepth = sqrt(max(0.0f, 1.0f - normalizedR2));
+            float sphereDepth  = sqrt(max(0.0f,1.0f - normalizedR2));
             float depthOffset = sphereDepth * particleRadiusBasedOnDistance;
             
             // Surface depth is center depth minus z-offset (closer to camera)
@@ -91,10 +99,28 @@ __kernel void project_points_to_screen(
             // Update ScreenDistances with spherical surface depth
             if (ScreenDistances[offsetIndex] == 0 || surfaceDistance < ScreenDistances[offsetIndex]) {
                 ScreenDistances[offsetIndex] = surfaceDistance;
-                ScreenVelocities[offsetIndex] = length(pointsVelocities[i]);
+                ScreenVelocities[offsetIndex] = length(vel);
+                 // your normal in local sphere‐space:
+                float nx = dx / (float)radiusInt;
+                float ny = dy / (float)radiusInt;
+                float nz = sphereDepth;
+                float3 normal = normalize((float3)(nx, ny, nz));
+
+                // pack 3 floats per pixel:
+                // int base = offsetIndex*3;
+                // ScreenNormals[base+0] = normal.x;
+                // ScreenNormals[base+1] = normal.y;
+                // ScreenNormals[base+2] = normal.z;
             }
+
+            float maxFloat = 1000000.0f; // Arbitrary large value for opacity cap
+
             // Screen Opacity should accumulate
-            ScreenOpacities[offsetIndex] += 1.0f;
+            if (ScreenOpacities[offsetIndex] < maxFloat) { 
+                ScreenOpacities[offsetIndex] += 0.1f; // Increment opacity
+            }
+
+           
         }
     }
 }

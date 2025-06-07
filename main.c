@@ -120,6 +120,7 @@ struct Screen {
     uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
     uint16_t particleCount[ScreenWidth][ScreenHeight];
     uint16_t opacity[ScreenWidth][ScreenHeight];
+    float normals[ScreenWidth][ScreenHeight][3]; // Normal vectors for lighting
 };
 
 struct TimePartition {
@@ -154,6 +155,7 @@ struct OpenCLContext {
     cl_mem buffer_distances;
     cl_mem buffer_opacities;
     cl_mem buffer_velocities_screen;
+    cl_mem buffer_normals;
     
     // Add pre-allocated host memory buffers
     float *host_points_data;
@@ -161,6 +163,7 @@ struct OpenCLContext {
     float *host_distances_result;
     float *host_opacities_result;
     float *host_velocities_result;
+    float *host_normals_result;
 };
 
 // Function prototypes
@@ -2435,6 +2438,29 @@ void saveScreen(struct Screen *screen, const char *filename) {
     fclose(file);
 }
 
+void saveScreenNormal(struct Screen *screen, const char *filename) {
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        perror("Failed to open file");
+        return;
+    }
+
+    static uint8_t buffer[ScreenWidth * ScreenHeight * 3];
+
+    int i = 0;
+    for (int y = 0; y < ScreenHeight; y++) {
+        for (int x = 0; x < ScreenWidth; x++) {
+            // Convert from [-1,1] to [0,255] range
+            buffer[i++] = (uint8_t)((screen->normals[x][y][0] * 0.5f + 0.5f) * 255.0f);
+            buffer[i++] = (uint8_t)((screen->normals[x][y][1] * 0.5f + 0.5f) * 255.0f);
+            buffer[i++] = (uint8_t)((screen->normals[x][y][2] * 0.5f + 0.5f) * 255.0f);
+        }
+    }
+
+    fwrite(buffer, 1, ScreenWidth * ScreenHeight * 3, file);
+    fclose(file);
+}
+
 void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
@@ -2447,6 +2473,8 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     // printf("Clear screen time: %f\n", dt);
     if (USE_GPU == 1) {
         projectParticlesOpenCL(openCLContext, particles, camera, screen);
+        // save normal screen
+        saveScreenNormal(screen, "normal.bin");
     } else {
         projectParticles(particles, camera, screen, timePartition, threadsData, particleIndexes);
     }
@@ -2672,17 +2700,27 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         return 0;
     }
     
+    // ADD NORMALS BUFFER
+    ocl->buffer_normals = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
+                                        ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating normals buffer: %d\n", err);
+        return 0;
+    }
+    
     // Pre-allocate host memory buffers
     ocl->host_points_data = (float*)malloc(NUM_PARTICLES * 3 * sizeof(float));
     ocl->host_velocities_data = (float*)malloc(NUM_PARTICLES * 3 * sizeof(float));
     ocl->host_distances_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
     ocl->host_opacities_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
     ocl->host_velocities_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
+    // ADD NORMALS HOST BUFFER
+    ocl->host_normals_result = (float*)malloc(ScreenWidth * ScreenHeight * 3 * sizeof(float));
     
-    // Check for allocation failures
+    // Check for allocation failures (UPDATED TO INCLUDE NORMALS)
     if (!ocl->host_points_data || !ocl->host_velocities_data || 
         !ocl->host_distances_result || !ocl->host_opacities_result || 
-        !ocl->host_velocities_result) {
+        !ocl->host_velocities_result || !ocl->host_normals_result) {
         printf("Failed to allocate host memory for OpenCL\n");
         return 0;
     }
@@ -2723,7 +2761,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         return;
     }
     
-    // Clear screen buffers on GPU
+    // Clear screen buffers on GPU (INCLUDING NORMALS)
     float zero = 0.0f;
     err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances, &zero, sizeof(float), 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
@@ -2746,7 +2784,15 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         return;
     }
     
-    // Set kernel arguments
+    // ADD NORMALS BUFFER CLEARING
+    err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_normals, &zero, sizeof(float), 0, 
+                             ScreenWidth * ScreenHeight * 3 * sizeof(float), 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error clearing normals buffer: %d\n", err);
+        return;
+    }
+    
+    // Set kernel arguments (FIXED ARGUMENT INDICES)
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
     cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
     cl_float3 cam_up = {0.0f, 1.0f, 0.0f};
@@ -2761,14 +2807,15 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     err |= clSetKernelArg(ocl->kernel, 2, sizeof(cl_mem), &ocl->buffer_distances);
     err |= clSetKernelArg(ocl->kernel, 3, sizeof(cl_mem), &ocl->buffer_opacities);
     err |= clSetKernelArg(ocl->kernel, 4, sizeof(cl_mem), &ocl->buffer_velocities_screen);
-    err |= clSetKernelArg(ocl->kernel, 5, sizeof(cl_float3), &cam_pos);
-    err |= clSetKernelArg(ocl->kernel, 6, sizeof(cl_float3), &cam_dir);
-    err |= clSetKernelArg(ocl->kernel, 7, sizeof(cl_float3), &cam_up);
-    err |= clSetKernelArg(ocl->kernel, 8, sizeof(cl_float), &fov);
-    err |= clSetKernelArg(ocl->kernel, 9, sizeof(cl_int), &screen_width);
-    err |= clSetKernelArg(ocl->kernel, 10, sizeof(cl_int), &screen_height);
-    err |= clSetKernelArg(ocl->kernel, 11, sizeof(cl_int), &num_points);
-    err |= clSetKernelArg(ocl->kernel, 12, sizeof(cl_int), &particle_radius);
+    err |= clSetKernelArg(ocl->kernel, 5, sizeof(cl_mem), &ocl->buffer_normals);        // FIXED: normals is arg 5
+    err |= clSetKernelArg(ocl->kernel, 6, sizeof(cl_float3), &cam_pos);                // shifted +1
+    err |= clSetKernelArg(ocl->kernel, 7, sizeof(cl_float3), &cam_dir);                // shifted +1
+    err |= clSetKernelArg(ocl->kernel, 8, sizeof(cl_float3), &cam_up);                 // shifted +1
+    err |= clSetKernelArg(ocl->kernel, 9, sizeof(cl_float), &fov);                     // shifted +1
+    err |= clSetKernelArg(ocl->kernel, 10, sizeof(cl_int), &screen_width);             // shifted +1
+    err |= clSetKernelArg(ocl->kernel, 11, sizeof(cl_int), &screen_height);            // shifted +1
+    err |= clSetKernelArg(ocl->kernel, 12, sizeof(cl_int), &num_points);               // shifted +1
+    err |= clSetKernelArg(ocl->kernel, 13, sizeof(cl_int), &particle_radius);          // FIXED: was duplicate arg 12, now arg 13
     
     if (err != CL_SUCCESS) {
         printf("Error setting kernel arguments: %d\n", err);
@@ -2783,17 +2830,11 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         return;
     }
     
-    // Wait for kernel to finish
-    // err = clFinish(ocl->queue);
-    // if (err != CL_SUCCESS) {
-    //     printf("Error waiting for kernel to finish: %d\n", err);
-    //     return;
-    // }
-    
-    // Use pre-allocated result buffers
+    // Use pre-allocated result buffers (INCLUDING NORMALS)
     float *distances_result = ocl->host_distances_result;
     float *opacities_result = ocl->host_opacities_result;
     float *velocities_result = ocl->host_velocities_result;
+    float *normals_result = ocl->host_normals_result;               // ADD NORMALS
     
     err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_distances, CL_TRUE, 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), distances_result, 0, NULL, NULL);
@@ -2816,11 +2857,20 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         return;
     }
     
-    // Clear the screen arrays first
+    // ADD NORMALS READBACK
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_normals, CL_TRUE, 0, 
+                             ScreenWidth * ScreenHeight * 3 * sizeof(float), normals_result, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error reading normals buffer: %d\n", err);
+        return;
+    }
+    
+    // Clear the screen arrays first (INCLUDING NORMALS)
     memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
+    memset(screen->normals, 0, sizeof(float) * ScreenWidth * ScreenHeight * 3);         // ADD NORMALS CLEAR
     
     // Find max values for normalization (skip zero values)
     float maxDistance = 0.0f, maxVelocity = 0.0f, maxOpacity = 0.0f;
@@ -2847,7 +2897,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     }
     printf("Debug: %d pixels have particles\n", nonZeroPixels);
     
-    // Convert results to screen format with proper normalization
+    // Convert results to screen format with proper normalization (INCLUDING NORMALS)
     for (int y = 0; y < ScreenHeight; y++) {
         for (int x = 0; x < ScreenWidth; x++) {
             int idx = y * ScreenWidth + x;
@@ -2864,32 +2914,37 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
                     screen->velocity[x][y] = (uint8_t)(255 * (velocities_result[idx] / maxVelocity));
                 }
                 
-                // Opacity: store raw count and calculate normalized later
-                screen->opacity[x][y] = (uint16_t)fminf(65535.0f, opacities_result[idx]);
-                
                 // Linear opacity normalization
                 if (maxOpacity > 0.0f) {
                     screen->normalizedOpacity[x][y] = (uint8_t)(255 * (opacities_result[idx] / maxOpacity));
                 }
             }
+            
+            // Copy normals (always copy, even for pixels without particles)
+            float *nr = normals_result + idx * 3;
+            screen->normals[x][y][0] = nr[0];
+            screen->normals[x][y][1] = nr[1];
+            screen->normals[x][y][2] = nr[2];
         }
     }
 }
 
 void cleanupOpenCL(struct OpenCLContext *ocl) {
-    // Free host memory
+    // Free host memory (INCLUDING NORMALS)
     if (ocl->host_points_data) free(ocl->host_points_data);
     if (ocl->host_velocities_data) free(ocl->host_velocities_data);
     if (ocl->host_distances_result) free(ocl->host_distances_result);
     if (ocl->host_opacities_result) free(ocl->host_opacities_result);
     if (ocl->host_velocities_result) free(ocl->host_velocities_result);
+    if (ocl->host_normals_result) free(ocl->host_normals_result);               // ADD NORMALS CLEANUP
     
-    // Free OpenCL resources
+    // Free OpenCL resources (INCLUDING NORMALS)
     if (ocl->buffer_points) clReleaseMemObject(ocl->buffer_points);
     if (ocl->buffer_velocities) clReleaseMemObject(ocl->buffer_velocities);
     if (ocl->buffer_distances) clReleaseMemObject(ocl->buffer_distances);
     if (ocl->buffer_opacities) clReleaseMemObject(ocl->buffer_opacities);
     if (ocl->buffer_velocities_screen) clReleaseMemObject(ocl->buffer_velocities_screen);
+    if (ocl->buffer_normals) clReleaseMemObject(ocl->buffer_normals);           // ADD NORMALS CLEANUP
     if (ocl->kernel) clReleaseKernel(ocl->kernel);
     if (ocl->program) clReleaseProgram(ocl->program);
     if (ocl->queue) clReleaseCommandQueue(ocl->queue);
