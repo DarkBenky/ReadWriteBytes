@@ -107,10 +107,10 @@ __kernel void project_points_to_screen(
                 float3 normal = normalize((float3)(nx, ny, nz));
 
                 // pack 3 floats per pixel:
-                // int base = offsetIndex*3;
-                // ScreenNormals[base+0] = normal.x;
-                // ScreenNormals[base+1] = normal.y;
-                // ScreenNormals[base+2] = normal.z;
+                int base = offsetIndex*3;
+                ScreenNormals[base+0] = normal.x;
+                ScreenNormals[base+1] = normal.y;
+                ScreenNormals[base+2] = normal.z;
             }
 
             float maxFloat = 1000000.0f; // Arbitrary large value for opacity cap

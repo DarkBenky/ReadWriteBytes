@@ -380,15 +380,11 @@ func (g *Game) UpdatePixels() error {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// 800x600 pixels, 3 bytes per pixel (distance, velocity, opacity)
-	// if len(data) < screenWidth*screenHeight*3 {
-	// 	return fmt.Errorf("file size is too small: %d bytes", len(data))
-	// }
 	// Each pixel in the file has 3 bytes: distance, velocity, and opacity
 	for y := 0; y < screenHeight-1; y++ {
 		for x := 0; x < screenWidth-1; x++ {
-			srcPos := (y*screenWidth + x) * 3 // Changed from 4 to 3 bytes per pixel
-			dstPos := (y*screenWidth + x) * 4
+			srcPos := (y*screenWidth + x) * 3 // 3 bytes per pixel
+			dstPos := (y*screenWidth + x) * 4 // 4 bytes per pixel for RGBA
 
 			if srcPos+3 > len(data) {
 				continue // Skip if not enough data
@@ -403,9 +399,8 @@ func (g *Game) UpdatePixels() error {
 			case renderOpacity:
 				value = data[srcPos+2]
 			case renderNormal:
-				value = data[srcPos] // Use distance for grayscale
-				// Calculate normal shader
-				// g.CalculateNormalShader()
+				// Don't use the main data for normals, we'll read normal.bin separately
+				value = 0
 			case renderFluid:
 				value = data[srcPos] // Use distance for grayscale
 				for i := 0; i < 3; i++ {
@@ -415,8 +410,8 @@ func (g *Game) UpdatePixels() error {
 				}
 			}
 
-			// Build a grayscale pixel based on the chosen channel
-			if dstPos+3 <= len(g.pixels) {
+			// Build a grayscale pixel based on the chosen channel (except for normals)
+			if g.renderMode != renderNormal && dstPos+3 <= len(g.pixels) {
 				g.pixels[dstPos] = value   // R
 				g.pixels[dstPos+1] = value // G
 				g.pixels[dstPos+2] = value // B
@@ -424,26 +419,46 @@ func (g *Game) UpdatePixels() error {
 			}
 		}
 	}
+
 	if g.img == nil {
 		g.img = ebiten.NewImage(screenWidth, screenHeight)
 	}
-	if renderFluid == g.renderMode {
-		if g.imgVelocity == nil {
-			g.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
-		}
-		if g.imgOpacity == nil {
-			g.imgOpacity = ebiten.NewImage(screenWidth, screenHeight)
-		}
-		if g.imgDistance == nil {
-			g.imgDistance = ebiten.NewImage(screenWidth, screenHeight)
+
+	// Handle normal rendering separately
+	if g.renderMode == renderNormal {
+		normalData, err := ioutil.ReadFile("normal.bin")
+		if err != nil {
+			return fmt.Errorf("failed to read normal file: %w", err)
 		}
 
-		g.imgVelocity.WritePixels(g.pixelsVelocity[:])
-		g.imgOpacity.WritePixels(g.pixelsOpacity[:])
-		g.imgDistance.WritePixels(g.pixelsDistance[:])
+		// Check if we have 3 bytes per pixel (RGB) or 4 bytes per pixel (RGBA)
+		expectedSize4 := screenWidth * screenHeight * 4 // RGBA format
+
+		if len(normalData) >= expectedSize4 {
+			// File has RGBA format (4 bytes per pixel)
+			g.img.WritePixels(normalData[:expectedSize4])
+		}
+	} else {
+		// For other render modes, handle fluid rendering and write pixels normally
+		if renderFluid == g.renderMode {
+			if g.imgVelocity == nil {
+				g.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
+			}
+			if g.imgOpacity == nil {
+				g.imgOpacity = ebiten.NewImage(screenWidth, screenHeight)
+			}
+			if g.imgDistance == nil {
+				g.imgDistance = ebiten.NewImage(screenWidth, screenHeight)
+			}
+
+			g.imgVelocity.WritePixels(g.pixelsVelocity[:])
+			g.imgOpacity.WritePixels(g.pixelsOpacity[:])
+			g.imgDistance.WritePixels(g.pixelsDistance[:])
+		}
+
+		g.img.WritePixels(g.pixels[:])
 	}
 
-	g.img.WritePixels(g.pixels[:])
 	return nil
 }
 
@@ -909,23 +924,23 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 
 			if g.renderMode == renderNormal {
-				newImage := ebiten.NewImageFromImage(g.img)
+				// newImage := ebiten.NewImageFromImage(g.img)
 
-				opts := &ebiten.DrawRectShaderOptions{}
-				opts.Images[0] = g.img
-				// assign the camera direction to the shader options
-				opts.Uniforms = map[string]interface{}{
-					"cameraDirX": g.camera.DirX,
-					"cameraDirY": g.camera.DirY,
-					"cameraDirZ": g.camera.DirZ,
-				}
-				newImage.DrawRectShader(
-					newImage.Bounds().Dx(),
-					newImage.Bounds().Dy(),
-					g.normalShader,
-					opts,
-				)
-				g.img = newImage
+				// opts := &ebiten.DrawRectShaderOptions{}
+				// opts.Images[0] = g.img
+				// // assign the camera direction to the shader options
+				// opts.Uniforms = map[string]interface{}{
+				// 	"cameraDirX": g.camera.DirX,
+				// 	"cameraDirY": g.camera.DirY,
+				// 	"cameraDirZ": g.camera.DirZ,
+				// }
+				// newImage.DrawRectShader(
+				// 	newImage.Bounds().Dx(),
+				// 	newImage.Bounds().Dy(),
+				// 	g.normalShader,
+				// 	opts,
+				// )
+				// g.img = newImage
 			}
 			if g.renderMode == renderFluid {
 				newImage := ebiten.NewImageFromImage(g.img)

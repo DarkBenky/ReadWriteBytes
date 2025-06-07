@@ -2444,8 +2444,7 @@ void saveScreenNormal(struct Screen *screen, const char *filename) {
         perror("Failed to open file");
         return;
     }
-
-    static uint8_t buffer[ScreenWidth * ScreenHeight * 3];
+    static uint8_t buffer[ScreenWidth * ScreenHeight * 4];
 
     int i = 0;
     for (int y = 0; y < ScreenHeight; y++) {
@@ -2454,10 +2453,11 @@ void saveScreenNormal(struct Screen *screen, const char *filename) {
             buffer[i++] = (uint8_t)((screen->normals[x][y][0] * 0.5f + 0.5f) * 255.0f);
             buffer[i++] = (uint8_t)((screen->normals[x][y][1] * 0.5f + 0.5f) * 255.0f);
             buffer[i++] = (uint8_t)((screen->normals[x][y][2] * 0.5f + 0.5f) * 255.0f);
+            buffer[i++] = (uint8_t)(255); // Normalize opacity to [0,255]
         }
     }
 
-    fwrite(buffer, 1, ScreenWidth * ScreenHeight * 3, file);
+    fwrite(buffer, 1, ScreenWidth * ScreenHeight * 4, file);
     fclose(file);
 }
 
