@@ -1,4 +1,4 @@
-// TODO: Fix Projection of 3D points to screen coordinates
+// TODO: ADD blur to distances and then contract the normals
 
 __kernel void project_points_to_screen(
     __global const float* points,
