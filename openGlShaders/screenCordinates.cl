@@ -1,4 +1,10 @@
-// TODO: ADD blur to distances and then contract the normals
+// IMPROVED FLUID RENDERING PIPELINE:
+// 1. Project particles to screen-space z-buffer (distances + velocities + basic opacity)
+// 2. Apply bilateral Gaussian blur to distances (preserves depth discontinuities)
+// 3. Calculate smooth normals from blurred distance field using gradients
+// 4. Apply thickness estimation based on opacity accumulation
+// 5. Enhanced fluid surface reconstruction with proper depth testing
+// 6. Optional: Foam/bubble generation in high-velocity regions
 
 __kernel void project_points_to_screen(
     __global const float* points,
