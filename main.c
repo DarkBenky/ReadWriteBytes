@@ -149,13 +149,19 @@ struct OpenCLContext {
     cl_context context;
     cl_command_queue queue;
     cl_program program;
+    // kernels
     cl_kernel kernel;
+    cl_kernel blur_kernel;
+    cl_kernel normals_kernel;
+    // buffers
     cl_mem buffer_points;
     cl_mem buffer_velocities;
     cl_mem buffer_distances;
     cl_mem buffer_opacities;
     cl_mem buffer_velocities_screen;
     cl_mem buffer_normals;
+    cl_mem buffer_distances_temp;
+    cl_mem buffer_opacities_temp;
     
     // Add pre-allocated host memory buffers
     float *host_points_data;
@@ -2663,7 +2669,36 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         printf("Error creating OpenCL kernel: %d\n", err);
         return 0;
     }
+
+    // Create additional kernels
+    ocl->blur_kernel = clCreateKernel(ocl->program, "blur_distances", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating blur kernel: %d\n", err);
+        return 0;
+    }
     
+    ocl->normals_kernel = clCreateKernel(ocl->program, "calculate_normals_from_blurred_distances", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating normals kernel: %d\n", err);
+        return 0;
+    }
+    
+    // Create temporary buffers for blur pipeline
+    ocl->buffer_distances_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                               ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating temp distances buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_opacities_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                               ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating temp opacities buffer: %d\n", err);
+        return 0;
+    }
+
+
     // Create buffers
     ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
                                        NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
@@ -2791,6 +2826,21 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         printf("Error clearing normals buffer: %d\n", err);
         return;
     }
+
+    //  // Clear temporary buffers for blur pipeline
+    // err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances_temp, &zero, sizeof(float), 0, 
+    //                          ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+    // if (err != CL_SUCCESS) {
+    //     printf("Error clearing temp distances buffer: %d\n", err);
+    //     return;
+    // }
+
+    // err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_opacities_temp, &zero, sizeof(float), 0, 
+    //                          ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+    // if (err != CL_SUCCESS) {
+    //     printf("Error clearing temp opacities buffer: %d\n", err);
+    //     return;
+    // }
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
@@ -2829,24 +2879,91 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         printf("Error executing kernel: %d\n", err);
         return;
     }
+
+    // --- Multi-Pass Blur Section ---
+    cl_mem s_dist_src, s_dist_dst, s_opac_src, s_opac_dst; // s_ for stage
+    cl_mem temp_buf_holder; // For swapping
+
+    // Parameters for blur kernel - adjust these to reduce outlines and get desired smoothness
+    cl_int blur_kernel_size = 3;      // Half-width (e.g., 2 for 5x5 window). Try 2 or 3.
+    cl_float blur_sigma_range = 100.0f; // Sigma for depth differences. Try values like 10.0, 15.0, 20.0.
+    cl_float blur_sigma_spatial = 2.5f; // Sigma for spatial distance. Try 1.5, 2.0, 2.5.
+
+    int blur_passes = 1; // Number of blur passes. 2-3 is usually sufficient for good smoothing.
+    if (blur_passes > 0) {
+        // Initial source for the first blur pass is the output of the projection kernel
+        s_dist_src = ocl->buffer_distances;
+        s_opac_src = ocl->buffer_opacities;
+
+        for (int pass = 0; pass < blur_passes; ++pass) {
+            // Determine destination buffer for this pass to achieve ping-pong
+            // Pass 0 (1st pass): src=original, dst=temp
+            // Pass 1 (2nd pass): src=temp,    dst=original
+            // Pass 2 (3rd pass): src=original, dst=temp
+            if (pass % 2 == 0) { // Output to _temp buffers
+                s_dist_dst = ocl->buffer_distances_temp;
+                s_opac_dst = ocl->buffer_opacities_temp;
+            } else { // Output to original buffers (which now act as temp for this pass)
+                s_dist_dst = ocl->buffer_distances;
+                s_opac_dst = ocl->buffer_opacities;
+            }
+
+            // Set blur kernel arguments for the current pass
+            err = clSetKernelArg(ocl->blur_kernel, 0, sizeof(cl_mem), &s_dist_src);
+            err |= clSetKernelArg(ocl->blur_kernel, 1, sizeof(cl_mem), &s_opac_src);
+            err |= clSetKernelArg(ocl->blur_kernel, 2, sizeof(cl_mem), &s_dist_dst);
+            err |= clSetKernelArg(ocl->blur_kernel, 3, sizeof(cl_mem), &s_opac_dst);
+            err |= clSetKernelArg(ocl->blur_kernel, 4, sizeof(cl_int), &screen_width);
+            err |= clSetKernelArg(ocl->blur_kernel, 5, sizeof(cl_int), &screen_height);
+            err |= clSetKernelArg(ocl->blur_kernel, 6, sizeof(cl_int), &blur_kernel_size);
+            err |= clSetKernelArg(ocl->blur_kernel, 7, sizeof(cl_float), &blur_sigma_range);
+            err |= clSetKernelArg(ocl->blur_kernel, 8, sizeof(cl_float), &blur_sigma_spatial);
+            if (err != CL_SUCCESS) {
+                printf("Error setting blur kernel arguments for pass %d: %d\n", pass, err);
+                return;
+            }
+
+            // Execute blur kernel
+            size_t blur_global_work_size[2] = {ScreenWidth, ScreenHeight};
+            err = clEnqueueNDRangeKernel(ocl->queue, ocl->blur_kernel, 2, NULL, blur_global_work_size, NULL, 0, NULL, NULL);
+            if (err != CL_SUCCESS) {
+                printf("Error executing blur kernel for pass %d: %d\n", pass, err);
+                return;
+            }
+            
+            // The output of this pass (s_dist_dst, s_opac_dst) becomes the input for the next
+            s_dist_src = s_dist_dst;
+            s_opac_src = s_opac_dst;
+        }
+    } else {
+        // No blur passes, the "final" blurred data is just the direct output of projection
+        s_dist_src = ocl->buffer_distances; // Or s_dist_dst, doesn't matter if passes = 0
+        s_opac_src = ocl->buffer_opacities;
+    }
+
+    cl_mem final_blurred_distances_buf = s_dist_src;
+    cl_mem final_blurred_opacities_buf = s_opac_src;
+
     
     // Use pre-allocated result buffers (INCLUDING NORMALS)
     float *distances_result = ocl->host_distances_result;
     float *opacities_result = ocl->host_opacities_result;
     float *velocities_result = ocl->host_velocities_result;
-    float *normals_result = ocl->host_normals_result;               // ADD NORMALS
+    float *normals_result = ocl->host_normals_result;
     
-    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_distances, CL_TRUE, 0, 
+     // FIX: Read blurred distances instead of original distances
+    err = clEnqueueReadBuffer(ocl->queue, final_blurred_distances_buf, CL_TRUE, 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), distances_result, 0, NULL, NULL);
     if (err != CL_SUCCESS) {
-        printf("Error reading distances buffer: %d\n", err);
+        printf("Error reading blurred distances buffer: %d\n", err);
         return;
     }
     
-    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_opacities, CL_TRUE, 0, 
+   // FIX: Read blurred opacities instead of original opacities
+    err = clEnqueueReadBuffer(ocl->queue, final_blurred_opacities_buf, CL_TRUE, 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), opacities_result, 0, NULL, NULL);
     if (err != CL_SUCCESS) {
-        printf("Error reading opacities buffer: %d\n", err);
+        printf("Error reading blurred opacities buffer: %d\n", err);
         return;
     }
     
@@ -2906,17 +3023,17 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
             if (opacities_result[idx] > 0.0f) {
                 // Distance: closer = higher value (like your C code)
                 if (maxDistance > 0.0f) {
-                    screen->distance[x][y] = (uint8_t)(255 * (1.0f - distances_result[idx] / maxDistance));
+                    screen->distance[x][y] = (uint8_t)(255 * (1.0f - distances_result[idx] / (maxDistance + 1.0f )));
                 }
                 
                 // Velocity: normalized linearly
                 if (maxVelocity > 0.0f) {
-                    screen->velocity[x][y] = (uint8_t)(255 * (velocities_result[idx] / maxVelocity));
+                    screen->velocity[x][y] = (uint8_t)(255 * (velocities_result[idx] / (maxVelocity + 1.0f ) ));
                 }
                 
                 // Linear opacity normalization
                 if (maxOpacity > 0.0f) {
-                    screen->normalizedOpacity[x][y] = (uint8_t)(255 * (opacities_result[idx] / maxOpacity));
+                    screen->normalizedOpacity[x][y] = (uint8_t)(255 * (opacities_result[idx] / (maxOpacity +1.0f ) ));
                 }
             }
             
@@ -2949,6 +3066,11 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
     if (ocl->program) clReleaseProgram(ocl->program);
     if (ocl->queue) clReleaseCommandQueue(ocl->queue);
     if (ocl->context) clReleaseContext(ocl->context);
+
+    if (ocl->blur_kernel) clReleaseKernel(ocl->blur_kernel);
+    if (ocl->normals_kernel) clReleaseKernel(ocl->normals_kernel);
+    if (ocl->buffer_distances_temp) clReleaseMemObject(ocl->buffer_distances_temp);
+    if (ocl->buffer_opacities_temp) clReleaseMemObject(ocl->buffer_opacities_temp);
 }
 
 int main() {

@@ -1162,11 +1162,11 @@ func main() {
 		fmt.Printf("Error loading shader: %v\n", err)
 		panic(err)
 	}
-	blurShader, err := ebiten.NewShader(src)
-	if err != nil {
-		fmt.Printf("Error creating shader: %v\n", err)
-		panic(err)
-	}
+	// blurShader, err := ebiten.NewShader(src)
+	// if err != nil {
+	// 	fmt.Printf("Error creating shader: %v\n", err)
+	// 	panic(err)
+	// }
 
 	src, err = loadShader("shaders/calculateNormal.kage")
 	if err != nil {
@@ -1225,7 +1225,7 @@ func main() {
 
 	shaders := []Shader{
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 2.0, "SigmaRange": 1.5}, name: "Blur"},
-		{shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.75, "SigmaRange": 0.5}, name: "Blur"},
+		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.75, "SigmaRange": 0.5}, name: "Blur"},
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 0.85, "SigmaRange": 0.5}, name: "Blur"},
 		// {shader: blurShader, options: map[string]interface{}{"SigmaSpatial": 1.05, "SigmaRange": 0.5}, name: "Blur"},
 	}

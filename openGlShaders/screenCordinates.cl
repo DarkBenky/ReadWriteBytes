@@ -6,7 +6,122 @@
 // 5. Enhanced fluid surface reconstruction with proper depth testing
 // 6. Optional: Foam/bubble generation in high-velocity regions
 
+// 3. Calculate smooth normals from blurred distance field using gradients
+__kernel void calculate_normals_from_blurred_distances(
+    __global const float *BlurredDistances,
+    __global float *ScreenNormals,
+    const int screenWidth,
+    const int screenHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
 
+    int index = y * screenWidth + x;
+    
+    // Initialize normal components
+    float3 normal = (float3)(0.0f, 0.0f, 0.0f);
+    
+    // Gradient calculation using central differences
+    if (x > 0 && x < screenWidth - 1 && y > 0 && y < screenHeight - 1) {
+        float left = BlurredDistances[index - 1];
+        float right = BlurredDistances[index + 1];
+        float up = BlurredDistances[index - screenWidth];
+        float down = BlurredDistances[index + screenWidth];
+
+        // Calculate gradients
+        normal.x = left - right; // X gradient
+        normal.y = up - down;     // Y gradient
+        normal.z = 2.0f;          // Z component is constant for depth
+
+        // Normalize the normal vector
+        float length = sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+        if (length > 0.0f) {
+            normal /= length;
+        }
+    } else {
+        // Default to a flat normal if out of bounds
+        normal = (float3)(0.0f, 0.0f, 1.0f);
+    }
+
+    // Store the calculated normal in the output buffer
+    int baseIndex = index * 3;
+    ScreenNormals[baseIndex]     = normal.x;
+    ScreenNormals[baseIndex + 1] = normal.y;
+    ScreenNormals[baseIndex + 2] = normal.z;
+}
+
+// 2. Apply bilateral Gaussian blur to distances (preserves depth discontinuities)
+__kernel void blur_distances(
+    __global const float *ScreenDistances,
+    __global const float *ScreenOpacities,
+    __global float *BlurredDistances,
+    __global float *BlurredOpacities,
+    const int screenWidth,
+    const int screenHeight,
+    const int kernelSize,      // e.g., 2 or 3 for a 5x5 or 7x7 window
+    const float sigmaRange,    // Sigma for depth/value differences, e.g., 5.0 or 10.0
+    const float sigmaSpatial   // Sigma for spatial distance, e.g., 2.0 or 3.0
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+
+    if (x >= screenWidth || y >= screenHeight) return;
+
+    int centerIndex = y * screenWidth + x;
+    float centerDistance = ScreenDistances[centerIndex];
+    // float centerOpacity = ScreenOpacities[centerIndex]; // Not used for bilateral weight on opacity
+
+    float sumWeightedDistances = 0.0f;
+    float sumWeightedOpacities = 0.0f;
+    float totalWeightDistances = 0.0f;
+    float totalWeightOpacities = 0.0f; // Opacity can use a simpler Gaussian weight
+
+    // Iterate over the kernel window
+    for (int j = -kernelSize; j <= kernelSize; j++) { // dy
+        for (int i = -kernelSize; i <= kernelSize; i++) { // dx
+            int nx = x + i;
+            int ny = y + j;
+
+            // Check bounds
+            if (nx >= 0 && nx < screenWidth && ny >= 0 && ny < screenHeight) {
+                int neighborIndex = ny * screenWidth + nx;
+                float neighborDistance = ScreenDistances[neighborIndex];
+                float neighborOpacity = ScreenOpacities[neighborIndex];
+
+                // Spatial Gaussian weight (common for both distance and opacity)
+                float spatialWeight = exp(-((float)(i * i + j * j)) / (2.0f * sigmaSpatial * sigmaSpatial));
+
+                // Range/Value Gaussian weight for distances (bilateral part)
+                float distanceDifference = centerDistance - neighborDistance;
+                float rangeWeight = exp(-((distanceDifference * distanceDifference)) / (2.0f * sigmaRange * sigmaRange));
+                
+                float weightForDistance = spatialWeight * rangeWeight;
+                sumWeightedDistances += neighborDistance * weightForDistance;
+                totalWeightDistances += weightForDistance;
+
+                // For opacity, we can do a simple Gaussian blur or also bilateral.
+                // Here, let's do a simple Gaussian blur for opacity using only spatialWeight.
+                // If you want bilateral on opacity too, calculate a rangeWeight for opacity.
+                sumWeightedOpacities += neighborOpacity * spatialWeight;
+                totalWeightOpacities += spatialWeight;
+            }
+        }
+    }
+
+    if (totalWeightDistances > 0.0f) {
+        BlurredDistances[centerIndex] = sumWeightedDistances / totalWeightDistances;
+    } else {
+        BlurredDistances[centerIndex] = centerDistance; // Or ScreenDistances[centerIndex]
+    }
+
+    if (totalWeightOpacities > 0.0f) {
+        BlurredOpacities[centerIndex] = sumWeightedOpacities / totalWeightOpacities;
+    } else {
+        BlurredOpacities[centerIndex] = ScreenOpacities[centerIndex]; // Or 0.0f
+    }
+}
 
 
 // 1. Project particles to screen-space z-buffer (distances + velocities + basic opacity)
