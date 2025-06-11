@@ -6,6 +6,10 @@
 // 5. Enhanced fluid surface reconstruction with proper depth testing
 // 6. Optional: Foam/bubble generation in high-velocity regions
 
+
+
+
+// 1. Project particles to screen-space z-buffer (distances + velocities + basic opacity)
 __kernel void project_points_to_screen(
     __global const float* points,
     __global const float* velocities,
