@@ -19,6 +19,14 @@ __kernel void calculate_normals_from_blurred_distances(
     if (x >= screenWidth || y >= screenHeight) return;
 
     int index = y * screenWidth + x;
+    int baseIndex = index * 3;
+
+    if (BlurredDistances[index] <= 0.001f) { // Use a small epsilon
+        ScreenNormals[baseIndex]     = 0.0f;
+        ScreenNormals[baseIndex + 1] = 0.0f;
+        ScreenNormals[baseIndex + 2] = 0.0f;
+        return; // Skip normal calculation for this pixel
+    }
     
     // Initialize normal components
     float3 normal = (float3)(0.0f, 0.0f, 0.0f);
@@ -45,8 +53,6 @@ __kernel void calculate_normals_from_blurred_distances(
         normal = (float3)(0.0f, 0.0f, 1.0f);
     }
 
-    // Store the calculated normal in the output buffer
-    int baseIndex = index * 3;
     ScreenNormals[baseIndex]     = normal.x;
     ScreenNormals[baseIndex + 1] = normal.y;
     ScreenNormals[baseIndex + 2] = normal.z;

@@ -19,7 +19,7 @@
 #define PARTICLE_RADIUS 4
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
-#define temperature 100.0f
+#define temperature 8.5f
 #define pressure  temperature * 0.1f
 #define FrameCount 30
 #define NUM_THREADS 0
@@ -2885,8 +2885,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     cl_mem temp_buf_holder; // For swapping
 
     // Parameters for blur kernel - adjust these to reduce outlines and get desired smoothness
-    cl_int blur_kernel_size = 3;      // Half-width (e.g., 2 for 5x5 window). Try 2 or 3.
-    cl_float blur_sigma_range = 100.0f; // Sigma for depth differences. Try values like 10.0, 15.0, 20.0.
+    cl_int blur_kernel_size = 2;      // Half-width (e.g., 2 for 5x5 window). Try 2 or 3.
+    cl_float blur_sigma_range = 15.0f; // Sigma for depth differences. Try values like 10.0, 15.0, 20.0.
     cl_float blur_sigma_spatial = 2.5f; // Sigma for spatial distance. Try 1.5, 2.0, 2.5.
 
     int blur_passes = 1; // Number of blur passes. 2-3 is usually sufficient for good smoothing.
@@ -2944,6 +2944,27 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     cl_mem final_blurred_distances_buf = s_dist_src;
     cl_mem final_blurred_opacities_buf = s_opac_src;
 
+    // --- Normals Calculation Kernel ---
+    // The normals kernel uses the output of the blur stage (final_blurred_distances_buf)
+    err = clSetKernelArg(ocl->normals_kernel, 0, sizeof(cl_mem), &final_blurred_distances_buf); // Input: blurred distances
+    if (err != CL_SUCCESS) { printf("Error setting normals_kernel arg 0: %d\n", err); return; }
+    
+    err = clSetKernelArg(ocl->normals_kernel, 1, sizeof(cl_mem), &ocl->buffer_normals);      // Output: screen normals
+    if (err != CL_SUCCESS) { printf("Error setting normals_kernel arg 1: %d\n", err); return; }
+
+    err = clSetKernelArg(ocl->normals_kernel, 2, sizeof(cl_int), &screen_width);
+    if (err != CL_SUCCESS) { printf("Error setting normals_kernel arg 2: %d\n", err); return; }
+
+    err = clSetKernelArg(ocl->normals_kernel, 3, sizeof(cl_int), &screen_height);
+    if (err != CL_SUCCESS) { printf("Error setting normals_kernel arg 3: %d\n", err); return; }
+
+    // Execute normals kernel
+    size_t normals_global_work_size[2] = {ScreenWidth, ScreenHeight};
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->normals_kernel, 2, NULL, normals_global_work_size, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error executing normals kernel: %d\n", err);
+        return;
+    }
     
     // Use pre-allocated result buffers (INCLUDING NORMALS)
     float *distances_result = ocl->host_distances_result;
@@ -3002,17 +3023,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
             maxOpacity = opacities_result[i];
         }
     }
-    
-    // Debug output
-    printf("Debug: maxDistance=%.3f, maxVelocity=%.3f, maxOpacity=%.3f\n", 
-           maxDistance, maxVelocity, maxOpacity);
-    
-    // Count non-zero pixels
-    int nonZeroPixels = 0;
-    for (int i = 0; i < ScreenWidth * ScreenHeight; i++) {
-        if (opacities_result[i] > 0.0f) nonZeroPixels++;
-    }
-    printf("Debug: %d pixels have particles\n", nonZeroPixels);
     
     // Convert results to screen format with proper normalization (INCLUDING NORMALS)
     for (int y = 0; y < ScreenHeight; y++) {
