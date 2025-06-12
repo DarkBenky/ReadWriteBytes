@@ -19,7 +19,7 @@
 #define PARTICLE_RADIUS 4
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
-#define temperature 10.0f
+#define temperature 100.0f
 #define pressure  temperature * 0.1f
 #define FrameCount 30
 #define NUM_THREADS 0
