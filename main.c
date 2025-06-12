@@ -11,7 +11,7 @@
 #include <pthread.h> // for pthreads
 #include <CL/cl.h>     // Add this line for OpenCL
 
-#define NUM_PARTICLES 150000
+#define NUM_PARTICLES 250000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
