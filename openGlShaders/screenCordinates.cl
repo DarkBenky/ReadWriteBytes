@@ -90,6 +90,10 @@ __kernel void blur_distances(
                 float neighborDistance = ScreenDistances[neighborIndex];
                 float neighborOpacity = ScreenOpacities[neighborIndex];
 
+                if (neighborDistance <= 0.001f) {
+                    continue;
+                }
+
                 // Spatial Gaussian weight (common for both distance and opacity)
                 float spatialWeight = exp(-((float)(i * i + j * j)) / (2.0f * sigmaSpatial * sigmaSpatial));
 
