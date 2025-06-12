@@ -10,6 +10,8 @@
 #include <omp.h>        // for OpenMP
 #include <pthread.h> // for pthreads
 #include <CL/cl.h>     // Add this line for OpenCL
+#define TINYOBJ_LOADER_C_IMPLEMENTATION
+#include "tinyobj_loader_c.h"
 
 #define NUM_PARTICLES 250000
 #define GRAVITY 10.0f
@@ -24,6 +26,7 @@
 #define FrameCount 30
 #define NUM_THREADS 0
 #define USE_GPU 1
+#define NUMBER_OF_TRIANGLES 10000
 pthread_t threads[NUM_THREADS];
 
 struct ThreadSync {
@@ -74,6 +77,183 @@ struct RenderThreadData {
     int threadId;
 };
 
+struct Ray {
+    float origin[3];
+    float direction[3];
+};
+
+struct OpenCLContext {
+    cl_platform_id platform;
+    cl_device_id device;
+    cl_context context;
+    cl_command_queue queue;
+    cl_program program;
+    // kernels
+    cl_kernel kernel;
+    cl_kernel blur_kernel;
+    cl_kernel normals_kernel;
+    cl_kernel triangle_kernel;  // Add triangle kernel
+    // buffers
+    cl_mem buffer_points;
+    cl_mem buffer_velocities;
+    cl_mem buffer_distances;
+    cl_mem buffer_opacities;
+    cl_mem buffer_velocities_screen;
+    cl_mem buffer_normals;
+    cl_mem buffer_distances_temp;
+    cl_mem buffer_opacities_temp;
+    
+    // Add triangle buffers
+    cl_mem buffer_triangle_v1;
+    cl_mem buffer_triangle_v2;
+    cl_mem buffer_triangle_v3;
+    cl_mem buffer_triangle_normals;
+    
+    // Add pre-allocated host memory buffers
+    float *host_points_data;
+    float *host_velocities_data;
+    float *host_distances_result;
+    float *host_opacities_result;
+    float *host_velocities_result;
+    float *host_normals_result;
+};
+
+struct Camera {
+    struct Ray ray;
+    float fov;
+};
+
+struct Triangles {
+    float v1 [NUMBER_OF_TRIANGLES * 3];
+    float v2 [NUMBER_OF_TRIANGLES * 3];
+    float v3 [NUMBER_OF_TRIANGLES * 3];
+    float normals[NUMBER_OF_TRIANGLES * 3];
+    int count;
+};
+
+struct Screen {
+    uint8_t distance[ScreenWidth][ScreenHeight];
+    uint8_t velocity[ScreenWidth][ScreenHeight];
+    uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
+    uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
+    uint16_t particleCount[ScreenWidth][ScreenHeight];
+    uint16_t opacity[ScreenWidth][ScreenHeight];
+    float normals[ScreenWidth][ScreenHeight][3]; // Normal vectors for lighting
+};
+
+void AddTriangle(struct Triangles *triangles, 
+                 float v1x, float v1y, float v1z,
+                 float v2x, float v2y, float v2z,
+                 float v3x, float v3y, float v3z) {
+    if (triangles->count >= NUMBER_OF_TRIANGLES) {
+        printf("Maximum number of triangles reached\n");
+        return;
+    }
+    
+    int index = triangles->count * 3;
+    triangles->v1[index] = v1x;
+    triangles->v1[index + 1] = v1y;
+    triangles->v1[index + 2] = v1z;
+    
+    triangles->v2[index] = v2x;
+    triangles->v2[index + 1] = v2y;
+    triangles->v2[index + 2] = v2z;
+    
+    triangles->v3[index] = v3x;
+    triangles->v3[index + 1] = v3y;
+    triangles->v3[index + 2] = v3z;
+
+    // Calculate normal
+    float ux = v2x - v1x;
+    float uy = v2y - v1y;
+    float uz = v2z - v1z;
+    
+    float vx = v3x - v1x;
+    float vy = v3y - v1y;
+    float vz = v3z - v1z;
+
+    // Cross product
+    triangles->normals[index]     = uy * vz - uz * vy; // nx
+    triangles->normals[index + 1] = uz * vx - ux * vz; // ny
+    triangles->normals[index + 2] = ux * vy - uy * vx; // nz
+    
+    triangles->count++;
+}
+
+void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen) {
+    if (triangles->count == 0) return;
+    
+    cl_int err;
+    
+    // Upload triangle data to existing GPU buffers (no new allocation)
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v1, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->v1, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle v1 buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v2, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->v2, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle v2 buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v3, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->v3, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle v3 buffer: %d\n", err);
+        return;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_normals, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->normals, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle normals buffer: %d\n", err);
+        return;
+    }
+    
+    // Set kernel arguments using existing buffers
+    cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+    cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+    cl_float fov = camera->fov;
+    cl_int screen_width = ScreenWidth;
+    cl_int screen_height = ScreenHeight;
+    cl_int num_triangles = triangles->count;
+    
+    err = clSetKernelArg(ocl->triangle_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
+    err |= clSetKernelArg(ocl->triangle_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
+    err |= clSetKernelArg(ocl->triangle_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
+    err |= clSetKernelArg(ocl->triangle_kernel, 3, sizeof(cl_mem), &ocl->buffer_triangle_normals);
+    err |= clSetKernelArg(ocl->triangle_kernel, 4, sizeof(cl_mem), &ocl->buffer_distances);
+    err |= clSetKernelArg(ocl->triangle_kernel, 5, sizeof(cl_mem), &ocl->buffer_normals);
+    err |= clSetKernelArg(ocl->triangle_kernel, 6, sizeof(cl_float3), &cam_pos);
+    err |= clSetKernelArg(ocl->triangle_kernel, 7, sizeof(cl_float3), &cam_dir);
+    err |= clSetKernelArg(ocl->triangle_kernel, 8, sizeof(cl_float), &fov);
+    err |= clSetKernelArg(ocl->triangle_kernel, 9, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->triangle_kernel, 10, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->triangle_kernel, 11, sizeof(cl_int), &num_triangles);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting triangle kernel arguments: %d\n", err);
+        return;
+    }
+    
+    // Execute triangle rendering kernel
+    size_t global_work_size = triangles->count;
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->triangle_kernel, 1, NULL, &global_work_size, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error executing triangle kernel: %d\n", err);
+        return;
+    }
+    
+    // Wait for completion
+    clFinish(ocl->queue);
+    
+    printf("Rendered %d triangles using OpenCL\n", triangles->count);
+};
+
 // Initialize render thread system
 void initializeRenderThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -112,17 +292,6 @@ void initializeCollisionThreads() {
     }
 }
 
-
-struct Screen {
-    uint8_t distance[ScreenWidth][ScreenHeight];
-    uint8_t velocity[ScreenWidth][ScreenHeight];
-    uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
-    uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
-    uint16_t particleCount[ScreenWidth][ScreenHeight];
-    uint16_t opacity[ScreenWidth][ScreenHeight];
-    float normals[ScreenWidth][ScreenHeight][3]; // Normal vectors for lighting
-};
-
 struct TimePartition {
     float collisionTime;
     float applyPressureTime;
@@ -143,41 +312,12 @@ struct TimePartition {
     float projectLightParticlesTime;
 };
 
-struct OpenCLContext {
-    cl_platform_id platform;
-    cl_device_id device;
-    cl_context context;
-    cl_command_queue queue;
-    cl_program program;
-    // kernels
-    cl_kernel kernel;
-    cl_kernel blur_kernel;
-    cl_kernel normals_kernel;
-    // buffers
-    cl_mem buffer_points;
-    cl_mem buffer_velocities;
-    cl_mem buffer_distances;
-    cl_mem buffer_opacities;
-    cl_mem buffer_velocities_screen;
-    cl_mem buffer_normals;
-    cl_mem buffer_distances_temp;
-    cl_mem buffer_opacities_temp;
-    
-    // Add pre-allocated host memory buffers
-    float *host_points_data;
-    float *host_velocities_data;
-    float *host_distances_result;
-    float *host_opacities_result;
-    float *host_velocities_result;
-    float *host_normals_result;
-};
-
 // Function prototypes
 void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
 void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
 void renderParticlesToBuffer(struct RenderThreadData *data);
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles);
 
 void createThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -256,19 +396,6 @@ struct Light {
     float x;
     float y;
     float z;
-};
-
-
-
-
-struct Ray {
-    float origin[3];
-    float direction[3];
-};
-
-struct Camera {
-    struct Ray ray;
-    float fov;
 };
 
 struct Cursor {
@@ -2467,7 +2594,7 @@ void saveScreenNormal(struct Screen *screen, const char *filename) {
     fclose(file);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
     clearScreen(screen);
@@ -2478,7 +2605,7 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     timePartition->clearScreenTime += dt;
     // printf("Clear screen time: %f\n", dt);
     if (USE_GPU == 1) {
-        projectParticlesOpenCL(openCLContext, particles, camera, screen);
+        projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles);
         // save normal screen
         saveScreenNormal(screen, "normal.bin");
     } else {
@@ -2663,7 +2790,7 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         return 0;
     }
     
-    // Create kernel
+    // Create particle projection kernel
     ocl->kernel = clCreateKernel(ocl->program, "project_points_to_screen", &err);
     if (err != CL_SUCCESS) {
         printf("Error creating OpenCL kernel: %d\n", err);
@@ -2683,23 +2810,14 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         return 0;
     }
     
-    // Create temporary buffers for blur pipeline
-    ocl->buffer_distances_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
-                                               ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    // Create triangle kernel
+    ocl->triangle_kernel = clCreateKernel(ocl->program, "renderTriangles", &err);
     if (err != CL_SUCCESS) {
-        printf("Error creating temp distances buffer: %d\n", err);
+        printf("Error creating triangle kernel: %d\n", err);
         return 0;
     }
     
-    ocl->buffer_opacities_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
-                                               ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-    if (err != CL_SUCCESS) {
-        printf("Error creating temp opacities buffer: %d\n", err);
-        return 0;
-    }
-
-
-    // Create buffers
+    // Create particle buffers
     ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
                                        NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
@@ -2735,11 +2853,55 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         return 0;
     }
     
-    // ADD NORMALS BUFFER
+    // Create normals buffer
     ocl->buffer_normals = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
                                         ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating normals buffer: %d\n", err);
+        return 0;
+    }
+    
+    // Create temporary buffers for blur pipeline
+    ocl->buffer_distances_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                               ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating temp distances buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_opacities_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                               ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating temp opacities buffer: %d\n", err);
+        return 0;
+    }
+    
+    // Create triangle buffers (allocated once, reused every frame)
+    ocl->buffer_triangle_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                           NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle v1 buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_triangle_v2 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                           NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle v2 buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_triangle_v3 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                           NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle v3 buffer: %d\n", err);
+        return 0;
+    }
+    
+    ocl->buffer_triangle_normals = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                                NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle normals buffer: %d\n", err);
         return 0;
     }
     
@@ -2749,10 +2911,9 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
     ocl->host_distances_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
     ocl->host_opacities_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
     ocl->host_velocities_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
-    // ADD NORMALS HOST BUFFER
     ocl->host_normals_result = (float*)malloc(ScreenWidth * ScreenHeight * 3 * sizeof(float));
     
-    // Check for allocation failures (UPDATED TO INCLUDE NORMALS)
+    // Check for allocation failures
     if (!ocl->host_points_data || !ocl->host_velocities_data || 
         !ocl->host_distances_result || !ocl->host_opacities_result || 
         !ocl->host_velocities_result || !ocl->host_normals_result) {
@@ -2760,11 +2921,11 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         return 0;
     }
     
-    printf("OpenCL initialized successfully\n");
+    printf("OpenCL initialized successfully with triangle support\n");
     return 1;
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen) {
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles) {
     cl_int err;
     
     // Use pre-allocated buffers instead of malloc
@@ -2827,20 +2988,9 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         return;
     }
 
-    //  // Clear temporary buffers for blur pipeline
-    // err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances_temp, &zero, sizeof(float), 0, 
-    //                          ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-    // if (err != CL_SUCCESS) {
-    //     printf("Error clearing temp distances buffer: %d\n", err);
-    //     return;
-    // }
-
-    // err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_opacities_temp, &zero, sizeof(float), 0, 
-    //                          ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-    // if (err != CL_SUCCESS) {
-    //     printf("Error clearing temp opacities buffer: %d\n", err);
-    //     return;
-    // }
+    // *** ADD TRIANGLE RENDERING HERE - BEFORE PARTICLE PROJECTION ***
+    // This renders triangles first, so they appear behind the fluid
+    renderTrianglesOpenCL(ocl, triangles, camera, screen);
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
@@ -3063,27 +3213,161 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
     if (ocl->host_distances_result) free(ocl->host_distances_result);
     if (ocl->host_opacities_result) free(ocl->host_opacities_result);
     if (ocl->host_velocities_result) free(ocl->host_velocities_result);
-    if (ocl->host_normals_result) free(ocl->host_normals_result);               // ADD NORMALS CLEANUP
+    if (ocl->host_normals_result) free(ocl->host_normals_result);
     
-    // Free OpenCL resources (INCLUDING NORMALS)
+    // Free OpenCL resources (INCLUDING NORMALS AND TRIANGLES)
     if (ocl->buffer_points) clReleaseMemObject(ocl->buffer_points);
     if (ocl->buffer_velocities) clReleaseMemObject(ocl->buffer_velocities);
     if (ocl->buffer_distances) clReleaseMemObject(ocl->buffer_distances);
     if (ocl->buffer_opacities) clReleaseMemObject(ocl->buffer_opacities);
     if (ocl->buffer_velocities_screen) clReleaseMemObject(ocl->buffer_velocities_screen);
-    if (ocl->buffer_normals) clReleaseMemObject(ocl->buffer_normals);           // ADD NORMALS CLEANUP
+    if (ocl->buffer_normals) clReleaseMemObject(ocl->buffer_normals);
+    if (ocl->buffer_triangle_v1) clReleaseMemObject(ocl->buffer_triangle_v1);
+    if (ocl->buffer_triangle_v2) clReleaseMemObject(ocl->buffer_triangle_v2);
+    if (ocl->buffer_triangle_v3) clReleaseMemObject(ocl->buffer_triangle_v3);
+    if (ocl->buffer_triangle_normals) clReleaseMemObject(ocl->buffer_triangle_normals);
+    
     if (ocl->kernel) clReleaseKernel(ocl->kernel);
-    if (ocl->program) clReleaseProgram(ocl->program);
-    if (ocl->queue) clReleaseCommandQueue(ocl->queue);
-    if (ocl->context) clReleaseContext(ocl->context);
-
+    if (ocl->triangle_kernel) clReleaseKernel(ocl->triangle_kernel);
     if (ocl->blur_kernel) clReleaseKernel(ocl->blur_kernel);
     if (ocl->normals_kernel) clReleaseKernel(ocl->normals_kernel);
     if (ocl->buffer_distances_temp) clReleaseMemObject(ocl->buffer_distances_temp);
     if (ocl->buffer_opacities_temp) clReleaseMemObject(ocl->buffer_opacities_temp);
+    
+    if (ocl->program) clReleaseProgram(ocl->program);
+    if (ocl->queue) clReleaseCommandQueue(ocl->queue);
+    if (ocl->context) clReleaseContext(ocl->context);
+}
+
+void my_file_reader(void *ctx, const char *filename, int is_mtl, const char *obj_filename, char **buf, size_t *len) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error: Could not open file %s\n", filename);
+        *buf = NULL;
+        *len = 0;
+        return;
+    }
+    
+    fseek(file, 0, SEEK_END);
+    *len = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    *buf = (char*)malloc(*len + 1);
+    if (*buf) {
+        size_t read_size = fread(*buf, 1, *len, file);
+        if (read_size != *len) {
+            printf("Warning: Could not read entire file %s\n", filename);
+        }
+        (*buf)[*len] = '\0';
+    } else {
+        printf("Error: Could not allocate memory for file %s\n", filename);
+        *len = 0;
+    }
+    
+    fclose(file);
 }
 
 int main() {
+    tinyobj_attrib_t attrib;  // Fix typo: was inyobj_attrib_t
+    tinyobj_shape_t* shapes = NULL;
+    size_t num_shapes;
+    tinyobj_material_t* materials = NULL;
+    size_t num_materials;
+
+    // Initialize attribute structure
+    tinyobj_attrib_init(&attrib);
+
+    // Load and triangulate .obj file with correct parameters
+    int result = tinyobj_parse_obj(
+        &attrib, &shapes, &num_shapes, &materials, &num_materials,
+        "model.obj", my_file_reader, NULL, TINYOBJ_FLAG_TRIANGULATE
+    );
+    if (result != TINYOBJ_SUCCESS) {
+        fprintf(stderr, "Error loading OBJ\n");
+        return 1;
+    }
+
+    struct Triangles *triangles = (struct Triangles *)malloc(sizeof(struct Triangles));
+    if (!triangles) {
+        perror("Failed to allocate memory for triangles");
+        return 1;
+    }
+    triangles->count = 0;
+
+    // Extract triangles from loaded OBJ data
+    for (size_t i = 0; i < num_shapes; ++i) {
+        // Access face data directly from attrib structure
+        size_t face_offset = shapes[i].face_offset;
+        size_t num_faces = shapes[i].length / 3; // Each triangle has 3 vertices
+        
+        // Process each face (which is already triangulated)
+        for (size_t f = 0; f < num_faces; ++f) {
+            if (triangles->count >= NUMBER_OF_TRIANGLES) {
+                printf("Warning: Model has more triangles than buffer size (%d)\n", NUMBER_OF_TRIANGLES);
+                break;
+            }
+            
+            // Get the three vertices of this triangle
+            float v1[3], v2[3], v3[3];
+            
+            for (size_t v = 0; v < 3; ++v) {
+                tinyobj_vertex_index_t idx = attrib.faces[face_offset + f * 3 + v];
+                
+                // Extract vertex coordinates
+                float vx = attrib.vertices[3 * idx.v_idx + 0];
+                float vy = attrib.vertices[3 * idx.v_idx + 1];
+                float vz = attrib.vertices[3 * idx.v_idx + 2];
+                
+                if (v == 0) {
+                    v1[0] = vx; v1[1] = vy; v1[2] = vz;
+                } else if (v == 1) {
+                    v2[0] = vx; v2[1] = vy; v2[2] = vz;
+                } else {
+                    v3[0] = vx; v3[1] = vy; v3[2] = vz;
+                }
+            }
+            
+            // Add triangle to your structure
+            AddTriangle(triangles, 
+                       v1[0], v1[1], v1[2],
+                       v2[0], v2[1], v2[2],
+                       v3[0], v3[1], v3[2]);
+        }
+        
+        // Break if we've reached the triangle limit
+        if (triangles->count >= NUMBER_OF_TRIANGLES) {
+            break;
+        }
+    }
+
+    printf("Loaded %d triangles from OBJ file\n", triangles->count);
+
+    const float scaleFactor = 10.0f;
+
+    for (int i = 0; i < triangles->count; i++) {
+        int idx = i * 3;
+        triangles->v1[idx + 0] *= scaleFactor;
+        triangles->v1[idx + 1] *= scaleFactor;
+        triangles->v1[idx + 2] *= scaleFactor;
+        triangles->v2[idx + 0] *= scaleFactor;
+        triangles->v2[idx + 1] *= scaleFactor;
+        triangles->v2[idx + 2] *= scaleFactor;
+        triangles->v3[idx + 0] *= scaleFactor;
+        triangles->v3[idx + 1] *= scaleFactor;
+        triangles->v3[idx + 2] *= scaleFactor;
+
+        // Optionally, recalc normals if needed:
+        float ux = triangles->v2[idx + 0] - triangles->v1[idx + 0];
+        float uy = triangles->v2[idx + 1] - triangles->v1[idx + 1];
+        float uz = triangles->v2[idx + 2] - triangles->v1[idx + 2];
+        float vx = triangles->v3[idx + 0] - triangles->v1[idx + 0];
+        float vy = triangles->v3[idx + 1] - triangles->v1[idx + 1];
+        float vz = triangles->v3[idx + 2] - triangles->v1[idx + 2];
+        triangles->normals[idx + 0] = uy * vz - uz * vy;
+        triangles->normals[idx + 1] = uz * vx - ux * vz;
+        triangles->normals[idx + 2] = ux * vy - uy * vx;
+    }
+
     struct OpenCLContext ocl;
     int useOpenCL = initializeOpenCL(&ocl);
     if (!useOpenCL) {
@@ -3270,7 +3554,7 @@ int main() {
         float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
         
         clock_t startRenderTime = clock();
-        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl);
+        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles);
         clock_t endRenderTime = clock();
         dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
         timePartition->renderTime += dt1;

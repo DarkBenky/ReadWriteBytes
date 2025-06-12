@@ -6,6 +6,117 @@
 // 5. Enhanced fluid surface reconstruction with proper depth testing
 // 6. Optional: Foam/bubble generation in high-velocity regions
 
+__kernel void renderTriangles(
+    __global const float* v1,
+    __global const float* v2,
+    __global const float* v3,
+    __global const float* normals,
+    __global float *ScreenDistances,
+    __global float *ScreenNormals,      // 3 floats per pixel now!
+    const float3 camPos,
+    const float3 camDir,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight,
+    const int numTriangles
+) {
+    int triangleId = get_global_id(0);
+    if (triangleId >= numTriangles) return;
+
+    // Get triangle vertices
+    float3 vertex1 = (float3)(v1[triangleId * 3], v1[triangleId * 3 + 1], v1[triangleId * 3 + 2]);
+    float3 vertex2 = (float3)(v2[triangleId * 3], v2[triangleId * 3 + 1], v2[triangleId * 3 + 2]);
+    float3 vertex3 = (float3)(v3[triangleId * 3], v3[triangleId * 3 + 1], v3[triangleId * 3 + 2]);
+    
+    // Get triangle normal
+    float3 normal = (float3)(normals[triangleId * 3], normals[triangleId * 3 + 1], normals[triangleId * 3 + 2]);
+
+    // Compute camera basis
+    float3 forward = normalize(camDir);
+    float3 camUp = (float3)(0.0f, 1.0f, 0.0f); // Assume Y-up
+    float3 right = normalize(cross(forward, camUp));
+    float3 up = cross(right, forward);
+
+    // Project vertices to screen space
+    float3 screenPos1, screenPos2, screenPos3;
+    
+    // Project vertex1
+    float3 rel1 = vertex1 - camPos;
+    float depth1 = dot(rel1, forward);
+    if (depth1 <= 0.001f) return;
+    float fovScale1 = 1.0f / (depth1 * fov);
+    screenPos1.x = dot(rel1, right) * fovScale1 * screenWidth * 0.5f + screenWidth * 0.5f;
+    screenPos1.y = -dot(rel1, up) * fovScale1 * screenHeight * 0.5f + screenHeight * 0.5f;
+    screenPos1.z = depth1;
+
+    // Project vertex2
+    float3 rel2 = vertex2 - camPos;
+    float depth2 = dot(rel2, forward);
+    if (depth2 <= 0.001f) return;
+    float fovScale2 = 1.0f / (depth2 * fov);
+    screenPos2.x = dot(rel2, right) * fovScale2 * screenWidth * 0.5f + screenWidth * 0.5f;
+    screenPos2.y = -dot(rel2, up) * fovScale2 * screenHeight * 0.5f + screenHeight * 0.5f;
+    screenPos2.z = depth2;
+
+    // Project vertex3
+    float3 rel3 = vertex3 - camPos;
+    float depth3 = dot(rel3, forward);
+    if (depth3 <= 0.001f) return;
+    float fovScale3 = 1.0f / (depth3 * fov);
+    screenPos3.x = dot(rel3, right) * fovScale3 * screenWidth * 0.5f + screenWidth * 0.5f;
+    screenPos3.y = -dot(rel3, up) * fovScale3 * screenHeight * 0.5f + screenHeight * 0.5f;
+    screenPos3.z = depth3;
+
+    // Calculate bounding box
+    int minX = max(0, (int)min(min(screenPos1.x, screenPos2.x), screenPos3.x));
+    int maxX = min(screenWidth - 1, (int)max(max(screenPos1.x, screenPos2.x), screenPos3.x));
+    int minY = max(0, (int)min(min(screenPos1.y, screenPos2.y), screenPos3.y));
+    int maxY = min(screenHeight - 1, (int)max(max(screenPos1.y, screenPos2.y), screenPos3.y));
+
+    // Rasterize triangle
+    for (int y = minY; y <= maxY; y++) {
+        for (int x = minX; x <= maxX; x++) {
+            // Barycentric coordinates
+            float2 p = (float2)(x + 0.5f, y + 0.5f);
+            float2 v0 = screenPos3.xy - screenPos1.xy;
+            float2 v1 = screenPos2.xy - screenPos1.xy;
+            float2 v2 = p - screenPos1.xy;
+
+            float dot00 = dot(v0, v0);
+            float dot01 = dot(v0, v1);
+            float dot02 = dot(v0, v2);
+            float dot11 = dot(v1, v1);
+            float dot12 = dot(v1, v2);
+
+            float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
+            float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+            float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+
+            // Check if point is in triangle
+            if (u >= 0 && v >= 0 && u + v <= 1) {
+                float w = 1.0f - u - v;
+                
+                // Interpolate depth
+                float depth = w * screenPos1.z + u * screenPos2.z + v * screenPos3.z;
+                
+                int pixelIndex = y * screenWidth + x;
+                
+                // Depth test
+                if (ScreenDistances[pixelIndex] == 0.0f || depth < ScreenDistances[pixelIndex]) {
+                    ScreenDistances[pixelIndex] = depth;
+                    
+                    // Store normal (3 floats per pixel)
+                    int normalIndex = pixelIndex * 3;
+                    ScreenNormals[normalIndex] = normal.x;
+                    ScreenNormals[normalIndex + 1] = normal.y;
+                    ScreenNormals[normalIndex + 2] = normal.z;
+                }
+            }
+        }
+    }
+}
+
+
 // 3. Calculate smooth normals from blurred distance field using gradients
 __kernel void calculate_normals_from_blurred_distances(
     __global const float *BlurredDistances,

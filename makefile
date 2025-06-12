@@ -1,13 +1,13 @@
 CC = clang
-# -g for debugging
-CFLAGS = -O3 -march=native
+CFLAGS = -O3 -march=native -Wall -Wextra
 LDFLAGS = -lm -lOpenCL
 
 all: main
 
-main: main.c
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+main: main.c tinyobj_loader_c.h
+	$(CC) $(CFLAGS) main.c -o main $(LDFLAGS)
 
 clean:
 	rm -f main
-.PHONY: clean
+
+.PHONY: all clean
