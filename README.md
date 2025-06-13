@@ -24,10 +24,9 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
+- [ ] add sky box and the ground with rasterizer
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
-- [ ] Idea we can render based on distance buffer we don't need to sort
 - [ ] share image as shared memory
-- [ ] Build Rasterize - 3D
 - [ ] MP is slower
 
 ### Add Open GL to the go code to project particles on GPU directly
@@ -57,3 +56,5 @@ The results show that writing frames is faster than reading them, with write ope
 - [X] optimized the sorting of the particles
 - [X] Update the MP code
 - [X] Encode more data to the images for better fluid rendering
+- [X] Build Rasterize - 3D
+- [X] Idea we can render based on distance buffer we don't need to sort
