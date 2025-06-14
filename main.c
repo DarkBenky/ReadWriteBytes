@@ -12,6 +12,7 @@
 #include <CL/cl.h>     // Add this line for OpenCL
 #define TINYOBJ_LOADER_C_IMPLEMENTATION
 #include "tinyobj_loader_c.h"
+#include <jpeglib.h>
 
 #define NUM_PARTICLES 250000
 #define GRAVITY 10.0f
@@ -28,6 +29,70 @@
 #define USE_GPU 1
 #define NUMBER_OF_TRIANGLES 10000
 pthread_t threads[NUM_THREADS];
+
+struct RawImage {
+    unsigned char *data; // RGB pixel data
+    int width, height, components;
+};
+
+struct RawImage* load_jpeg(const char *filename) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) return NULL;
+
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    jpeg_stdio_src(&cinfo, f);
+    jpeg_read_header(&cinfo, TRUE);
+    jpeg_start_decompress(&cinfo);
+
+    struct RawImage *img = malloc(sizeof(*img));
+    img->width = cinfo.output_width;
+    img->height = cinfo.output_height;
+    img->components = cinfo.output_components; // usually 3 for RGB
+
+    size_t rowbytes = img->width * img->components;
+    img->data = malloc(img->height * rowbytes);
+
+    JSAMPROW rowptr[1];
+    while (cinfo.output_scanline < img->height) {
+        rowptr[0] = img->data + rowbytes * cinfo.output_scanline;
+        jpeg_read_scanlines(&cinfo, rowptr, 1);
+    }
+
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    fclose(f);
+
+    return img;
+}
+
+struct SkyBox {
+    struct RawImage *right;
+    struct RawImage *left;
+    struct RawImage *top;
+    struct RawImage *bottom;
+    struct RawImage *front;
+    struct RawImage *back;
+};
+
+bool loadSkyBox(struct SkyBox *skyBox) {  // Changed from void to bool
+    skyBox->right = load_jpeg("skybox/right.jpg");
+    skyBox->left = load_jpeg("skybox/left.jpg");
+    skyBox->top = load_jpeg("skybox/top.jpg");
+    skyBox->bottom = load_jpeg("skybox/bottom.jpg");
+    skyBox->front = load_jpeg("skybox/front.jpg");
+    skyBox->back = load_jpeg("skybox/back.jpg");
+
+    if (!skyBox->right || !skyBox->left || !skyBox->top || 
+        !skyBox->bottom || !skyBox->front || !skyBox->back) {
+        printf("Failed to load one or more skybox images\n");
+        return false;  // Return false on failure
+    }
+    
+    return true;  // Return true on success
+}
 
 struct ThreadSync {
     volatile int ready;
@@ -3268,6 +3333,14 @@ void my_file_reader(void *ctx, const char *filename, int is_mtl, const char *obj
 }
 
 int main() {
+    // load sky box texture
+    struct SkyBox skyBox;
+    if (!loadSkyBox(&skyBox)) {
+        fprintf(stderr, "Failed to load skybox textures\n");
+        return 1;
+    }
+    printf("SkyBox loaded successfully\n");
+
     tinyobj_attrib_t attrib;  // Fix typo: was inyobj_attrib_t
     tinyobj_shape_t* shapes = NULL;
     size_t num_shapes;
