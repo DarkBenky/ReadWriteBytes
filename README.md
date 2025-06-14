@@ -24,8 +24,9 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] add sky box and the ground with rasterizer
-  - [ ] get sky box textures
+- [ ] add sky box and the ground
+  - [X] get sky box textures and load it
+  - [ ] crete check board ground
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
 - [ ] share image as shared memory
 - [ ] MP is slower
