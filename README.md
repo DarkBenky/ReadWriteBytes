@@ -24,9 +24,7 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] add sky box and the ground
-  - [X] get sky box textures and load it
-  - [ ] crete check board ground
+- [ ] add shadows
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
 - [ ] share image as shared memory
 - [ ] MP is slower
@@ -60,3 +58,6 @@ The results show that writing frames is faster than reading them, with write ope
 - [X] Encode more data to the images for better fluid rendering
 - [X] Build Rasterize - 3D
 - [X] Idea we can render based on distance buffer we don't need to sort
+- [X] add sky box and the ground
+  - [X] get sky box textures and load it
+  - [X] crete check board ground
