@@ -1,10 +1,132 @@
-// IMPROVED FLUID RENDERING PIPELINE:
-// 1. Project particles to screen-space z-buffer (distances + velocities + basic opacity)
-// 2. Apply bilateral Gaussian blur to distances (preserves depth discontinuities)
-// 3. Calculate smooth normals from blurred distance field using gradients
-// 4. Apply thickness estimation based on opacity accumulation
-// 5. Enhanced fluid surface reconstruction with proper depth testing
-// 6. Optional: Foam/bubble generation in high-velocity regions
+
+__kernel void renderSkyBox(
+    __global float *ScreenColors,
+    const float3 camPos,
+    const float3 camDir,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight,
+    __global const float *SkyBoxTop, // 3 floats for RGB
+    __global const float *SkyBoxBottom, // 3 floats for RGB
+    __global const float *SkyBoxLeft, // 3 floats for RGB
+    __global const float *SkyBoxRight, // 3 floats for RGB
+    __global const float *SkyBoxFront, // 3 floats for RGB
+    __global const float *SkyBoxBack, // 3 floats for RGB
+    const int skyBoxWidth,
+    const int skyBoxHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int pixelIndex = y * screenWidth + x;
+    
+    // Compute camera basis
+    float3 forward = normalize(camDir);
+    float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
+    float3 right = normalize(cross(forward, camUp));
+    float3 up = cross(right, forward);
+    
+    // Convert screen coordinates to normalized device coordinates
+    float ndcX = (x + 0.5f) / screenWidth * 2.0f - 1.0f;
+    float ndcY = -((y + 0.5f) / screenHeight * 2.0f - 1.0f);  // FLIP Y HERE
+    
+    // Create ray direction in world space
+    float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
+    
+    // Sample skybox based on ray direction
+    float3 skyboxColor = (float3)(0.5f, 0.7f, 1.0f); // Default sky blue
+    
+    // Determine which face of the skybox to sample
+    float3 absDir = fabs(rayDir);
+    float maxComponent = max(max(absDir.x, absDir.y), absDir.z);
+    
+    float2 uv;
+    __global const float *selectedFace;
+    
+    if (maxComponent == absDir.x) {
+        // Left or Right face
+        if (rayDir.x > 0) {
+            // Right face (+X)
+            uv.x = (-rayDir.z / rayDir.x + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / rayDir.x + 1.0f) * 0.5f;
+            selectedFace = SkyBoxRight;
+        } else {
+            // Left face (-X)
+            uv.x = (rayDir.z / (-rayDir.x) + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / (-rayDir.x) + 1.0f) * 0.5f;
+            selectedFace = SkyBoxLeft;
+        }
+    } else if (maxComponent == absDir.y) {
+        // Top or Bottom face
+        if (rayDir.y > 0) {
+            // Top face (+Y)
+            uv.x = (rayDir.x / rayDir.y + 1.0f) * 0.5f;
+            uv.y = (rayDir.z / rayDir.y + 1.0f) * 0.5f;
+            selectedFace = SkyBoxTop;
+        } else {
+            // Bottom face (-Y)
+            uv.x = (rayDir.x / (-rayDir.y) + 1.0f) * 0.5f;
+            uv.y = (-rayDir.z / (-rayDir.y) + 1.0f) * 0.5f;
+            selectedFace = SkyBoxBottom;
+        }
+    } else {
+        // Front or Back face
+        if (rayDir.z > 0) {
+            // Front face (+Z)
+            uv.x = (rayDir.x / rayDir.z + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / rayDir.z + 1.0f) * 0.5f;
+            selectedFace = SkyBoxFront;
+        } else {
+            // Back face (-Z)
+            uv.x = (-rayDir.x / (-rayDir.z) + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / (-rayDir.z) + 1.0f) * 0.5f;
+            selectedFace = SkyBoxBack;
+        }
+    }
+    
+    // Clamp UV coordinates
+    uv = clamp(uv, 0.0f, 1.0f);
+    
+    // Sample the texture with bilinear filtering
+    int texX = (int)(uv.x * (skyBoxWidth - 1));
+    int texY = (int)(uv.y * (skyBoxHeight - 1));
+    int texIndex = (texY * skyBoxWidth + texX) * 3;
+    
+    if (selectedFace != NULL) {
+        skyboxColor.x = selectedFace[texIndex];
+        skyboxColor.y = selectedFace[texIndex + 1];
+        skyboxColor.z = selectedFace[texIndex + 2];
+    }
+    
+    // Apply atmospheric perspective and time-of-day effects
+    float altitude = rayDir.y; // -1 to 1, where 1 is straight up
+    
+    // Horizon fade effect
+    float horizonFade = smoothstep(-0.1f, 0.3f, altitude);
+    
+    // Sun/moon position (you can make this dynamic)
+    float3 sunDir = normalize((float3)(-0.2f, 0.6f, -0.8f));
+    float sunDot = max(0.0f, dot(rayDir, sunDir));
+    
+    // Sun glow effect
+    float sunGlow = pow(sunDot, 50.0f) * 2.0f + pow(sunDot, 5.0f) * 0.5f;
+    float3 sunColor = (float3)(1.0f, 0.9f, 0.7f);
+    
+    // Atmospheric scattering approximation
+    float3 atmosColor = mix((float3)(0.8f, 0.9f, 1.0f), (float3)(1.0f, 0.7f, 0.4f), (1.0f - altitude) * 0.5f);
+    
+    // Combine skybox with atmospheric effects
+    skyboxColor = mix(skyboxColor, atmosColor, 0.3f * (1.0f - horizonFade));
+    skyboxColor += sunGlow * sunColor;
+    
+    // Store skybox color
+    int colorIndex = pixelIndex * 3;
+    ScreenColors[colorIndex] = clamp(skyboxColor.x, 0.0f, 1.0f);
+    ScreenColors[colorIndex + 1] = clamp(skyboxColor.y, 0.0f, 1.0f);
+    ScreenColors[colorIndex + 2] = clamp(skyboxColor.z, 0.0f, 1.0f);
+}
 
 __kernel void renderTriangles(
     __global const float* v1,
@@ -12,13 +134,15 @@ __kernel void renderTriangles(
     __global const float* v3,
     __global const float* normals,
     __global float *ScreenDistances,
-    __global float *ScreenNormals,      // 3 floats per pixel now!
+    __global float *ScreenNormals,
     const float3 camPos,
     const float3 camDir,
     const float fov,
     const int screenWidth,
     const int screenHeight,
-    const int numTriangles
+    const int numTriangles,
+    __global const float *TriangleColors,
+    __global float *ScreenColors
 ) {
     int triangleId = get_global_id(0);
     if (triangleId >= numTriangles) return;
@@ -28,12 +152,15 @@ __kernel void renderTriangles(
     float3 vertex2 = (float3)(v2[triangleId * 3], v2[triangleId * 3 + 1], v2[triangleId * 3 + 2]);
     float3 vertex3 = (float3)(v3[triangleId * 3], v3[triangleId * 3 + 1], v3[triangleId * 3 + 2]);
     
-    // Get triangle normal
+    // Get triangle normal and color
     float3 normal = (float3)(normals[triangleId * 3], normals[triangleId * 3 + 1], normals[triangleId * 3 + 2]);
+    float3 triangleColor = (float3)(TriangleColors[triangleId * 3], 
+                                   TriangleColors[triangleId * 3 + 1], 
+                                   TriangleColors[triangleId * 3 + 2]);
 
     // Compute camera basis
     float3 forward = normalize(camDir);
-    float3 camUp = (float3)(0.0f, 1.0f, 0.0f); // Assume Y-up
+    float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
     float3 right = normalize(cross(forward, camUp));
     float3 up = cross(right, forward);
 
@@ -73,6 +200,15 @@ __kernel void renderTriangles(
     int minY = max(0, (int)min(min(screenPos1.y, screenPos2.y), screenPos3.y));
     int maxY = min(screenHeight - 1, (int)max(max(screenPos1.y, screenPos2.y), screenPos3.y));
 
+    // ENHANCED LIGHTING USING SKYBOX DATA
+    // Main sun light direction
+    float3 sunDir = normalize((float3)(-0.2f, -0.8f, -0.3f));
+    float3 sunColor = (float3)(1.0f, 0.95f, 0.8f);
+    
+    // Sky light (hemisphere lighting)
+    float3 skyColor = (float3)(0.4f, 0.6f, 1.0f);
+    float3 groundColor = (float3)(0.2f, 0.15f, 0.1f);
+
     // Rasterize triangle
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
@@ -105,11 +241,48 @@ __kernel void renderTriangles(
                 if (ScreenDistances[pixelIndex] == 0.0f || depth < ScreenDistances[pixelIndex]) {
                     ScreenDistances[pixelIndex] = depth;
                     
-                    // Store normal (3 floats per pixel)
+                    // Store normal
                     int normalIndex = pixelIndex * 3;
                     ScreenNormals[normalIndex] = normal.x;
                     ScreenNormals[normalIndex + 1] = normal.y;
                     ScreenNormals[normalIndex + 2] = normal.z;
+                    
+                    // SIMPLE SHADING WITH SKYBOX INFLUENCE
+                    float3 normalizedNormal = normalize(normal);
+
+                    // Get view direction for reflection
+                    float3 worldPos = w * vertex1 + u * vertex2 + v * vertex3;
+                    float3 viewDir = normalize(camPos - worldPos);
+
+                    // Calculate reflection direction manually (instead of using reflect())
+                    // reflect(I, N) = I - 2.0 * dot(N, I) * N
+                    float3 incident = -viewDir;
+                    float3 reflectionDir = incident - 2.0f * dot(normalizedNormal, incident) * normalizedNormal;
+
+                    // For now, use a simple approximation of skybox color based on reflection
+                    float3 skyboxColor = (float3)(0.4f + reflectionDir.x * 0.2f, 
+                                                  0.6f + reflectionDir.y * 0.2f, 
+                                                  0.8f + reflectionDir.z * 0.2f);
+
+                    // Simple lighting calculation
+                    float3 lightDir = normalize((float3)(-0.2f, -0.8f, -0.3f));
+                    float NdotL = max(0.0f, -dot(normalizedNormal, lightDir));
+
+                    // Combine ambient skybox light with directional light
+                    float3 ambient = skyboxColor * 0.4f;
+                    float3 diffuse = triangleColor * NdotL * 0.6f;
+
+                    // Simple shaded color
+                    float3 shadedColor = triangleColor * ambient + diffuse;
+
+                    // Clamp color values
+                    shadedColor = clamp(shadedColor, 0.0f, 1.0f);
+                    
+                    // Store color
+                    int colorIndex = pixelIndex * 3;
+                    ScreenColors[colorIndex] = shadedColor.x;
+                    ScreenColors[colorIndex + 1] = shadedColor.y;
+                    ScreenColors[colorIndex + 2] = shadedColor.z;
                 }
             }
         }

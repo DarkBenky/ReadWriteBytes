@@ -77,6 +77,22 @@ struct SkyBox {
     struct RawImage *back;
 };
 
+float* convertImageToFloat(struct RawImage *img) {
+    if (!img) return NULL;
+    
+    float *data = malloc(img->width * img->height * 3 * sizeof(float));
+    if (!data) return NULL;
+    
+    for (int i = 0; i < img->width * img->height * img->components; i += img->components) {
+        int floatIdx = (i / img->components) * 3;
+        data[floatIdx + 0] = (float)img->data[i + 0] / 255.0f;     // R
+        data[floatIdx + 1] = (float)img->data[i + 1] / 255.0f;     // G
+        data[floatIdx + 2] = (float)img->data[i + 2] / 255.0f;     // B
+    }
+    
+    return data;
+}
+
 bool loadSkyBox(struct SkyBox *skyBox) {  // Changed from void to bool
     skyBox->right = load_jpeg("skybox/right.jpg");
     skyBox->left = load_jpeg("skybox/left.jpg");
@@ -158,6 +174,7 @@ struct OpenCLContext {
     cl_kernel blur_kernel;
     cl_kernel normals_kernel;
     cl_kernel triangle_kernel;  // Add triangle kernel
+    cl_kernel skybox_kernel;
     // buffers
     cl_mem buffer_points;
     cl_mem buffer_velocities;
@@ -167,12 +184,22 @@ struct OpenCLContext {
     cl_mem buffer_normals;
     cl_mem buffer_distances_temp;
     cl_mem buffer_opacities_temp;
+    cl_mem buffer_triangle_colors;
     
     // Add triangle buffers
     cl_mem buffer_triangle_v1;
     cl_mem buffer_triangle_v2;
     cl_mem buffer_triangle_v3;
     cl_mem buffer_triangle_normals;
+    cl_mem buffer_screen_colors;
+
+    // skybox buffers
+    cl_mem buffer_skybox_top;
+    cl_mem buffer_skybox_bottom;
+    cl_mem buffer_skybox_left;
+    cl_mem buffer_skybox_right;
+    cl_mem buffer_skybox_front;
+    cl_mem buffer_skybox_back;
     
     // Add pre-allocated host memory buffers
     float *host_points_data;
@@ -181,6 +208,7 @@ struct OpenCLContext {
     float *host_opacities_result;
     float *host_velocities_result;
     float *host_normals_result;
+    float *host_screen_colors_result;
 };
 
 struct Camera {
@@ -193,23 +221,15 @@ struct Triangles {
     float v2 [NUMBER_OF_TRIANGLES * 3];
     float v3 [NUMBER_OF_TRIANGLES * 3];
     float normals[NUMBER_OF_TRIANGLES * 3];
+    float colors[NUMBER_OF_TRIANGLES * 3]; // RGB colors for each triangle
     int count;
-};
-
-struct Screen {
-    uint8_t distance[ScreenWidth][ScreenHeight];
-    uint8_t velocity[ScreenWidth][ScreenHeight];
-    uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
-    uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
-    uint16_t particleCount[ScreenWidth][ScreenHeight];
-    uint16_t opacity[ScreenWidth][ScreenHeight];
-    float normals[ScreenWidth][ScreenHeight][3]; // Normal vectors for lighting
 };
 
 void AddTriangle(struct Triangles *triangles, 
                  float v1x, float v1y, float v1z,
                  float v2x, float v2y, float v2z,
-                 float v3x, float v3y, float v3z) {
+                 float v3x, float v3y, float v3z,
+                 float colorR, float colorG, float colorB) {
     if (triangles->count >= NUMBER_OF_TRIANGLES) {
         printf("Maximum number of triangles reached\n");
         return;
@@ -237,12 +257,221 @@ void AddTriangle(struct Triangles *triangles,
     float vy = v3y - v1y;
     float vz = v3z - v1z;
 
-    // Cross product
-    triangles->normals[index]     = uy * vz - uz * vy; // nx
-    triangles->normals[index + 1] = uz * vx - ux * vz; // ny
-    triangles->normals[index + 2] = ux * vy - uy * vx; // nz
+    // Cross product for normal
+    float nx = uy * vz - uz * vy;
+    float ny = uz * vx - ux * vz;
+    float nz = ux * vy - uy * vx;
+    
+    // Normalize the normal vector
+    float length = sqrtf(nx * nx + ny * ny + nz * nz);
+    if (length > 0.0f) {
+        triangles->normals[index] = nx / length;
+        triangles->normals[index + 1] = ny / length;
+        triangles->normals[index + 2] = nz / length;
+    } else {
+        // Fallback for degenerate triangles
+        triangles->normals[index] = 0.0f;
+        triangles->normals[index + 1] = 1.0f;
+        triangles->normals[index + 2] = 0.0f;
+    }
+    
+    // Store color
+    triangles->colors[index] = colorR;
+    triangles->colors[index + 1] = colorG;
+    triangles->colors[index + 2] = colorB;
     
     triangles->count++;
+}
+
+int initializeSkyboxBuffers(struct OpenCLContext *ocl, struct SkyBox *skyBox) {
+    cl_int err;
+    
+    // Convert images to float arrays
+    float *top_data = convertImageToFloat(skyBox->top);
+    float *bottom_data = convertImageToFloat(skyBox->bottom);
+    float *left_data = convertImageToFloat(skyBox->left);
+    float *right_data = convertImageToFloat(skyBox->right);
+    float *front_data = convertImageToFloat(skyBox->front);
+    float *back_data = convertImageToFloat(skyBox->back);
+    
+    if (!top_data || !bottom_data || !left_data || !right_data || !front_data || !back_data) {
+        printf("Failed to convert skybox images to float arrays\n");
+        return 0;
+    }
+    
+    size_t image_size = skyBox->top->width * skyBox->top->height * 3 * sizeof(float);
+    
+    // Create and upload skybox buffers
+    ocl->buffer_skybox_top = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                           image_size, top_data, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating skybox top buffer: %d\n", err);
+        free(top_data); free(bottom_data); free(left_data); 
+        free(right_data); free(front_data); free(back_data);
+        return 0;
+    }
+    
+    ocl->buffer_skybox_bottom = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                              image_size, bottom_data, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating skybox bottom buffer: %d\n", err);
+        free(top_data); free(bottom_data); free(left_data); 
+        free(right_data); free(front_data); free(back_data);
+        return 0;
+    }
+    
+    ocl->buffer_skybox_left = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                            image_size, left_data, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating skybox left buffer: %d\n", err);
+        free(top_data); free(bottom_data); free(left_data); 
+        free(right_data); free(front_data); free(back_data);
+        return 0;
+    }
+    
+    ocl->buffer_skybox_right = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                             image_size, right_data, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating skybox right buffer: %d\n", err);
+        free(top_data); free(bottom_data); free(left_data); 
+        free(right_data); free(front_data); free(back_data);
+        return 0;
+    }
+    
+    ocl->buffer_skybox_front = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                             image_size, front_data, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating skybox front buffer: %d\n", err);
+        free(top_data); free(bottom_data); free(left_data); 
+        free(right_data); free(front_data); free(back_data);
+        return 0;
+    }
+    
+    ocl->buffer_skybox_back = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
+                                            image_size, back_data, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating skybox back buffer: %d\n", err);
+        free(top_data); free(bottom_data); free(left_data); 
+        free(right_data); free(front_data); free(back_data);
+        return 0;
+    }
+    
+    // Free temporary arrays
+    free(top_data);
+    free(bottom_data);
+    free(left_data);
+    free(right_data);
+    free(front_data);
+    free(back_data);
+    
+    printf("Skybox buffers initialized successfully\n");
+    return 1;
+}
+
+void CreateBoardPlane(float centerX, float centerY, float centerZ, float size, int numberOfSquares, struct Triangles *triangles) {
+    // Define two alternating colors for checkerboard pattern
+    float color1R = 0.9f, color1G = 0.9f, color1B = 0.9f; // Light color (white-ish)
+    float color2R = 0.1f, color2G = 0.1f, color2B = 0.1f; // Dark color (black-ish)
+    
+    for (int i = 0; i < numberOfSquares; i++) {
+        for (int j = 0; j < numberOfSquares; j++) {
+            float x1 = centerX + (i - numberOfSquares / 2) * size;
+            float y1 = centerY;
+            float z1 = centerZ + (j - numberOfSquares / 2) * size;
+            
+            float x2 = x1 + size;
+            float y2 = y1;
+            float z2 = z1;
+            
+            float x3 = x1;
+            float y3 = y1;
+            float z3 = z1 + size;
+            
+            float x4 = x2;
+            float y4 = y2;
+            float z4 = z3;
+
+            // Create checkerboard pattern
+            // Use modulo to alternate colors based on grid position
+            bool isEvenSquare = ((i + j) % 2) == 0;
+            
+            float colorR, colorG, colorB;
+            if (isEvenSquare) {
+                colorR = color1R;
+                colorG = color1G;
+                colorB = color1B;
+            } else {
+                colorR = color2R;
+                colorG = color2G;
+                colorB = color2B;
+            }
+
+            // Add two triangles for the square with checkerboard colors
+            AddTriangle(triangles, x1, y1, z1, x2, y2, z2, x3, y3, z3, colorR, colorG, colorB);
+            AddTriangle(triangles, x2, y2, z2, x4, y4, z4, x3, y3, z3, colorR, colorG, colorB);
+        }
+    }
+}
+
+struct Screen {
+    uint8_t distance[ScreenWidth][ScreenHeight];
+    uint8_t velocity[ScreenWidth][ScreenHeight];
+    uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
+    uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
+    uint8_t colors[ScreenWidth][ScreenHeight][3];
+    uint16_t particleCount[ScreenWidth][ScreenHeight];
+    uint16_t opacity[ScreenWidth][ScreenHeight];
+    float normals[ScreenWidth][ScreenHeight][3]; // Normal vectors for lighting
+};
+
+void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox) {
+    cl_int err;
+    
+    // Set skybox kernel arguments
+    cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+    cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+    cl_float fov = camera->fov;
+    cl_int screen_width = ScreenWidth;
+    cl_int screen_height = ScreenHeight;
+    cl_int skybox_width = skyBox->top->width;
+    cl_int skybox_height = skyBox->top->height;
+    
+    err = clSetKernelArg(ocl->skybox_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    err |= clSetKernelArg(ocl->skybox_kernel, 1, sizeof(cl_float3), &cam_pos);
+    err |= clSetKernelArg(ocl->skybox_kernel, 2, sizeof(cl_float3), &cam_dir);
+    err |= clSetKernelArg(ocl->skybox_kernel, 3, sizeof(cl_float), &fov);
+    err |= clSetKernelArg(ocl->skybox_kernel, 4, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->skybox_kernel, 5, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->skybox_kernel, 6, sizeof(cl_mem), &ocl->buffer_skybox_top);
+    err |= clSetKernelArg(ocl->skybox_kernel, 7, sizeof(cl_mem), &ocl->buffer_skybox_bottom);
+    err |= clSetKernelArg(ocl->skybox_kernel, 8, sizeof(cl_mem), &ocl->buffer_skybox_left);
+    err |= clSetKernelArg(ocl->skybox_kernel, 9, sizeof(cl_mem), &ocl->buffer_skybox_right);
+    err |= clSetKernelArg(ocl->skybox_kernel, 10, sizeof(cl_mem), &ocl->buffer_skybox_front);
+    err |= clSetKernelArg(ocl->skybox_kernel, 11, sizeof(cl_mem), &ocl->buffer_skybox_back);
+    err |= clSetKernelArg(ocl->skybox_kernel, 12, sizeof(cl_int), &skybox_width);
+    err |= clSetKernelArg(ocl->skybox_kernel, 13, sizeof(cl_int), &skybox_height);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting skybox kernel arguments: %d\n", err);
+        return;
+    }
+    
+    // Execute skybox kernel
+    size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->skybox_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error executing skybox kernel: %d\n", err);
+        return;
+    }
+
+    clFinish(ocl->queue);
+    float test_pixel[3];
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_screen_colors, CL_TRUE, 0, 
+                             3 * sizeof(float), test_pixel, 0, NULL, NULL);
+    if (err == CL_SUCCESS) {
+        printf("Skybox test pixel: R=%.3f G=%.3f B=%.3f\n", 
+               test_pixel[0], test_pixel[1], test_pixel[2]);
+    }
 }
 
 void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen) {
@@ -279,6 +508,14 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
         return;
     }
     
+    // ADD TRIANGLE COLORS UPLOAD
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_colors, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->colors, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle colors buffer: %d\n", err);
+        return;
+    }
+    
     // Set kernel arguments using existing buffers
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
     cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
@@ -300,6 +537,10 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
     err |= clSetKernelArg(ocl->triangle_kernel, 10, sizeof(cl_int), &screen_height);
     err |= clSetKernelArg(ocl->triangle_kernel, 11, sizeof(cl_int), &num_triangles);
     
+    // ADD COLOR ARGUMENTS TO TRIANGLE KERNEL
+    err |= clSetKernelArg(ocl->triangle_kernel, 12, sizeof(cl_mem), &ocl->buffer_triangle_colors);
+    err |= clSetKernelArg(ocl->triangle_kernel, 13, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    
     if (err != CL_SUCCESS) {
         printf("Error setting triangle kernel arguments: %d\n", err);
         return;
@@ -312,12 +553,8 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
         printf("Error executing triangle kernel: %d\n", err);
         return;
     }
-    
-    // Wait for completion
     clFinish(ocl->queue);
-    
-    printf("Rendered %d triangles using OpenCL\n", triangles->count);
-};
+}
 
 // Initialize render thread system
 void initializeRenderThreads() {
@@ -382,7 +619,7 @@ void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
 void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
 void renderParticlesToBuffer(struct RenderThreadData *data);
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox);
 
 void createThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -558,7 +795,7 @@ void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], 
     trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
     trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
     trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
-    
+
     // Define the 8 corners of the bounding box
     float corners[8][3] = {
         {bBoxMin[0], bBoxMin[1], bBoxMin[2]}, // 0: min, min, min
@@ -630,13 +867,6 @@ void drawBoundingBox(struct Screen *screen, float bBoxMax[3], float bBoxMin[3], 
             int e2;
             
             while (1) {
-
-                // struct Screen {
-                //     uint8_t distance[ScreenWidth][ScreenHeight];
-                //     uint8_t velocity[ScreenWidth][ScreenHeight];
-                //     uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
-                //     uint16_t opacity[ScreenWidth][ScreenHeight];
-                // };
                 // Draw pixel if it's within screen bounds
                 if (x0 >= 0 && x0 < ScreenWidth && y0 >= 0 && y0 < ScreenHeight) {
                     // screen->distance[x0][y0] = 255; // Distance
@@ -744,78 +974,6 @@ void readCursorData(struct Cursor *cursor) {
     
     fclose(file);
 }
-
-
-// void CollideParticlesInGrid(struct PointSOA *particles) {
-//     for (int gridId = 0; gridId < gridResolution; gridId++) {
-//         int startIdx = particles->startIndex[gridId];
-//         if (startIdx == -1) continue; // No particles in this grid cell
-//         int endIdx = startIdx + particles->numberOfParticle[gridId];
-        
-//         // Check collisions between all particles in this cell
-//         for (int i = startIdx; i < endIdx; i++) {
-//             for (int j = i + 1; j < endIdx; j++) {
-//                 // Calculate distance between particles
-//                 float dx = particles->x[j] - particles->x[i];
-//                 float dy = particles->y[j] - particles->y[i];
-//                 float dz = particles->z[j] - particles->z[i];
-                
-//                 float distSquared = dx*dx + dy*dy + dz*dz;
-//                 float minDist = 3.0f * PARTICLE_RADIUS;
-                
-//                 // If particles are colliding (distance < 2*radius)
-//                 if (distSquared < minDist * minDist) {
-//                     // Calculate collision normal
-//                     float dist = sqrtf(distSquared);
-//                     float nx = dx / dist;
-//                     float ny = dy / dist;
-//                     float nz = dz / dist;
-                    
-//                     // Calculate relative velocity along normal
-//                     float vx = particles->xVelocity[j] - particles->xVelocity[i];
-//                     float vy = particles->yVelocity[j] - particles->yVelocity[i];
-//                     float vz = particles->zVelocity[j] - particles->zVelocity[i];
-                    
-//                     float velocityAlongNormal = vx*nx + vy*ny + vz*nz;
-                    
-//                     // Only collide if particles are moving toward each other
-//                     if (velocityAlongNormal < 0) {
-//                         // Calculate impulse scalar (assuming equal mass)
-//                         float impulse = -2.0f * velocityAlongNormal;
-                        
-//                         // Apply impulse
-//                         particles->xVelocity[i] -= impulse * nx * 0.5f;
-//                         particles->yVelocity[i] -= impulse * ny * 0.5f;
-//                         particles->zVelocity[i] -= impulse * nz * 0.5f;
-                        
-//                         particles->xVelocity[j] += impulse * nx * 0.5f;
-//                         particles->yVelocity[j] += impulse * ny * 0.5f;
-//                         particles->zVelocity[j] += impulse * nz * 0.5f;
-                        
-//                         // Add some damping to collision
-//                         particles->xVelocity[i] *= DAMPING;
-//                         particles->yVelocity[i] *= DAMPING;
-//                         particles->zVelocity[i] *= DAMPING;
-                        
-//                         particles->xVelocity[j] *= DAMPING;
-//                         particles->yVelocity[j] *= DAMPING;
-//                         particles->zVelocity[j] *= DAMPING;
-                        
-//                         // Push particles apart to avoid sticking
-//                         float correction = (minDist - dist) * 0.01f;
-//                         particles->x[i] -= nx * correction;
-//                         particles->y[i] -= ny * correction;
-//                         particles->z[i] -= nz * correction;
-                        
-//                         particles->x[j] += nx * correction;
-//                         particles->y[j] += ny * correction;
-//                         particles->z[j] += nz * correction;
-//                     }
-//                 }
-//             }
-//         }
-//     }
-// }
 
 void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data) {
     struct PointSOA *particles = data->particles;
@@ -2085,7 +2243,7 @@ void calculateParticleScreenCoordinates(struct ThreadData *data) {
 
         int screenX = (int)(screenRight * halfWidth + halfWidth);
         int screenY = (int)(-screenUp * halfHeight + halfHeight);
-
+        
         if (screenX < 0 || screenX >= ScreenWidth || screenY < 0 || screenY >= ScreenHeight) continue;
         
         float totalVelocity = xVelocityPtr[i] * xVelocityPtr[i] + yVelocityPtr[i] * yVelocityPtr[i] + zVelocityPtr[i] * zVelocityPtr[i];
@@ -2188,10 +2346,12 @@ void renderParticlesToBuffer(struct RenderThreadData *data) {
     float right[3], trueUp[3];
     float up[3] = {0, 1, 0};
     
+    // Calculate right vector using cross product
     right[0] = camera->ray.direction[1] * up[2] - camera->ray.direction[2] * up[1];
     right[1] = camera->ray.direction[2] * up[0] - camera->ray.direction[0] * up[2];
     right[2] = camera->ray.direction[0] * up[1] - camera->ray.direction[1] * up[0];
     
+    // Calculate true up vector
     trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
     trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
     trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
@@ -2586,33 +2746,10 @@ void clearScreen(struct Screen *screen) {
     memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
+    memset(screen->particleCount, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
+    memset(screen->normals, 0, sizeof(float) * ScreenWidth * ScreenHeight * 3);
+    memset(screen->colors, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight * 3);
 }
-
-// void saveScreen(struct Screen *screen, const char *filename) {
-//     FILE *file = fopen(filename, "wb");
-//     if (!file) {
-//         perror("Failed to open file");
-//         return;
-//     }
-    
-//     static uint8_t buffer[ScreenWidth * 3];
-    
-//     // Process each row
-//     for (int y = 0; y < ScreenHeight; y++) {
-//         // Pack row data into the buffer for faster writes
-//         for (int x = 0; x < ScreenWidth; x++) {
-//             buffer[x*3]     = screen->distance[x][y];
-//             buffer[x*3 + 1] = screen->velocity[x][y];
-//             buffer[x*3 + 2] = screen->normalizedOpacity[x][y];
-//         }
-        
-//         // Write entire row at once
-//         fwrite(buffer, 1, ScreenWidth * 3, file);
-//     }
-    
-//     fclose(file);
-// }
-
 
 void saveScreen(struct Screen *screen, const char *filename) {
     FILE *file = fopen(filename, "wb");
@@ -2659,7 +2796,30 @@ void saveScreenNormal(struct Screen *screen, const char *filename) {
     fclose(file);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles) {
+void saveScreenColor(struct Screen *screen, const char *filename) {
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        perror("Failed to open file");
+        return;
+    }
+    static uint8_t buffer[ScreenWidth * ScreenHeight * 4];
+
+    int i = 0;
+    for (int y = 0; y < ScreenHeight; y++) {
+        for (int x = 0; x < ScreenWidth; x++) {
+            // No conversion needed since colors is already uint8_t
+            buffer[i++] = screen->colors[x][y][0];  // R
+            buffer[i++] = screen->colors[x][y][1];  // G
+            buffer[i++] = screen->colors[x][y][2];  // B
+            buffer[i++] = 255; // Alpha
+        }
+    }
+
+    fwrite(buffer, 1, ScreenWidth * ScreenHeight * 4, file);
+    fclose(file);
+}
+
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
     clearScreen(screen);
@@ -2670,9 +2830,10 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     timePartition->clearScreenTime += dt;
     // printf("Clear screen time: %f\n", dt);
     if (USE_GPU == 1) {
-        projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles);
+        projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox);
         // save normal screen
         saveScreenNormal(screen, "normal.bin");
+        saveScreenColor(screen, "color.bin");
     } else {
         projectParticles(particles, camera, screen, timePartition, threadsData, particleIndexes);
     }
@@ -2868,6 +3029,13 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         printf("Error creating blur kernel: %d\n", err);
         return 0;
     }
+
+    // Create skybox kernel
+    ocl->skybox_kernel = clCreateKernel(ocl->program, "renderSkyBox", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating skybox kernel: %d\n", err);
+        return 0;
+    }
     
     ocl->normals_kernel = clCreateKernel(ocl->program, "calculate_normals_from_blurred_distances", &err);
     if (err != CL_SUCCESS) {
@@ -2970,6 +3138,22 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         return 0;
     }
     
+    // ADD TRIANGLE COLORS BUFFER
+    ocl->buffer_triangle_colors = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                                NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle colors buffer: %d\n", err);
+        return 0;
+    }
+    
+    // ADD SCREEN COLORS BUFFER
+    ocl->buffer_screen_colors = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                              ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating screen colors buffer: %d\n", err);
+        return 0;
+    }
+    
     // Pre-allocate host memory buffers
     ocl->host_points_data = (float*)malloc(NUM_PARTICLES * 3 * sizeof(float));
     ocl->host_velocities_data = (float*)malloc(NUM_PARTICLES * 3 * sizeof(float));
@@ -2978,20 +3162,24 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
     ocl->host_velocities_result = (float*)malloc(ScreenWidth * ScreenHeight * sizeof(float));
     ocl->host_normals_result = (float*)malloc(ScreenWidth * ScreenHeight * 3 * sizeof(float));
     
+    // ADD HOST MEMORY FOR SCREEN COLORS
+    ocl->host_screen_colors_result = (float*)malloc(ScreenWidth * ScreenHeight * 3 * sizeof(float));
+    
     // Check for allocation failures
     if (!ocl->host_points_data || !ocl->host_velocities_data || 
         !ocl->host_distances_result || !ocl->host_opacities_result || 
-        !ocl->host_velocities_result || !ocl->host_normals_result) {
+        !ocl->host_velocities_result || !ocl->host_normals_result || 
+        !ocl->host_screen_colors_result) {
         printf("Failed to allocate host memory for OpenCL\n");
         return 0;
     }
     
-    printf("OpenCL initialized successfully with triangle support\n");
+    printf("OpenCL initialized successfully with triangle support and colors\n");
     return 1;
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles) {
-    cl_int err;
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox) {
+    cl_int err;  // ADD THIS LINE - it's missing!
     
     // Use pre-allocated buffers instead of malloc
     float *points_data = ocl->host_points_data;
@@ -3024,12 +3212,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     
     // Clear screen buffers on GPU (INCLUDING NORMALS)
     float zero = 0.0f;
-    err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances, &zero, sizeof(float), 0, 
-                             ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error clearing distances buffer: %d\n", err);
-        return;
-    }
     
     err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_opacities, &zero, sizeof(float), 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
@@ -3053,8 +3235,25 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         return;
     }
 
-    // *** ADD TRIANGLE RENDERING HERE - BEFORE PARTICLE PROJECTION ***
-    // This renders triangles first, so they appear behind the fluid
+    err = clEnqueueFillBuffer(ocl->queue,ocl->buffer_screen_colors,&zero,sizeof(float),0,
+                            ScreenWidth * ScreenHeight * 3 * sizeof(float),0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error clearing screen colors: %d\n", err);
+        return;
+    }
+
+    err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances, &zero, sizeof(float), 0, 
+                             ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+    err |= clEnqueueFillBuffer(ocl->queue, ocl->buffer_screen_colors, &zero, sizeof(float), 0, 
+                              ScreenWidth * ScreenHeight * 3 * sizeof(float), 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error clearing buffers: %d\n", err);
+        return;
+    }
+
+    // *** RENDER SKYBOX FIRST (fills background) ***
+    renderSkyboxOpenCL(ocl, camera, skyBox); // You'll need to pass skyBox as parameter
+    // *** TRIANGLE RENDERING ***
     renderTrianglesOpenCL(ocl, triangles, camera, screen);
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)
@@ -3217,6 +3416,14 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         printf("Error reading normals buffer: %d\n", err);
         return;
     }
+
+    // READ BACK SCREEN COLORS
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_screen_colors, CL_TRUE, 0, 
+                             ScreenWidth * ScreenHeight * 3 * sizeof(float), ocl->host_screen_colors_result, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error reading screen colors buffer: %d\n", err);
+        return;
+    }
     
     // Clear the screen arrays first (INCLUDING NORMALS)
     memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
@@ -3224,6 +3431,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
     memset(screen->normals, 0, sizeof(float) * ScreenWidth * ScreenHeight * 3);         // ADD NORMALS CLEAR
+    // memset(screen->colors, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight * 3);  // ADD THIS
     
     // Find max values for normalization (skip zero values)
     float maxDistance = 0.0f, maxVelocity = 0.0f, maxOpacity = 0.0f;
@@ -3267,6 +3475,12 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
             screen->normals[x][y][0] = nr[0];
             screen->normals[x][y][1] = nr[1];
             screen->normals[x][y][2] = nr[2];
+
+            // Copy screen colors (always copy, even for pixels without particles)
+            float *color = ocl->host_screen_colors_result + idx * 3;
+            screen->colors[x][y][0] = (uint8_t)(color[0] * 255.0f);
+            screen->colors[x][y][1] = (uint8_t)(color[1] * 255.0f);
+            screen->colors[x][y][2] = (uint8_t)(color[2] * 255.0f);
         }
     }
 }
@@ -3279,6 +3493,7 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
     if (ocl->host_opacities_result) free(ocl->host_opacities_result);
     if (ocl->host_velocities_result) free(ocl->host_velocities_result);
     if (ocl->host_normals_result) free(ocl->host_normals_result);
+    if (ocl->host_screen_colors_result) free(ocl->host_screen_colors_result);  // FIX: was ocl->host
     
     // Free OpenCL resources (INCLUDING NORMALS AND TRIANGLES)
     if (ocl->buffer_points) clReleaseMemObject(ocl->buffer_points);
@@ -3291,13 +3506,24 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
     if (ocl->buffer_triangle_v2) clReleaseMemObject(ocl->buffer_triangle_v2);
     if (ocl->buffer_triangle_v3) clReleaseMemObject(ocl->buffer_triangle_v3);
     if (ocl->buffer_triangle_normals) clReleaseMemObject(ocl->buffer_triangle_normals);
+    if (ocl->buffer_triangle_colors) clReleaseMemObject(ocl->buffer_triangle_colors);  // FIX: missing semicolon
+    if (ocl->buffer_screen_colors) clReleaseMemObject(ocl->buffer_screen_colors);  // ADD THIS
+    if (ocl->buffer_distances_temp) clReleaseMemObject(ocl->buffer_distances_temp);
+    if (ocl->buffer_opacities_temp) clReleaseMemObject(ocl->buffer_opacities_temp);
     
+    // Add skybox buffer cleanup
+    if (ocl->buffer_skybox_top) clReleaseMemObject(ocl->buffer_skybox_top);
+    if (ocl->buffer_skybox_bottom) clReleaseMemObject(ocl->buffer_skybox_bottom);
+    if (ocl->buffer_skybox_left) clReleaseMemObject(ocl->buffer_skybox_left);
+    if (ocl->buffer_skybox_right) clReleaseMemObject(ocl->buffer_skybox_right);
+    if (ocl->buffer_skybox_front) clReleaseMemObject(ocl->buffer_skybox_front);
+    if (ocl->buffer_skybox_back) clReleaseMemObject(ocl->buffer_skybox_back);
+
     if (ocl->kernel) clReleaseKernel(ocl->kernel);
+    if (ocl->skybox_kernel) clReleaseKernel(ocl->skybox_kernel);
     if (ocl->triangle_kernel) clReleaseKernel(ocl->triangle_kernel);
     if (ocl->blur_kernel) clReleaseKernel(ocl->blur_kernel);
     if (ocl->normals_kernel) clReleaseKernel(ocl->normals_kernel);
-    if (ocl->buffer_distances_temp) clReleaseMemObject(ocl->buffer_distances_temp);
-    if (ocl->buffer_opacities_temp) clReleaseMemObject(ocl->buffer_opacities_temp);
     
     if (ocl->program) clReleaseProgram(ocl->program);
     if (ocl->queue) clReleaseCommandQueue(ocl->queue);
@@ -3404,7 +3630,8 @@ int main() {
             AddTriangle(triangles, 
                        v1[0], v1[1], v1[2],
                        v2[0], v2[1], v2[2],
-                       v3[0], v3[1], v3[2]);
+                       v3[0], v3[1], v3[2],
+                       rand(), rand(), rand()); // Normals will be recalculated later
         }
         
         // Break if we've reached the triangle limit
@@ -3587,7 +3814,13 @@ int main() {
         return 1;
     }
 
+    if (useOpenCL && !initializeSkyboxBuffers(&ocl, &skyBox)) {
+        printf("Failed to initialize skybox buffers\n");
+        return 1;
+    }   
+
     clock_t lastTime = clock();
+    CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
     while (1) {
         // Calculate delta step based on elapsed time since the last frame
         clock_t currentTime = clock();
@@ -3627,7 +3860,7 @@ int main() {
         float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
         
         clock_t startRenderTime = clock();
-        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles);
+        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles, &skyBox);
         clock_t endRenderTime = clock();
         dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
         timePartition->renderTime += dt1;

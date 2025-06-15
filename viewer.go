@@ -48,6 +48,7 @@ const (
 	renderOpacity
 	renderNormal
 	renderFluid
+	renderColor
 )
 
 type Game struct {
@@ -78,23 +79,6 @@ type Game struct {
 	CameraOrLightPosition              bool
 }
 
-//	struct TimePartition {
-//	    int collisionTime;
-//	    int applyPressureTime;
-//	    int updateParticlesTime;
-//	    int moveToBoxTime;
-//	    int updateGridTime;
-//	    int renderTime;
-//	    int clearScreenTime;
-//	    int projectParticlesTime;
-//	    int drawCursorTime;
-//	    int drawBoundingBoxTime;
-//	    int saveScreenTime;
-//		int sortTime;
-//		int projectionTime;
-//		int renderDistanceVelocityTime;
-//		int renderOpacityTime;
-//	};
 type TimePartition struct {
 	CollisionTime              float32
 	ApplyPressureTime          float32
@@ -458,7 +442,21 @@ func (g *Game) UpdatePixels() error {
 
 		g.img.WritePixels(g.pixels[:])
 	}
-
+	if g.renderMode == renderColor {
+		// Read color data from file
+		colorData, err := ioutil.ReadFile("color.bin")
+		if err != nil {
+			return fmt.Errorf("failed to read color file: %w", err)
+		}
+		// Check if we have 4 bytes per pixel (RGBA) uint8
+		expectedSize := screenWidth * screenHeight * 4 // RGBA format
+		if len(colorData) >= expectedSize {
+			// File has RGBA format (4 bytes per pixel)
+			g.img.WritePixels(colorData[:expectedSize])
+		} else {
+			return fmt.Errorf("color data file is too small, expected %d bytes, got %d", expectedSize, len(colorData))
+		}
+	}
 	return nil
 }
 
@@ -788,7 +786,7 @@ func (g *Game) handleCameraMovement() {
 func (g *Game) Update() error {
 	// Toggle render mode between distance, velocity and opacity
 	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-		g.renderMode = (g.renderMode + 1) % 5
+		g.renderMode = (g.renderMode + 1) % 6 
 		fmt.Println("Render mode changed to", g.renderMode)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
@@ -1017,6 +1015,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				)
 				screen.DrawImage(newImage, nil)
 				fmt.Println("Drawing normal image")
+			case renderColor:
+				screen.DrawImage(g.img, nil)
 			}
 		}
 
@@ -1041,6 +1041,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				return "Normal"
 			case renderFluid:
 				return "Fluid"
+			case renderColor:
+				return "Color"
 			}
 			return ""
 		}()))
@@ -1062,6 +1064,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Normal (Press R to cycle)", 0, 110)
 	} else if g.renderMode == renderFluid {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Fluid (Press R to cycle)", 0, 110)
+	} else if g.renderMode == renderColor {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Color (Press R to cycle)", 0, 110)
 	} else {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Unknown", 0, 110)
 	}
