@@ -200,15 +200,6 @@ __kernel void renderTriangles(
     int minY = max(0, (int)min(min(screenPos1.y, screenPos2.y), screenPos3.y));
     int maxY = min(screenHeight - 1, (int)max(max(screenPos1.y, screenPos2.y), screenPos3.y));
 
-    // ENHANCED LIGHTING USING SKYBOX DATA
-    // Main sun light direction
-    float3 sunDir = normalize((float3)(-0.2f, -0.8f, -0.3f));
-    float3 sunColor = (float3)(1.0f, 0.95f, 0.8f);
-    
-    // Sky light (hemisphere lighting)
-    float3 skyColor = (float3)(0.4f, 0.6f, 1.0f);
-    float3 groundColor = (float3)(0.2f, 0.15f, 0.1f);
-
     // Rasterize triangle
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
@@ -247,42 +238,30 @@ __kernel void renderTriangles(
                     ScreenNormals[normalIndex + 1] = normal.y;
                     ScreenNormals[normalIndex + 2] = normal.z;
                     
-                    // SIMPLE SHADING WITH SKYBOX INFLUENCE
-                    float3 normalizedNormal = normalize(normal);
-
-                    // Get view direction for reflection
+                    // Calculate world position for this pixel
                     float3 worldPos = w * vertex1 + u * vertex2 + v * vertex3;
                     float3 viewDir = normalize(camPos - worldPos);
-
-                    // Calculate reflection direction manually (instead of using reflect())
-                    // reflect(I, N) = I - 2.0 * dot(N, I) * N
-                    float3 incident = -viewDir;
-                    float3 reflectionDir = incident - 2.0f * dot(normalizedNormal, incident) * normalizedNormal;
-
-                    // For now, use a simple approximation of skybox color based on reflection
-                    float3 skyboxColor = (float3)(0.4f + reflectionDir.x * 0.2f, 
-                                                  0.6f + reflectionDir.y * 0.2f, 
-                                                  0.8f + reflectionDir.z * 0.2f);
-
-                    // Simple lighting calculation
-                    float3 lightDir = normalize((float3)(-0.2f, -0.8f, -0.3f));
-                    float NdotL = max(0.0f, -dot(normalizedNormal, lightDir));
-
-                    // Combine ambient skybox light with directional light
-                    float3 ambient = skyboxColor * 0.4f;
-                    float3 diffuse = triangleColor * NdotL * 0.6f;
-
-                    // Simple shaded color
-                    float3 shadedColor = triangleColor * ambient + diffuse;
-
+                    float3 normalizedNormal = normalize(normal);
+                    
+                    // FRESNEL EFFECT CALCULATION
+                    float cosTheta = max(0.0f, dot(normalizedNormal, viewDir));
+                    float fresnel = pow(1.0f - cosTheta, 3.0f); // Fresnel power of 3 for nice falloff
+                    
+                    // Base color with Fresnel rim lighting
+                    float3 baseColor = triangleColor;
+                    float3 fresnelColor = (float3)(1.0f, 1.0f, 1.0f); // White rim light
+                    
+                    // Mix base color with Fresnel effect
+                    float3 finalColor = mix(baseColor, fresnelColor, fresnel * 0.5f);
+                    
                     // Clamp color values
-                    shadedColor = clamp(shadedColor, 0.0f, 1.0f);
+                    finalColor = clamp(finalColor, 0.0f, 1.0f);
                     
                     // Store color
                     int colorIndex = pixelIndex * 3;
-                    ScreenColors[colorIndex] = shadedColor.x;
-                    ScreenColors[colorIndex + 1] = shadedColor.y;
-                    ScreenColors[colorIndex + 2] = shadedColor.z;
+                    ScreenColors[colorIndex] = finalColor.x;
+                    ScreenColors[colorIndex + 1] = finalColor.y;
+                    ScreenColors[colorIndex + 2] = finalColor.z;
                 }
             }
         }
