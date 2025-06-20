@@ -128,6 +128,86 @@ __kernel void renderSkyBox(
     ScreenColors[colorIndex + 2] = clamp(skyboxColor.z, 0.0f, 1.0f);
 }
 
+// Helper function to sample skybox color for a given ray direction
+float3 sampleSkybox(
+    const float3 rayDir,
+    __global const float *SkyBoxTop,
+    __global const float *SkyBoxBottom, 
+    __global const float *SkyBoxLeft,
+    __global const float *SkyBoxRight,
+    __global const float *SkyBoxFront,
+    __global const float *SkyBoxBack,
+    const int skyBoxWidth,
+    const int skyBoxHeight
+) {
+    // Default sky blue color
+    float3 skyboxColor = (float3)(0.5f, 0.7f, 1.0f);
+    
+    // Determine which face of the skybox to sample
+    float3 absDir = fabs(rayDir);
+    float maxComponent = max(max(absDir.x, absDir.y), absDir.z);
+    
+    float2 uv;
+    __global const float *selectedFace = NULL;
+    
+    if (maxComponent == absDir.x) {
+        // Left or Right face
+        if (rayDir.x > 0) {
+            // Right face (+X)
+            uv.x = (-rayDir.z / rayDir.x + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / rayDir.x + 1.0f) * 0.5f;
+            selectedFace = SkyBoxRight;
+        } else {
+            // Left face (-X)
+            uv.x = (rayDir.z / (-rayDir.x) + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / (-rayDir.x) + 1.0f) * 0.5f;
+            selectedFace = SkyBoxLeft;
+        }
+    } else if (maxComponent == absDir.y) {
+        // Top or Bottom face
+        if (rayDir.y > 0) {
+            // Top face (+Y)
+            uv.x = (rayDir.x / rayDir.y + 1.0f) * 0.5f;
+            uv.y = (rayDir.z / rayDir.y + 1.0f) * 0.5f;
+            selectedFace = SkyBoxTop;
+        } else {
+            // Bottom face (-Y)
+            uv.x = (rayDir.x / (-rayDir.y) + 1.0f) * 0.5f;
+            uv.y = (-rayDir.z / (-rayDir.y) + 1.0f) * 0.5f;
+            selectedFace = SkyBoxBottom;
+        }
+    } else {
+        // Front or Back face
+        if (rayDir.z > 0) {
+            // Front face (+Z)
+            uv.x = (rayDir.x / rayDir.z + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / rayDir.z + 1.0f) * 0.5f;
+            selectedFace = SkyBoxFront;
+        } else {
+            // Back face (-Z)
+            uv.x = (-rayDir.x / (-rayDir.z) + 1.0f) * 0.5f;
+            uv.y = (-rayDir.y / (-rayDir.z) + 1.0f) * 0.5f;
+            selectedFace = SkyBoxBack;
+        }
+    }
+    
+    // Clamp UV coordinates
+    uv = clamp(uv, 0.0f, 1.0f);
+    
+    // Sample the texture
+    if (selectedFace != NULL) {
+        int texX = (int)(uv.x * (skyBoxWidth - 1));
+        int texY = (int)(uv.y * (skyBoxHeight - 1));
+        int texIndex = (texY * skyBoxWidth + texX) * 3;
+        
+        skyboxColor.x = selectedFace[texIndex];
+        skyboxColor.y = selectedFace[texIndex + 1];
+        skyboxColor.z = selectedFace[texIndex + 2];
+    }
+    
+    return skyboxColor;
+}
+
 __kernel void renderTriangles(
     __global const float* v1,
     __global const float* v2,
