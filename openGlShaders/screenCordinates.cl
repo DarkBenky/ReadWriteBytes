@@ -1,4 +1,3 @@
-
 __kernel void renderSkyBox(
     __global float *ScreenColors,
     const float3 camPos,
@@ -140,64 +139,70 @@ float3 sampleSkybox(
     const int skyBoxWidth,
     const int skyBoxHeight
 ) {
-    // Default sky blue color
-    float3 skyboxColor = (float3)(0.5f, 0.7f, 1.0f);
+    // Normalize ray direction
+    float3 dir = normalize(rayDir);
     
     // Determine which face of the skybox to sample
-    float3 absDir = fabs(rayDir);
+    float3 absDir = fabs(dir);
     float maxComponent = max(max(absDir.x, absDir.y), absDir.z);
+    
+    // Add safety check for very small components
+    const float epsilon = 1e-6f;
     
     float2 uv;
     __global const float *selectedFace = NULL;
     
-    if (maxComponent == absDir.x) {
+    if (maxComponent == absDir.x && fabs(dir.x) > epsilon) {
         // Left or Right face
-        if (rayDir.x > 0) {
+        if (dir.x > 0) {
             // Right face (+X)
-            uv.x = (-rayDir.z / rayDir.x + 1.0f) * 0.5f;
-            uv.y = (-rayDir.y / rayDir.x + 1.0f) * 0.5f;
+            uv.x = (-dir.z / dir.x + 1.0f) * 0.5f;
+            uv.y = (-dir.y / dir.x + 1.0f) * 0.5f;
             selectedFace = SkyBoxRight;
         } else {
-            // Left face (-X)
-            uv.x = (rayDir.z / (-rayDir.x) + 1.0f) * 0.5f;
-            uv.y = (-rayDir.y / (-rayDir.x) + 1.0f) * 0.5f;
+            // Left face (-X)  
+            uv.x = (dir.z / (-dir.x) + 1.0f) * 0.5f;
+            uv.y = (-dir.y / (-dir.x) + 1.0f) * 0.5f;
             selectedFace = SkyBoxLeft;
         }
-    } else if (maxComponent == absDir.y) {
+    } else if (maxComponent == absDir.y && fabs(dir.y) > epsilon) {
         // Top or Bottom face
-        if (rayDir.y > 0) {
+        if (dir.y > 0) {
             // Top face (+Y)
-            uv.x = (rayDir.x / rayDir.y + 1.0f) * 0.5f;
-            uv.y = (rayDir.z / rayDir.y + 1.0f) * 0.5f;
+            uv.x = (dir.x / dir.y + 1.0f) * 0.5f;
+            uv.y = (dir.z / dir.y + 1.0f) * 0.5f;
             selectedFace = SkyBoxTop;
         } else {
             // Bottom face (-Y)
-            uv.x = (rayDir.x / (-rayDir.y) + 1.0f) * 0.5f;
-            uv.y = (-rayDir.z / (-rayDir.y) + 1.0f) * 0.5f;
+            uv.x = (dir.x / (-dir.y) + 1.0f) * 0.5f;
+            uv.y = (-dir.z / (-dir.y) + 1.0f) * 0.5f;
             selectedFace = SkyBoxBottom;
         }
-    } else {
+    } else if (fabs(dir.z) > epsilon) {
         // Front or Back face
-        if (rayDir.z > 0) {
+        if (dir.z > 0) {
             // Front face (+Z)
-            uv.x = (rayDir.x / rayDir.z + 1.0f) * 0.5f;
-            uv.y = (-rayDir.y / rayDir.z + 1.0f) * 0.5f;
+            uv.x = (dir.x / dir.z + 1.0f) * 0.5f;
+            uv.y = (-dir.y / dir.z + 1.0f) * 0.5f;
             selectedFace = SkyBoxFront;
         } else {
             // Back face (-Z)
-            uv.x = (-rayDir.x / (-rayDir.z) + 1.0f) * 0.5f;
-            uv.y = (-rayDir.y / (-rayDir.z) + 1.0f) * 0.5f;
+            uv.x = (-dir.x / (-dir.z) + 1.0f) * 0.5f;
+            uv.y = (-dir.y / (-dir.z) + 1.0f) * 0.5f;
             selectedFace = SkyBoxBack;
         }
     }
     
-    // Clamp UV coordinates
+    // Clamp UV coordinates to valid range
     uv = clamp(uv, 0.0f, 1.0f);
     
-    // Sample the texture
-    if (selectedFace != NULL) {
-        int texX = (int)(uv.x * (skyBoxWidth - 1));
-        int texY = (int)(uv.y * (skyBoxHeight - 1));
+    // Default fallback color
+    float3 skyboxColor = (float3)(0.5f, 0.7f, 1.0f);
+    
+    // Sample the texture with bounds checking
+    if (selectedFace != NULL && skyBoxWidth > 0 && skyBoxHeight > 0) {
+        int texX = clamp((int)(uv.x * (skyBoxWidth - 1)), 0, skyBoxWidth - 1);
+        int texY = clamp((int)(uv.y * (skyBoxHeight - 1)), 0, skyBoxHeight - 1);
         int texIndex = (texY * skyBoxWidth + texX) * 3;
         
         skyboxColor.x = selectedFace[texIndex];
@@ -222,13 +227,26 @@ __kernel void renderTriangles(
     const int screenHeight,
     const int numTriangles,
     __global const float *TriangleColors,
-    __global float *ScreenColors
+    __global float *ScreenColors,
+    // skybox parameters
+    __global const float *SkyBoxTop,
+    __global const float *SkyBoxBottom, 
+    __global const float *SkyBoxLeft,
+    __global const float *SkyBoxRight,
+    __global const float *SkyBoxFront,
+    __global const float *SkyBoxBack,
+    const int skyBoxWidth,
+    const int skyBoxHeight
 ) {
     int triangleId = get_global_id(0);
     if (triangleId >= numTriangles) return;
 
-    // Get triangle vertices
-    float3 vertex1 = (float3)(v1[triangleId * 3], v1[triangleId * 3 + 1], v1[triangleId * 3 + 2]);
+    // Add bounds checking for array access
+    int vertexIndex = triangleId * 3;
+    if (vertexIndex + 2 >= numTriangles * 3) return; // Prevent buffer overflow
+
+    // Get triangle vertices with bounds checking
+    float3 vertex1 = (float3)(v1[vertexIndex], v1[vertexIndex + 1], v1[vertexIndex + 2]);
     float3 vertex2 = (float3)(v2[triangleId * 3], v2[triangleId * 3 + 1], v2[triangleId * 3 + 2]);
     float3 vertex3 = (float3)(v3[triangleId * 3], v3[triangleId * 3 + 1], v3[triangleId * 3 + 2]);
     
@@ -330,6 +348,17 @@ __kernel void renderTriangles(
                     // Base color with Fresnel rim lighting
                     float3 baseColor = triangleColor;
                     float3 fresnelColor = (float3)(1.0f, 1.0f, 1.0f); // White rim light
+
+                    // Manual reflection calculation: R = I - 2 * dot(N, I) * N
+                    float3 incident = -viewDir;
+                    float3 reflectedDir = incident - 2.0f * dot(normalizedNormal, incident) * normalizedNormal;
+                    // calculate the skybox reflection color
+                    float3 skyboxReflection = sampleSkybox(reflectedDir, SkyBoxTop, SkyBoxBottom, 
+                                                           SkyBoxLeft, SkyBoxRight, 
+                                                           SkyBoxFront, SkyBoxBack, 
+                                                           skyBoxWidth, skyBoxHeight);
+                    // Mix base color with skybox reflection
+                    baseColor = mix(baseColor, skyboxReflection, fresnel * 0.5f);
                     
                     // Mix base color with Fresnel effect
                     float3 finalColor = mix(baseColor, fresnelColor, fresnel * 0.5f);
@@ -347,7 +376,6 @@ __kernel void renderTriangles(
         }
     }
 }
-
 
 // 3. Calculate smooth normals from blurred distance field using gradients
 __kernel void calculate_normals_from_blurred_distances(
@@ -433,32 +461,36 @@ __kernel void blur_distances(
             int nx = x + i;
             int ny = y + j;
 
-            // Check bounds
+            // Proper bounds check
             if (nx >= 0 && nx < screenWidth && ny >= 0 && ny < screenHeight) {
                 int neighborIndex = ny * screenWidth + nx;
-                float neighborDistance = ScreenDistances[neighborIndex];
-                float neighborOpacity = ScreenOpacities[neighborIndex];
-
-                if (neighborDistance <= 0.001f) {
-                    continue;
-                }
-
-                // Spatial Gaussian weight (common for both distance and opacity)
-                float spatialWeight = exp(-((float)(i * i + j * j)) / (2.0f * sigmaSpatial * sigmaSpatial));
-
-                // Range/Value Gaussian weight for distances (bilateral part)
-                float distanceDifference = centerDistance - neighborDistance;
-                float rangeWeight = exp(-((distanceDifference * distanceDifference)) / (2.0f * sigmaRange * sigmaRange));
                 
-                float weightForDistance = spatialWeight * rangeWeight;
-                sumWeightedDistances += neighborDistance * weightForDistance;
-                totalWeightDistances += weightForDistance;
+                // Ensure neighborIndex is within bounds
+                if (neighborIndex >= 0 && neighborIndex < screenWidth * screenHeight) {
+                    float neighborDistance = ScreenDistances[neighborIndex];
+                    float neighborOpacity = ScreenOpacities[neighborIndex];
 
-                // For opacity, we can do a simple Gaussian blur or also bilateral.
-                // Here, let's do a simple Gaussian blur for opacity using only spatialWeight.
-                // If you want bilateral on opacity too, calculate a rangeWeight for opacity.
-                sumWeightedOpacities += neighborOpacity * spatialWeight;
-                totalWeightOpacities += spatialWeight;
+                    if (neighborDistance <= 0.001f) {
+                        continue;
+                    }
+
+                    // Spatial Gaussian weight (common for both distance and opacity)
+                    float spatialWeight = exp(-((float)(i * i + j * j)) / (2.0f * sigmaSpatial * sigmaSpatial));
+
+                    // Range/Value Gaussian weight for distances (bilateral part)
+                    float distanceDifference = centerDistance - neighborDistance;
+                    float rangeWeight = exp(-((distanceDifference * distanceDifference)) / (2.0f * sigmaRange * sigmaRange));
+                    
+                    float weightForDistance = spatialWeight * rangeWeight;
+                    sumWeightedDistances += neighborDistance * weightForDistance;
+                    totalWeightDistances += weightForDistance;
+
+                    // For opacity, we can do a simple Gaussian blur or also bilateral.
+                    // Here, let's do a simple Gaussian blur for opacity using only spatialWeight.
+                    // If you want bilateral on opacity too, calculate a rangeWeight for opacity.
+                    sumWeightedOpacities += neighborOpacity * spatialWeight;
+                    totalWeightOpacities += spatialWeight;
+                }
             }
         }
     }

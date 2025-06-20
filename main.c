@@ -474,7 +474,7 @@ void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct
     }
 }
 
-void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen) {
+void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen, struct SkyBox *skyBox) {
     if (triangles->count == 0) return;
     
     cl_int err;
@@ -508,7 +508,6 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
         return;
     }
     
-    // ADD TRIANGLE COLORS UPLOAD
     err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_colors, CL_TRUE, 0, 
                               triangles->count * 3 * sizeof(float), triangles->colors, 0, NULL, NULL);
     if (err != CL_SUCCESS) {
@@ -516,14 +515,17 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
         return;
     }
     
-    // Set kernel arguments using existing buffers
+    // Set kernel arguments
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
     cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
     cl_float fov = camera->fov;
     cl_int screen_width = ScreenWidth;
     cl_int screen_height = ScreenHeight;
     cl_int num_triangles = triangles->count;
+    cl_int skybox_width = skyBox->top->width;
+    cl_int skybox_height = skyBox->top->height;
     
+    // Set all kernel arguments (0-21)
     err = clSetKernelArg(ocl->triangle_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
     err |= clSetKernelArg(ocl->triangle_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
     err |= clSetKernelArg(ocl->triangle_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
@@ -536,10 +538,18 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
     err |= clSetKernelArg(ocl->triangle_kernel, 9, sizeof(cl_int), &screen_width);
     err |= clSetKernelArg(ocl->triangle_kernel, 10, sizeof(cl_int), &screen_height);
     err |= clSetKernelArg(ocl->triangle_kernel, 11, sizeof(cl_int), &num_triangles);
-    
-    // ADD COLOR ARGUMENTS TO TRIANGLE KERNEL
     err |= clSetKernelArg(ocl->triangle_kernel, 12, sizeof(cl_mem), &ocl->buffer_triangle_colors);
     err |= clSetKernelArg(ocl->triangle_kernel, 13, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    
+    // Skybox arguments (14-21)
+    err |= clSetKernelArg(ocl->triangle_kernel, 14, sizeof(cl_mem), &ocl->buffer_skybox_top);
+    err |= clSetKernelArg(ocl->triangle_kernel, 15, sizeof(cl_mem), &ocl->buffer_skybox_bottom);
+    err |= clSetKernelArg(ocl->triangle_kernel, 16, sizeof(cl_mem), &ocl->buffer_skybox_left);
+    err |= clSetKernelArg(ocl->triangle_kernel, 17, sizeof(cl_mem), &ocl->buffer_skybox_right);
+    err |= clSetKernelArg(ocl->triangle_kernel, 18, sizeof(cl_mem), &ocl->buffer_skybox_front);
+    err |= clSetKernelArg(ocl->triangle_kernel, 19, sizeof(cl_mem), &ocl->buffer_skybox_back);
+    err |= clSetKernelArg(ocl->triangle_kernel, 20, sizeof(cl_int), &skybox_width);
+    err |= clSetKernelArg(ocl->triangle_kernel, 21, sizeof(cl_int), &skybox_height);
     
     if (err != CL_SUCCESS) {
         printf("Error setting triangle kernel arguments: %d\n", err);
@@ -3254,7 +3264,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     // *** RENDER SKYBOX FIRST (fills background) ***
     renderSkyboxOpenCL(ocl, camera, skyBox); // You'll need to pass skyBox as parameter
     // *** TRIANGLE RENDERING ***
-    renderTrianglesOpenCL(ocl, triangles, camera, screen);
+    renderTrianglesOpenCL(ocl, triangles, camera, screen, skyBox);
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
@@ -3567,24 +3577,24 @@ int main() {
     }
     printf("SkyBox loaded successfully\n");
 
-    tinyobj_attrib_t attrib;  // Fix typo: was inyobj_attrib_t
-    tinyobj_shape_t* shapes = NULL;
-    size_t num_shapes;
-    tinyobj_material_t* materials = NULL;
-    size_t num_materials;
+    // tinyobj_attrib_t attrib;  // Fix typo: was inyobj_attrib_t
+    // tinyobj_shape_t* shapes = NULL;
+    // size_t num_shapes;
+    // tinyobj_material_t* materials = NULL;
+    // size_t num_materials;
 
-    // Initialize attribute structure
-    tinyobj_attrib_init(&attrib);
+    // // Initialize attribute structure
+    // tinyobj_attrib_init(&attrib);
 
-    // Load and triangulate .obj file with correct parameters
-    int result = tinyobj_parse_obj(
-        &attrib, &shapes, &num_shapes, &materials, &num_materials,
-        "model.obj", my_file_reader, NULL, TINYOBJ_FLAG_TRIANGULATE
-    );
-    if (result != TINYOBJ_SUCCESS) {
-        fprintf(stderr, "Error loading OBJ\n");
-        return 1;
-    }
+    // // Load and triangulate .obj file with correct parameters
+    // int result = tinyobj_parse_obj(
+    //     &attrib, &shapes, &num_shapes, &materials, &num_materials,
+    //     "model.obj", my_file_reader, NULL, TINYOBJ_FLAG_TRIANGULATE
+    // );
+    // if (result != TINYOBJ_SUCCESS) {
+    //     fprintf(stderr, "Error loading OBJ\n");
+    //     return 1;
+    // }
 
     struct Triangles *triangles = (struct Triangles *)malloc(sizeof(struct Triangles));
     if (!triangles) {
@@ -3593,80 +3603,80 @@ int main() {
     }
     triangles->count = 0;
 
-    // Extract triangles from loaded OBJ data
-    for (size_t i = 0; i < num_shapes; ++i) {
-        // Access face data directly from attrib structure
-        size_t face_offset = shapes[i].face_offset;
-        size_t num_faces = shapes[i].length / 3; // Each triangle has 3 vertices
+    // // Extract triangles from loaded OBJ data
+    // for (size_t i = 0; i < num_shapes; ++i) {
+    //     // Access face data directly from attrib structure
+    //     size_t face_offset = shapes[i].face_offset;
+    //     size_t num_faces = shapes[i].length / 3; // Each triangle has 3 vertices
         
-        // Process each face (which is already triangulated)
-        for (size_t f = 0; f < num_faces; ++f) {
-            if (triangles->count >= NUMBER_OF_TRIANGLES) {
-                printf("Warning: Model has more triangles than buffer size (%d)\n", NUMBER_OF_TRIANGLES);
-                break;
-            }
+    //     // Process each face (which is already triangulated)
+    //     for (size_t f = 0; f < num_faces; ++f) {
+    //         if (triangles->count >= NUMBER_OF_TRIANGLES) {
+    //             printf("Warning: Model has more triangles than buffer size (%d)\n", NUMBER_OF_TRIANGLES);
+    //             break;
+    //         }
             
-            // Get the three vertices of this triangle
-            float v1[3], v2[3], v3[3];
+    //         // Get the three vertices of this triangle
+    //         float v1[3], v2[3], v3[3];
             
-            for (size_t v = 0; v < 3; ++v) {
-                tinyobj_vertex_index_t idx = attrib.faces[face_offset + f * 3 + v];
+    //         for (size_t v = 0; v < 3; ++v) {
+    //             tinyobj_vertex_index_t idx = attrib.faces[face_offset + f * 3 + v];
                 
-                // Extract vertex coordinates
-                float vx = attrib.vertices[3 * idx.v_idx + 0];
-                float vy = attrib.vertices[3 * idx.v_idx + 1];
-                float vz = attrib.vertices[3 * idx.v_idx + 2];
+    //             // Extract vertex coordinates
+    //             float vx = attrib.vertices[3 * idx.v_idx + 0];
+    //             float vy = attrib.vertices[3 * idx.v_idx + 1];
+    //             float vz = attrib.vertices[3 * idx.v_idx + 2];
                 
-                if (v == 0) {
-                    v1[0] = vx; v1[1] = vy; v1[2] = vz;
-                } else if (v == 1) {
-                    v2[0] = vx; v2[1] = vy; v2[2] = vz;
-                } else {
-                    v3[0] = vx; v3[1] = vy; v3[2] = vz;
-                }
-            }
+    //             if (v == 0) {
+    //                 v1[0] = vx; v1[1] = vy; v1[2] = vz;
+    //             } else if (v == 1) {
+    //                 v2[0] = vx; v2[1] = vy; v2[2] = vz;
+    //             } else {
+    //                 v3[0] = vx; v3[1] = vy; v3[2] = vz;
+    //             }
+    //         }
             
-            // Add triangle to your structure
-            AddTriangle(triangles, 
-                       v1[0], v1[1], v1[2],
-                       v2[0], v2[1], v2[2],
-                       v3[0], v3[1], v3[2],
-                       rand(), rand(), rand()); // Normals will be recalculated later
-        }
+    //         // Add triangle to your structure
+    //         AddTriangle(triangles, 
+    //                    v1[0], v1[1], v1[2],
+    //                    v2[0], v2[1], v2[2],
+    //                    v3[0], v3[1], v3[2],
+    //                    rand(), rand(), rand()); // Normals will be recalculated later
+    //     }
         
-        // Break if we've reached the triangle limit
-        if (triangles->count >= NUMBER_OF_TRIANGLES) {
-            break;
-        }
-    }
+    //     // Break if we've reached the triangle limit
+    //     if (triangles->count >= NUMBER_OF_TRIANGLES) {
+    //         break;
+    //     }
+    // }
 
-    printf("Loaded %d triangles from OBJ file\n", triangles->count);
+    // printf("Loaded %d triangles from OBJ file\n", triangles->count);
 
-    const float scaleFactor = 10.0f;
+    // const float scaleFactor = 10.0f;
 
-    for (int i = 0; i < triangles->count; i++) {
-        int idx = i * 3;
-        triangles->v1[idx + 0] *= scaleFactor;
-        triangles->v1[idx + 1] *= scaleFactor;
-        triangles->v1[idx + 2] *= scaleFactor;
-        triangles->v2[idx + 0] *= scaleFactor;
-        triangles->v2[idx + 1] *= scaleFactor;
-        triangles->v2[idx + 2] *= scaleFactor;
-        triangles->v3[idx + 0] *= scaleFactor;
-        triangles->v3[idx + 1] *= scaleFactor;
-        triangles->v3[idx + 2] *= scaleFactor;
+    // for (int i = 0; i < triangles->count; i++) {
+    //     int idx = i * 3;
+    //     triangles->v1[idx + 0] *= scaleFactor;
+    //     triangles->v1[idx + 1] *= scaleFactor;
+    //     triangles->v1[idx + 2] *= scaleFactor;
+    //     triangles->v2[idx + 0] *= scaleFactor;
+    //     triangles->v2[idx + 1] *= scaleFactor;
+    //     triangles->v2[idx + 2] *= scaleFactor;
+    //     triangles->v3[idx + 0] *= scaleFactor;
+    //     triangles->v3[idx + 1] *= scaleFactor;
+    //     triangles->v3[idx + 2] *= scaleFactor;
 
-        // Optionally, recalc normals if needed:
-        float ux = triangles->v2[idx + 0] - triangles->v1[idx + 0];
-        float uy = triangles->v2[idx + 1] - triangles->v1[idx + 1];
-        float uz = triangles->v2[idx + 2] - triangles->v1[idx + 2];
-        float vx = triangles->v3[idx + 0] - triangles->v1[idx + 0];
-        float vy = triangles->v3[idx + 1] - triangles->v1[idx + 1];
-        float vz = triangles->v3[idx + 2] - triangles->v1[idx + 2];
-        triangles->normals[idx + 0] = uy * vz - uz * vy;
-        triangles->normals[idx + 1] = uz * vx - ux * vz;
-        triangles->normals[idx + 2] = ux * vy - uy * vx;
-    }
+    //     // Optionally, recalc normals if needed:
+    //     float ux = triangles->v2[idx + 0] - triangles->v1[idx + 0];
+    //     float uy = triangles->v2[idx + 1] - triangles->v1[idx + 1];
+    //     float uz = triangles->v2[idx + 2] - triangles->v1[idx + 2];
+    //     float vx = triangles->v3[idx + 0] - triangles->v1[idx + 0];
+    //     float vy = triangles->v3[idx + 1] - triangles->v1[idx + 1];
+    //     float vz = triangles->v3[idx + 2] - triangles->v1[idx + 2];
+    //     triangles->normals[idx + 0] = uy * vz - uz * vy;
+    //     triangles->normals[idx + 1] = uz * vx - ux * vz;
+    //     triangles->normals[idx + 2] = ux * vy - uy * vx;
+    // }
 
     struct OpenCLContext ocl;
     int useOpenCL = initializeOpenCL(&ocl);
