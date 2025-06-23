@@ -12,8 +12,8 @@
 | Field | Type | Size | Description |
 |-------|------|------|-------------|
 | Additional Fields Count | `uint32` | 4 bytes | Number of additional fields per triangle |
-| Field Names | `string[]` | Variable | Names of additional fields (null-terminated strings) |
 | Triangle Struct Size | `uint32` | 4 bytes | Size in bytes of each triangle structure |
+| Field Names | `bytes[]` | Variable | Names of additional fields (null-terminated strings) |
 
 ## Triangle Data Structure
 
