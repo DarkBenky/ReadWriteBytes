@@ -25,7 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Screen Space Reflections
-- [ ] add go code to parse obj files
+- [ ] add c code to parse obj files
 - [ ] add shadows
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
 - [ ] share image as shared memory
@@ -51,6 +51,7 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] add go code to parse obj files
 - [X] add skybox directly to the render triangles shader so i can sample the sky box to get realistic reflections of sky
 - [X] implement multithreading (project particles in diffrent threads)
 - [x] rework it to work based on grid
