@@ -24,7 +24,7 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] Screen Space Reflections
+- [ ] Screen Space Reflections ( general purpose function where you provide image ray and it will return color )
 - [ ] add c code to parse obj files
 - [ ] add shadows
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
