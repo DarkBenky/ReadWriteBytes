@@ -27,7 +27,8 @@
 #define FrameCount 30
 #define NUM_THREADS 0
 #define USE_GPU 1
-#define NUMBER_OF_TRIANGLES 10000
+#define NUMBER_OF_TRIANGLES 100000
+#define NUMBER_OF_CUBES 100
 pthread_t threads[NUM_THREADS];
 
 struct RawImage {
@@ -411,6 +412,41 @@ void CreateBoardPlane(float centerX, float centerY, float centerZ, float size, i
             AddTriangle(triangles, x2, y2, z2, x4, y4, z4, x3, y3, z3, colorR, colorG, colorB);
         }
     }
+}
+
+void CreateCube(float centerX, float centerY, float centerZ, float size, struct Triangles *triangles, float colorR, float colorG, float colorB) {
+    float halfSize = size / 2.0f;
+    
+    // Define vertices of the cube
+    float v1[3] = {centerX - halfSize, centerY - halfSize, centerZ - halfSize};
+    float v2[3] = {centerX + halfSize, centerY - halfSize, centerZ - halfSize};
+    float v3[3] = {centerX + halfSize, centerY + halfSize, centerZ - halfSize};
+    float v4[3] = {centerX - halfSize, centerY + halfSize, centerZ - halfSize};
+    float v5[3] = {centerX - halfSize, centerY - halfSize, centerZ + halfSize};
+    float v6[3] = {centerX + halfSize, centerY - halfSize, centerZ + halfSize};
+    float v7[3] = {centerX + halfSize, centerY + halfSize, centerZ + halfSize};
+    float v8[3] = {centerX - halfSize, centerY + halfSize, centerZ + halfSize};
+
+    // Add triangles for each face of the cube
+    // Front face
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v3[0], v3[1], v3[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v3[0], v3[1], v3[2], v4[0], v4[1], v4[2], colorR, colorG, colorB);
+    
+    // Back face
+    AddTriangle(triangles, v5[0], v5[1], v5[2], v6[0], v6[1], v6[2], v7[0], v7[1], v7[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v5[0], v5[1], v5[2], v7[0], v7[1], v7[2], v8[0], v8[1], v8[2], colorR, colorG, colorB);
+    // Left face
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v5[0], v5[1], v5[2], v8[0], v8[1], v8[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v8[0], v8[1], v8[2], v4[0], v4[1], v4[2], colorR, colorG, colorB);
+    // Right face
+    AddTriangle(triangles, v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], v7[0], v7[1], v7[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v2[0], v2[1], v2[2], v7[0], v7[1], v7[2], v3[0], v3[1], v3[2], colorR, colorG, colorB);
+    // Top face
+    AddTriangle(triangles, v4[0], v4[1], v4[2], v3[0], v3[1], v3[2], v7[0], v7[1], v7[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v4[0], v4[1], v4[2], v7[0], v7[1], v7[2], v8[0], v8[1], v8[2], colorR, colorG, colorB);
+    // Bottom face
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v6[0], v6[1], v6[2], v5[0], v5[1], v5[2], colorR, colorG, colorB);
 }
 
 struct Screen {
@@ -3568,6 +3604,10 @@ void my_file_reader(void *ctx, const char *filename, int is_mtl, const char *obj
     fclose(file);
 }
 
+float rand_01() {
+    return (float)rand() / RAND_MAX;
+}
+
 int main() {
     // load sky box texture
     struct SkyBox skyBox;
@@ -3831,6 +3871,19 @@ int main() {
 
     clock_t lastTime = clock();
     CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
+
+    for (int i = 0; i <= NUMBER_OF_CUBES; i++) {
+        float x = (float)(rand_01() * 500.0f);
+        float y = (float)(rand_01() * 500.0f);
+        float z = (float)(rand_01() * 500.0f);
+        float size = 25.0f;
+        float r = (float)rand_01();
+        float g = (float)rand_01();
+        float b = (float)rand_01();
+        CreateCube(x, y, z, size, triangles, r, g, b);
+    }
+
+
     while (1) {
         // Calculate delta step based on elapsed time since the last frame
         clock_t currentTime = clock();
