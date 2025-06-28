@@ -332,8 +332,8 @@ __kernel void renderTriangles(
     const int skyBoxHeight
 ) {
     // PBR values - you can make these parameters or per-triangle arrays
-    float Roughness = 0.9f;
-    float Metallic = 0.05f;   // High metallic for chrome-like appearance
+    float Roughness = 0.0f;
+    float Metallic = 1.0f;   // High metallic for chrome-like appearance
     float Emission = 0.5f;    // No emission for now
 
     int triangleId = get_global_id(0);

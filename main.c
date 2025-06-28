@@ -28,7 +28,7 @@
 #define NUM_THREADS 0
 #define USE_GPU 1
 #define NUMBER_OF_TRIANGLES 100000
-#define NUMBER_OF_CUBES 100
+#define NUMBER_OF_CUBES 200
 pthread_t threads[NUM_THREADS];
 
 struct RawImage {

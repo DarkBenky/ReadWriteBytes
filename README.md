@@ -23,9 +23,8 @@ This experiment tests the performance of writing and reading frame data as binar
 The results show that writing frames is faster than reading them, with write operations capable of handling ~442 FPS while read operations can handle ~269 FPS. This suggests that the system could theoretically handle real-time frame processing for applications requiring up to 60 FPS.
 
 ## TODO
-
-- [ ] Screen Space Reflections ( general purpose function where you provide image ray and it will return color )
 - [ ] add c code to parse obj files
+- [ ] add emission and bloom
 - [ ] add shadows
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
 - [ ] share image as shared memory
@@ -51,6 +50,7 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] Screen Space Reflections ( general purpose function where you provide image ray and it will return color )
 - [X] add go code to parse obj files
 - [X] add skybox directly to the render triangles shader so i can sample the sky box to get realistic reflections of sky
 - [X] implement multithreading (project particles in diffrent threads)
