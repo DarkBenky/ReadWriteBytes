@@ -23,6 +23,7 @@ This experiment tests the performance of writing and reading frame data as binar
 The results show that writing frames is faster than reading them, with write operations capable of handling ~442 FPS while read operations can handle ~269 FPS. This suggests that the system could theoretically handle real-time frame processing for applications requiring up to 60 FPS.
 
 ## TODO
+- [ ] move whole gpu code to one function that will call the other functions
 - [ ] add c code to parse obj files
 - [ ] add emission and bloom
 - [ ] add shadows
