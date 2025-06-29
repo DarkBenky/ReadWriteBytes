@@ -14,7 +14,7 @@
 #include "tinyobj_loader_c.h"
 #include <jpeglib.h>
 
-#define NUM_PARTICLES 250000
+#define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
@@ -194,6 +194,11 @@ struct OpenCLContext {
     cl_mem buffer_triangle_normals;
     cl_mem buffer_screen_colors;
 
+    // Triangle properties
+    cl_mem buffer_triangle_roughness;
+    cl_mem buffer_triangle_metallic;
+    cl_mem buffer_triangle_emission;
+
     // skybox buffers
     cl_mem buffer_skybox_top;
     cl_mem buffer_skybox_bottom;
@@ -221,6 +226,9 @@ struct Triangles {
     float v1 [NUMBER_OF_TRIANGLES * 3];
     float v2 [NUMBER_OF_TRIANGLES * 3];
     float v3 [NUMBER_OF_TRIANGLES * 3];
+    float Roughness[NUMBER_OF_TRIANGLES];
+    float Metallic[NUMBER_OF_TRIANGLES];
+    float Emission[NUMBER_OF_TRIANGLES];
     float normals[NUMBER_OF_TRIANGLES * 3];
     float colors[NUMBER_OF_TRIANGLES * 3]; // RGB colors for each triangle
     int count;
@@ -230,7 +238,7 @@ void AddTriangle(struct Triangles *triangles,
                  float v1x, float v1y, float v1z,
                  float v2x, float v2y, float v2z,
                  float v3x, float v3y, float v3z,
-                 float colorR, float colorG, float colorB) {
+                 float colorR, float colorG, float colorB, float Roughness, float Metallic, float Emission) {
     if (triangles->count >= NUMBER_OF_TRIANGLES) {
         printf("Maximum number of triangles reached\n");
         return;
@@ -280,6 +288,10 @@ void AddTriangle(struct Triangles *triangles,
     triangles->colors[index] = colorR;
     triangles->colors[index + 1] = colorG;
     triangles->colors[index + 2] = colorB;
+    // Store material properties
+    triangles->Roughness[triangles->count] = Roughness;
+    triangles->Metallic[triangles->count] = Metallic;
+    triangles->Emission[triangles->count] = Emission;
     
     triangles->count++;
 }
@@ -373,12 +385,15 @@ void CreateBoardPlane(float centerX, float centerY, float centerZ, float size, i
     // Define two alternating colors for checkerboard pattern
     float color1R = 0.9f, color1G = 0.9f, color1B = 0.9f; // Light color (white-ish)
     float color2R = 0.1f, color2G = 0.1f, color2B = 0.1f; // Dark color (black-ish)
+    float Metallic = 0.95f, Roughness = 0.75f, Emission = 0.25f; // Material properties
+    float Metallic1 = 0.10f, Roughness1 = 0.25f, Emission1 = 0.85f; // Material properties
     
     for (int i = 0; i < numberOfSquares; i++) {
         for (int j = 0; j < numberOfSquares; j++) {
-            float x1 = centerX + (i - numberOfSquares / 2) * size;
-            float y1 = centerY;
-            float z1 = centerZ + (j - numberOfSquares / 2) * size;
+            // Calculate square position (centered around centerX, centerZ)
+            float x1 = centerX + (i - numberOfSquares / 2.0f) * size;
+            float y1 = centerY;  // Keep Y constant for horizontal plane
+            float z1 = centerZ + (j - numberOfSquares / 2.0f) * size;
             
             float x2 = x1 + size;
             float y2 = y1;
@@ -393,60 +408,71 @@ void CreateBoardPlane(float centerX, float centerY, float centerZ, float size, i
             float z4 = z3;
 
             // Create checkerboard pattern
-            // Use modulo to alternate colors based on grid position
             bool isEvenSquare = ((i + j) % 2) == 0;
             
-            float colorR, colorG, colorB;
+            float colorR, colorG, colorB, roughness, metallic, emission;
             if (isEvenSquare) {
                 colorR = color1R;
                 colorG = color1G;
                 colorB = color1B;
+                roughness = Roughness;
+                metallic = Metallic;
+                emission = Emission;
             } else {
                 colorR = color2R;
                 colorG = color2G;
                 colorB = color2B;
+                roughness = Roughness1;
+                metallic = Metallic1;
+                emission = Emission1;
             }
 
-            // Add two triangles for the square with checkerboard colors
-            AddTriangle(triangles, x1, y1, z1, x2, y2, z2, x3, y3, z3, colorR, colorG, colorB);
-            AddTriangle(triangles, x2, y2, z2, x4, y4, z4, x3, y3, z3, colorR, colorG, colorB);
+            // FIXED: Correct winding order for upward-facing normals (counter-clockwise from above)
+            // Triangle 1: bottom-left, top-left, bottom-right (when viewed from above)
+            AddTriangle(triangles, x1, y1, z1,    // bottom-left
+                                   x3, y3, z3,    // top-left  
+                                   x2, y2, z2,    // bottom-right
+                                   colorR, colorG, colorB, roughness, metallic, emission);
+            
+            // Triangle 2: top-left, top-right, bottom-right (when viewed from above)
+            AddTriangle(triangles, x3, y3, z3,    // top-left
+                                   x4, y4, z4,    // top-right
+                                   x2, y2, z2,    // bottom-right
+                                   colorR, colorG, colorB, roughness, metallic, emission);
         }
     }
 }
 
-void CreateCube(float centerX, float centerY, float centerZ, float size, struct Triangles *triangles, float colorR, float colorG, float colorB) {
+void CreateCube(float centerX, float centerY, float centerZ, float size, struct Triangles *triangles, float colorR, float colorG, float colorB, float Roughness, float Metallic, float Emission) {
     float halfSize = size / 2.0f;
     
     // Define vertices of the cube
-    float v1[3] = {centerX - halfSize, centerY - halfSize, centerZ - halfSize};
-    float v2[3] = {centerX + halfSize, centerY - halfSize, centerZ - halfSize};
-    float v3[3] = {centerX + halfSize, centerY + halfSize, centerZ - halfSize};
-    float v4[3] = {centerX - halfSize, centerY + halfSize, centerZ - halfSize};
-    float v5[3] = {centerX - halfSize, centerY - halfSize, centerZ + halfSize};
-    float v6[3] = {centerX + halfSize, centerY - halfSize, centerZ + halfSize};
-    float v7[3] = {centerX + halfSize, centerY + halfSize, centerZ + halfSize};
-    float v8[3] = {centerX - halfSize, centerY + halfSize, centerZ + halfSize};
+    float v1[3] = {centerX - halfSize, centerY - halfSize, centerZ - halfSize}; // min, min, min
+    float v2[3] = {centerX + halfSize, centerY - halfSize, centerZ - halfSize}; // max, min, min
+    float v3[3] = {centerX + halfSize, centerY + halfSize, centerZ - halfSize}; // max, max, min
+    float v4[3] = {centerX - halfSize, centerY + halfSize, centerZ - halfSize}; // min, max, min
+    float v5[3] = {centerX - halfSize, centerY - halfSize, centerZ + halfSize}; // min, min, max
+    float v6[3] = {centerX + halfSize, centerY - halfSize, centerZ + halfSize}; // max, min, max
+    float v7[3] = {centerX + halfSize, centerY + halfSize, centerZ + halfSize}; // max, max, max
+    float v8[3] = {centerX - halfSize, centerY + halfSize, centerZ + halfSize}; // min, max, max
 
-    // Add triangles for each face of the cube
-    // Front face
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v3[0], v3[1], v3[2], colorR, colorG, colorB);
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v3[0], v3[1], v3[2], v4[0], v4[1], v4[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v3[0], v3[1], v3[2], v2[0], v2[1], v2[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v4[0], v4[1], v4[2], v3[0], v3[1], v3[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
     
-    // Back face
-    AddTriangle(triangles, v5[0], v5[1], v5[2], v6[0], v6[1], v6[2], v7[0], v7[1], v7[2], colorR, colorG, colorB);
-    AddTriangle(triangles, v5[0], v5[1], v5[2], v7[0], v7[1], v7[2], v8[0], v8[1], v8[2], colorR, colorG, colorB);
-    // Left face
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v5[0], v5[1], v5[2], v8[0], v8[1], v8[2], colorR, colorG, colorB);
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v8[0], v8[1], v8[2], v4[0], v4[1], v4[2], colorR, colorG, colorB);
-    // Right face
-    AddTriangle(triangles, v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], v7[0], v7[1], v7[2], colorR, colorG, colorB);
-    AddTriangle(triangles, v2[0], v2[1], v2[2], v7[0], v7[1], v7[2], v3[0], v3[1], v3[2], colorR, colorG, colorB);
-    // Top face
-    AddTriangle(triangles, v4[0], v4[1], v4[2], v3[0], v3[1], v3[2], v7[0], v7[1], v7[2], colorR, colorG, colorB);
-    AddTriangle(triangles, v4[0], v4[1], v4[2], v7[0], v7[1], v7[2], v8[0], v8[1], v8[2], colorR, colorG, colorB);
-    // Bottom face
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], colorR, colorG, colorB);
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v6[0], v6[1], v6[2], v5[0], v5[1], v5[2], colorR, colorG, colorB);
+    AddTriangle(triangles, v5[0], v5[1], v5[2], v6[0], v6[1], v6[2], v7[0], v7[1], v7[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v5[0], v5[1], v5[2], v7[0], v7[1], v7[2], v8[0], v8[1], v8[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v5[0], v5[1], v5[2], v8[0], v8[1], v8[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v8[0], v8[1], v8[2], v4[0], v4[1], v4[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    
+    AddTriangle(triangles, v2[0], v2[1], v2[2], v3[0], v3[1], v3[2], v7[0], v7[1], v7[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v2[0], v2[1], v2[2], v7[0], v7[1], v7[2], v6[0], v6[1], v6[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    
+    AddTriangle(triangles, v4[0], v4[1], v4[2], v8[0], v8[1], v8[2], v7[0], v7[1], v7[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v4[0], v4[1], v4[2], v7[0], v7[1], v7[2], v3[0], v3[1], v3[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v6[0], v6[1], v6[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
 }
 
 struct Screen {
@@ -515,80 +541,18 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
     
     cl_int err;
     
-    // Upload triangle data to existing GPU buffers (no new allocation)
-    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v1, CL_TRUE, 0, 
-                              triangles->count * 3 * sizeof(float), triangles->v1, 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error writing triangle v1 buffer: %d\n", err);
-        return;
-    }
-    
-    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v2, CL_TRUE, 0, 
-                              triangles->count * 3 * sizeof(float), triangles->v2, 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error writing triangle v2 buffer: %d\n", err);
-        return;
-    }
-    
-    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v3, CL_TRUE, 0, 
-                              triangles->count * 3 * sizeof(float), triangles->v3, 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error writing triangle v3 buffer: %d\n", err);
-        return;
-    }
-    
-    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_normals, CL_TRUE, 0, 
-                              triangles->count * 3 * sizeof(float), triangles->normals, 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error writing triangle normals buffer: %d\n", err);
-        return;
-    }
-    
-    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_colors, CL_TRUE, 0, 
-                              triangles->count * 3 * sizeof(float), triangles->colors, 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error writing triangle colors buffer: %d\n", err);
-        return;
-    }
-    
-    // Set kernel arguments
+    // Only set the camera parameters that change each frame
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
     cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
     cl_float fov = camera->fov;
-    cl_int screen_width = ScreenWidth;
-    cl_int screen_height = ScreenHeight;
-    cl_int num_triangles = triangles->count;
-    cl_int skybox_width = skyBox->top->width;
-    cl_int skybox_height = skyBox->top->height;
     
-    // Set all kernel arguments (0-21)
-    err = clSetKernelArg(ocl->triangle_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
-    err |= clSetKernelArg(ocl->triangle_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
-    err |= clSetKernelArg(ocl->triangle_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
-    err |= clSetKernelArg(ocl->triangle_kernel, 3, sizeof(cl_mem), &ocl->buffer_triangle_normals);
-    err |= clSetKernelArg(ocl->triangle_kernel, 4, sizeof(cl_mem), &ocl->buffer_distances);
-    err |= clSetKernelArg(ocl->triangle_kernel, 5, sizeof(cl_mem), &ocl->buffer_normals);
-    err |= clSetKernelArg(ocl->triangle_kernel, 6, sizeof(cl_float3), &cam_pos);
+    // Only update arguments 6-8 (camera data)
+    err = clSetKernelArg(ocl->triangle_kernel, 6, sizeof(cl_float3), &cam_pos);
     err |= clSetKernelArg(ocl->triangle_kernel, 7, sizeof(cl_float3), &cam_dir);
     err |= clSetKernelArg(ocl->triangle_kernel, 8, sizeof(cl_float), &fov);
-    err |= clSetKernelArg(ocl->triangle_kernel, 9, sizeof(cl_int), &screen_width);
-    err |= clSetKernelArg(ocl->triangle_kernel, 10, sizeof(cl_int), &screen_height);
-    err |= clSetKernelArg(ocl->triangle_kernel, 11, sizeof(cl_int), &num_triangles);
-    err |= clSetKernelArg(ocl->triangle_kernel, 12, sizeof(cl_mem), &ocl->buffer_triangle_colors);
-    err |= clSetKernelArg(ocl->triangle_kernel, 13, sizeof(cl_mem), &ocl->buffer_screen_colors);
-    
-    // Skybox arguments (14-21)
-    err |= clSetKernelArg(ocl->triangle_kernel, 14, sizeof(cl_mem), &ocl->buffer_skybox_top);
-    err |= clSetKernelArg(ocl->triangle_kernel, 15, sizeof(cl_mem), &ocl->buffer_skybox_bottom);
-    err |= clSetKernelArg(ocl->triangle_kernel, 16, sizeof(cl_mem), &ocl->buffer_skybox_left);
-    err |= clSetKernelArg(ocl->triangle_kernel, 17, sizeof(cl_mem), &ocl->buffer_skybox_right);
-    err |= clSetKernelArg(ocl->triangle_kernel, 18, sizeof(cl_mem), &ocl->buffer_skybox_front);
-    err |= clSetKernelArg(ocl->triangle_kernel, 19, sizeof(cl_mem), &ocl->buffer_skybox_back);
-    err |= clSetKernelArg(ocl->triangle_kernel, 20, sizeof(cl_int), &skybox_width);
-    err |= clSetKernelArg(ocl->triangle_kernel, 21, sizeof(cl_int), &skybox_height);
     
     if (err != CL_SUCCESS) {
-        printf("Error setting triangle kernel arguments: %d\n", err);
+        printf("Error setting camera kernel arguments: %d\n", err);
         return;
     }
     
@@ -2988,7 +2952,126 @@ void readPauseData(bool *paused) {
     fclose(file);
 }
 
-int initializeOpenCL(struct OpenCLContext *ocl) {
+
+int uploadTriangleDataOnce(struct OpenCLContext *ocl, struct Triangles *triangles) {
+    cl_int err;
+    
+    printf("Uploading triangle data once: %d triangles\n", triangles->count);
+    
+    // Upload all triangle data once
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v1, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->v1, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle v1 buffer during init: %d\n", err);
+        return 0;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v2, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->v2, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle v2 buffer during init: %d\n", err);
+        return 0;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v3, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->v3, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle v3 buffer during init: %d\n", err);
+        return 0;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_normals, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->normals, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle normals buffer during init: %d\n", err);
+        return 0;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_colors, CL_TRUE, 0, 
+                              triangles->count * 3 * sizeof(float), triangles->colors, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle colors buffer during init: %d\n", err);
+        return 0;
+    }
+
+    // Upload triangle material properties once
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_roughness, CL_TRUE, 0, 
+                              triangles->count * sizeof(float), triangles->Roughness, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle roughness buffer during init: %d\n", err);
+        return 0;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_metallic, CL_TRUE, 0, 
+                              triangles->count * sizeof(float), triangles->Metallic, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle metallic buffer during init: %d\n", err);
+        return 0;
+    }
+    
+    err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_emission, CL_TRUE, 0, 
+                              triangles->count * sizeof(float), triangles->Emission, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error writing triangle emission buffer during init: %d\n", err);
+        return 0;
+    }
+    
+    printf("Triangle data uploaded successfully\n");
+    return 1;
+}
+
+
+int setupStaticKernelArguments(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox) {
+    cl_int err;
+    
+    // Set all the static arguments that never change
+    cl_int screen_width = ScreenWidth;
+    cl_int screen_height = ScreenHeight;
+    cl_int num_triangles = triangles->count;
+    cl_int skybox_width = skyBox->top->width;
+    cl_int skybox_height = skyBox->top->height;
+    
+    // Set static buffer arguments (0-5, 9-24)
+    err = clSetKernelArg(ocl->triangle_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
+    err |= clSetKernelArg(ocl->triangle_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
+    err |= clSetKernelArg(ocl->triangle_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
+    err |= clSetKernelArg(ocl->triangle_kernel, 3, sizeof(cl_mem), &ocl->buffer_triangle_normals);
+    err |= clSetKernelArg(ocl->triangle_kernel, 4, sizeof(cl_mem), &ocl->buffer_distances);
+    err |= clSetKernelArg(ocl->triangle_kernel, 5, sizeof(cl_mem), &ocl->buffer_normals);
+    
+    // Skip 6-8 (camera parameters - these change each frame)
+    
+    err |= clSetKernelArg(ocl->triangle_kernel, 9, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->triangle_kernel, 10, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->triangle_kernel, 11, sizeof(cl_int), &num_triangles);
+    err |= clSetKernelArg(ocl->triangle_kernel, 12, sizeof(cl_mem), &ocl->buffer_triangle_colors);
+    err |= clSetKernelArg(ocl->triangle_kernel, 13, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    
+    // Skybox arguments (14-21)
+    err |= clSetKernelArg(ocl->triangle_kernel, 14, sizeof(cl_mem), &ocl->buffer_skybox_top);
+    err |= clSetKernelArg(ocl->triangle_kernel, 15, sizeof(cl_mem), &ocl->buffer_skybox_bottom);
+    err |= clSetKernelArg(ocl->triangle_kernel, 16, sizeof(cl_mem), &ocl->buffer_skybox_left);
+    err |= clSetKernelArg(ocl->triangle_kernel, 17, sizeof(cl_mem), &ocl->buffer_skybox_right);
+    err |= clSetKernelArg(ocl->triangle_kernel, 18, sizeof(cl_mem), &ocl->buffer_skybox_front);
+    err |= clSetKernelArg(ocl->triangle_kernel, 19, sizeof(cl_mem), &ocl->buffer_skybox_back);
+    err |= clSetKernelArg(ocl->triangle_kernel, 20, sizeof(cl_int), &skybox_width);
+    err |= clSetKernelArg(ocl->triangle_kernel, 21, sizeof(cl_int), &skybox_height);
+    
+    // Triangle material properties (22-24)
+    err |= clSetKernelArg(ocl->triangle_kernel, 22, sizeof(cl_mem), &ocl->buffer_triangle_roughness);
+    err |= clSetKernelArg(ocl->triangle_kernel, 23, sizeof(cl_mem), &ocl->buffer_triangle_metallic);
+    err |= clSetKernelArg(ocl->triangle_kernel, 24, sizeof(cl_mem), &ocl->buffer_triangle_emission);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting static triangle kernel arguments: %d\n", err);
+        return 0;
+    }
+    
+    printf("Static kernel arguments set successfully\n");
+    return 1;
+}
+
+int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox) {
     cl_int err;
     
     // Get platform
@@ -3154,31 +3237,51 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
         printf("Error creating temp opacities buffer: %d\n", err);
         return 0;
     }
+
+    // crete buffers for triangle properties
+    ocl->buffer_triangle_roughness = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                           triangles->count * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle roughness buffer: %d\n", err);
+        return 0;
+    }
+    ocl->buffer_triangle_metallic = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                           triangles->count * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle metalness buffer: %d\n", err);
+        return 0;
+    }
+    ocl->buffer_triangle_emission = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
+                                           triangles->count * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle emission buffer: %d\n", err);
+        return 0;
+    }
     
     // Create triangle buffers (allocated once, reused every frame)
     ocl->buffer_triangle_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
-                                           NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+                                           triangles->count * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating triangle v1 buffer: %d\n", err);
         return 0;
     }
-    
+
     ocl->buffer_triangle_v2 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
-                                           NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+                                           triangles->count * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating triangle v2 buffer: %d\n", err);
         return 0;
     }
     
     ocl->buffer_triangle_v3 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
-                                           NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+                                            triangles->count * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating triangle v3 buffer: %d\n", err);
         return 0;
     }
     
     ocl->buffer_triangle_normals = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
-                                                NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+                                            triangles->count * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating triangle normals buffer: %d\n", err);
         return 0;
@@ -3186,7 +3289,7 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
     
     // ADD TRIANGLE COLORS BUFFER
     ocl->buffer_triangle_colors = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY, 
-                                                NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+                                            triangles->count * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating triangle colors buffer: %d\n", err);
         return 0;
@@ -3194,9 +3297,27 @@ int initializeOpenCL(struct OpenCLContext *ocl) {
     
     // ADD SCREEN COLORS BUFFER
     ocl->buffer_screen_colors = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
-                                              ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
+                                          ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating screen colors buffer: %d\n", err);
+        return 0;
+    }
+
+    // *** INITIALIZE SKYBOX BUFFERS AND UPLOAD DATA ***
+    if (!initializeSkyboxBuffers(ocl, skyBox)) {
+        printf("Failed to initialize skybox buffers during OpenCL init\n");
+        return 0;
+    }
+
+    // *** UPLOAD TRIANGLE DATA ONCE ***
+    if (!uploadTriangleDataOnce(ocl, triangles)) {
+        printf("Failed to upload triangle data during OpenCL init\n");
+        return 0;
+    }
+
+    // Set static kernel arguments that never change
+    if (!setupStaticKernelArguments(ocl, triangles, skyBox)) {
+        printf("Failed to set static kernel arguments during OpenCL init\n");
         return 0;
     }
     
@@ -3539,7 +3660,7 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
     if (ocl->host_opacities_result) free(ocl->host_opacities_result);
     if (ocl->host_velocities_result) free(ocl->host_velocities_result);
     if (ocl->host_normals_result) free(ocl->host_normals_result);
-    if (ocl->host_screen_colors_result) free(ocl->host_screen_colors_result);  // FIX: was ocl->host
+    if (ocl->host_screen_colors_result) free(ocl->host_screen_colors_result);
     
     // Free OpenCL resources (INCLUDING NORMALS AND TRIANGLES)
     if (ocl->buffer_points) clReleaseMemObject(ocl->buffer_points);
@@ -3552,10 +3673,14 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
     if (ocl->buffer_triangle_v2) clReleaseMemObject(ocl->buffer_triangle_v2);
     if (ocl->buffer_triangle_v3) clReleaseMemObject(ocl->buffer_triangle_v3);
     if (ocl->buffer_triangle_normals) clReleaseMemObject(ocl->buffer_triangle_normals);
-    if (ocl->buffer_triangle_colors) clReleaseMemObject(ocl->buffer_triangle_colors);  // FIX: missing semicolon
-    if (ocl->buffer_screen_colors) clReleaseMemObject(ocl->buffer_screen_colors);  // ADD THIS
+    if (ocl->buffer_triangle_colors) clReleaseMemObject(ocl->buffer_triangle_colors);
+    if (ocl->buffer_screen_colors) clReleaseMemObject(ocl->buffer_screen_colors);
     if (ocl->buffer_distances_temp) clReleaseMemObject(ocl->buffer_distances_temp);
     if (ocl->buffer_opacities_temp) clReleaseMemObject(ocl->buffer_opacities_temp);
+    // triangle properties buffers
+    if (ocl->buffer_triangle_roughness) clReleaseMemObject(ocl->buffer_triangle_roughness);
+    if (ocl->buffer_triangle_metallic) clReleaseMemObject(ocl->buffer_triangle_metallic);
+    if (ocl->buffer_triangle_emission) clReleaseMemObject(ocl->buffer_triangle_emission);
     
     // Add skybox buffer cleanup
     if (ocl->buffer_skybox_top) clReleaseMemObject(ocl->buffer_skybox_top);
@@ -3718,11 +3843,7 @@ int main() {
     //     triangles->normals[idx + 2] = ux * vy - uy * vx;
     // }
 
-    struct OpenCLContext ocl;
-    int useOpenCL = initializeOpenCL(&ocl);
-    if (!useOpenCL) {
-        printf("Failed to initialize OpenCL, falling back to CPU\n");
-    }
+    
 
     struct Camera camera;
     camera.ray.origin[0] = 50.0f;
@@ -3741,9 +3862,9 @@ int main() {
     }
 
     // Initialize collision thread system
-    initializeCollisionThreads();
-    // Initialize render thread system
-    initializeRenderThreads();
+    // initializeCollisionThreads();
+    // // Initialize render thread system
+    // initializeRenderThreads();
 
     // Initialize threadData array before creating threads
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -3864,11 +3985,6 @@ int main() {
         return 1;
     }
 
-    if (useOpenCL && !initializeSkyboxBuffers(&ocl, &skyBox)) {
-        printf("Failed to initialize skybox buffers\n");
-        return 1;
-    }   
-
     clock_t lastTime = clock();
     CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
@@ -3880,9 +3996,20 @@ int main() {
         float r = (float)rand_01();
         float g = (float)rand_01();
         float b = (float)rand_01();
-        CreateCube(x, y, z, size, triangles, r, g, b);
+        float Roughness = (float)rand_01();
+        float Metallic = (float)rand_01();
+        float Emissive = (float)rand_01();
+        CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
     }
 
+
+    struct OpenCLContext ocl;
+    int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox);
+    if (!useOpenCL) {
+        printf("Failed to initialize OpenCL, falling back to CPU\n");
+    }
+
+    
 
     while (1) {
         // Calculate delta step based on elapsed time since the last frame

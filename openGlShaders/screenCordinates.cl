@@ -329,21 +329,24 @@ __kernel void renderTriangles(
     __global const float *SkyBoxFront,
     __global const float *SkyBoxBack,
     const int skyBoxWidth,
-    const int skyBoxHeight
+    const int skyBoxHeight,
+    __global const float* roughness,
+    __global const float* metallic,
+    __global const float* emission
 ) {
-    // PBR values - you can make these parameters or per-triangle arrays
-    float Roughness = 0.95f;
-    float Metallic = 0.95f;   // High metallic for chrome-like appearance
-    float Emission = 0.5f;    // No emission for now
-
     int triangleId = get_global_id(0);
     if (triangleId >= numTriangles) return;
+
+    // Get material properties for this triangle
+    float Roughness = roughness[triangleId];
+    float Metallic = metallic[triangleId];
+    float Emission = emission[triangleId];
 
     // Add bounds checking for array access
     int vertexIndex = triangleId * 3;
     if (vertexIndex + 2 >= numTriangles * 3) return;
 
-    // Get triangle vertices with bounds checking
+    // Get triangle vertices
     float3 vertex1 = (float3)(v1[vertexIndex], v1[vertexIndex + 1], v1[vertexIndex + 2]);
     float3 vertex2 = (float3)(v2[triangleId * 3], v2[triangleId * 3 + 1], v2[triangleId * 3 + 2]);
     float3 vertex3 = (float3)(v3[triangleId * 3], v3[triangleId * 3 + 1], v3[triangleId * 3 + 2]);
@@ -354,64 +357,111 @@ __kernel void renderTriangles(
                                    TriangleColors[triangleId * 3 + 1], 
                                    TriangleColors[triangleId * 3 + 2]);
 
-    // Compute camera basis
+    // === OPTIMIZATION 1: BACK-FACE CULLING ===
+    // Calculate view direction to triangle center
+    float3 triangleCenter = (vertex1 + vertex2 + vertex3) / 3.0f;
+    float3 viewDirection = normalize(camPos - triangleCenter);
+    
+    // If normal points away from camera, skip this triangle
+    if (dot(normal, viewDirection) < 0.0f) {
+        return; // Back-face culling - skip this triangle
+    }
+
+    // Compute camera basis (moved after culling to save computation)
     float3 forward = normalize(camDir);
     float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
     float3 right = normalize(cross(forward, camUp));
     float3 up = cross(right, forward);
 
+    // === OPTIMIZATION 2: EARLY DEPTH REJECTION ===
+    // Quick check if triangle is behind camera
+    float3 rel1 = vertex1 - camPos;
+    float3 rel2 = vertex2 - camPos;
+    float3 rel3 = vertex3 - camPos;
+    
+    float depth1 = dot(rel1, forward);
+    float depth2 = dot(rel2, forward);
+    float depth3 = dot(rel3, forward);
+    
+    // If all vertices are behind camera, skip
+    if (depth1 <= 0.001f && depth2 <= 0.001f && depth3 <= 0.001f) return;
+    
+    // If any vertex is behind camera, this triangle needs clipping (skip for now)
+    if (depth1 <= 0.001f || depth2 <= 0.001f || depth3 <= 0.001f) return;
+
     // Project vertices to screen space
     float3 screenPos1, screenPos2, screenPos3;
     
     // Project vertex1
-    float3 rel1 = vertex1 - camPos;
-    float depth1 = dot(rel1, forward);
-    if (depth1 <= 0.001f) return;
     float fovScale1 = 1.0f / (depth1 * fov);
     screenPos1.x = dot(rel1, right) * fovScale1 * screenWidth * 0.5f + screenWidth * 0.5f;
     screenPos1.y = -dot(rel1, up) * fovScale1 * screenHeight * 0.5f + screenHeight * 0.5f;
     screenPos1.z = depth1;
 
     // Project vertex2
-    float3 rel2 = vertex2 - camPos;
-    float depth2 = dot(rel2, forward);
-    if (depth2 <= 0.001f) return;
     float fovScale2 = 1.0f / (depth2 * fov);
     screenPos2.x = dot(rel2, right) * fovScale2 * screenWidth * 0.5f + screenWidth * 0.5f;
     screenPos2.y = -dot(rel2, up) * fovScale2 * screenHeight * 0.5f + screenHeight * 0.5f;
     screenPos2.z = depth2;
 
     // Project vertex3
-    float3 rel3 = vertex3 - camPos;
-    float depth3 = dot(rel3, forward);
-    if (depth3 <= 0.001f) return;
     float fovScale3 = 1.0f / (depth3 * fov);
     screenPos3.x = dot(rel3, right) * fovScale3 * screenWidth * 0.5f + screenWidth * 0.5f;
     screenPos3.y = -dot(rel3, up) * fovScale3 * screenHeight * 0.5f + screenHeight * 0.5f;
     screenPos3.z = depth3;
 
-    // Calculate bounding box
-    int minX = max(0, (int)min(min(screenPos1.x, screenPos2.x), screenPos3.x));
-    int maxX = min(screenWidth - 1, (int)max(max(screenPos1.x, screenPos2.x), screenPos3.x));
-    int minY = max(0, (int)min(min(screenPos1.y, screenPos2.y), screenPos3.y));
-    int maxY = min(screenHeight - 1, (int)max(max(screenPos1.y, screenPos2.y), screenPos3.y));
+    // === OPTIMIZATION 3: FRUSTUM CULLING ===
+    // Check if triangle is completely outside screen bounds
+    float minX_f = min(min(screenPos1.x, screenPos2.x), screenPos3.x);
+    float maxX_f = max(max(screenPos1.x, screenPos2.x), screenPos3.x);
+    float minY_f = min(min(screenPos1.y, screenPos2.y), screenPos3.y);
+    float maxY_f = max(max(screenPos1.y, screenPos2.y), screenPos3.y);
+    
+    // Skip if triangle is completely outside screen
+    if (maxX_f < 0 || minX_f >= screenWidth || maxY_f < 0 || minY_f >= screenHeight) {
+        return;
+    }
+
+    // Calculate bounding box (clamped to screen)
+    int minX = max(0, (int)minX_f);
+    int maxX = min(screenWidth - 1, (int)maxX_f);
+    int minY = max(0, (int)minY_f);
+    int maxY = min(screenHeight - 1, (int)maxY_f);
+
+    // === OPTIMIZATION 4: SMALL TRIANGLE CULLING ===
+    // Skip triangles that are too small (less than 1 pixel area)
+    // FIX: Use fabs instead of abs for floating point values
+    float triangleArea = fabs((screenPos2.x - screenPos1.x) * (screenPos3.y - screenPos1.y) - 
+                            (screenPos3.x - screenPos1.x) * (screenPos2.y - screenPos1.y)) * 0.5f;
+    if (triangleArea < 0.5f) {
+        return; // Triangle too small to render
+    }
+
+    // === OPTIMIZATION 5: PRECOMPUTE BARYCENTRIC CONSTANTS ===
+    // FIX: Rename variables to avoid conflict with kernel parameter names
+    float2 edge1 = screenPos3.xy - screenPos1.xy;  // Renamed from v0
+    float2 edge2 = screenPos2.xy - screenPos1.xy;  // Renamed from v1
+    
+    float dot00 = dot(edge1, edge1);
+    float dot01 = dot(edge1, edge2);
+    float dot11 = dot(edge2, edge2);
+    
+    float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
+    
+    // Check for degenerate triangle
+    if (isinf(invDenom) || isnan(invDenom)) {
+        return;
+    }
 
     // Rasterize triangle
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
-            // Barycentric coordinates
-            float2 p = (float2)(x + 0.5f, y + 0.5f);
-            float2 v0 = screenPos3.xy - screenPos1.xy;
-            float2 v1 = screenPos2.xy - screenPos1.xy;
-            float2 v2 = p - screenPos1.xy;
+            // === OPTIMIZATION 6: OPTIMIZED BARYCENTRIC CALCULATION ===
+            float2 pixelPos = (float2)(x + 0.5f, y + 0.5f) - screenPos1.xy;  // Renamed from v2
+            
+            float dot02 = dot(edge1, pixelPos);
+            float dot12 = dot(edge2, pixelPos);
 
-            float dot00 = dot(v0, v0);
-            float dot01 = dot(v0, v1);
-            float dot02 = dot(v0, v2);
-            float dot11 = dot(v1, v1);
-            float dot12 = dot(v1, v2);
-
-            float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
             float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
             float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
 
@@ -424,101 +474,104 @@ __kernel void renderTriangles(
                 
                 int pixelIndex = y * screenWidth + x;
                 
-                // Depth test
-                if (ScreenDistances[pixelIndex] == 0.0f || depth < ScreenDistances[pixelIndex]) {
-                    ScreenDistances[pixelIndex] = depth;
-                    
-                    // Store normal
-                    int normalIndex = pixelIndex * 3;
-                    ScreenNormals[normalIndex] = normal.x;
-                    ScreenNormals[normalIndex + 1] = normal.y;
-                    ScreenNormals[normalIndex + 2] = normal.z;
-                    
-                    // Calculate world position for this pixel
-                    float3 worldPos = w * vertex1 + u * vertex2 + v * vertex3;
-                    float3 viewDir = normalize(camPos - worldPos);
-                    float3 normalizedNormal = normalize(normal);
-                    
-                    // === PBR LIGHTING CALCULATION ===
-                    
-                    // Basic light setup (you can make this dynamic)
-                    float3 lightDir = normalize((float3)(1.0f, 1.0f, 1.0f));
-                    float3 lightColor = (float3)(1.0f, 1.0f, 1.0f);
-                    
-                    // FRESNEL CALCULATION (metallic-aware)
-                    float cosTheta = max(0.0f, dot(normalizedNormal, viewDir));
-                    float fresnelBase = pow(1.0f - cosTheta, 5.0f);
-                    float fresnel = mix(0.04f, 1.0f, fresnelBase); // Dielectric base reflectance = 0.04
-                    fresnel = mix(fresnel, 1.0f, Metallic); // Metals have high base reflectance
-                    
-                    // DIFFUSE CALCULATION (metals have no diffuse)
-                    float NdotL = max(0.0f, dot(normalizedNormal, lightDir));
-                    float3 diffuseColor = triangleColor * (1.0f - Metallic); // No diffuse for metals
-                    float3 diffuse = diffuseColor * NdotL * lightColor;
-                    
-                    // SPECULAR/REFLECTION CALCULATION
-                    float3 incident = -viewDir;
-                    float3 reflectedDir = incident - 2.0f * dot(normalizedNormal, incident) * normalizedNormal;
-                    
-                    // Sample screen space reflection first
-                    float3 screenSpaceReflection = sampleScreenSpaceReflectionFiltered(
-                        ScreenColors, ScreenDistances, worldPos, reflectedDir, camPos, camDir, fov,
-                        screenWidth, screenHeight, 50.0f, 32, 0.5f
-                    );
-                    
-                    // Fallback to skybox reflection
-                    float3 skyboxReflection = sampleSkybox(reflectedDir, SkyBoxTop, SkyBoxBottom, 
-                                                           SkyBoxLeft, SkyBoxRight, 
-                                                           SkyBoxFront, SkyBoxBack, 
-                                                           skyBoxWidth, skyBoxHeight);
-                    
-                    // Choose reflection source (prefer SSR if available)
-                    float3 environmentReflection = (length(screenSpaceReflection) > 0.001f) ? 
-                                                  screenSpaceReflection : skyboxReflection;
-                    
-                    // For metals, tint reflections with base color
-                    float3 metallicTint = mix((float3)(1.0f, 1.0f, 1.0f), triangleColor, Metallic);
-                    environmentReflection *= metallicTint;
-                    
-                    // SPECULAR HIGHLIGHT (direct lighting)
-                    float3 halfVector = normalize(lightDir + viewDir);
-                    float NdotH = max(0.0f, dot(normalizedNormal, halfVector));
-                    
-                    // Convert roughness to specular power
-                    float alpha = Roughness * Roughness;
-                    float specularPower = 2.0f / (alpha * alpha) - 2.0f;
-                    specularPower = max(1.0f, specularPower); // Prevent negative values
-                    
-                    float specular = pow(NdotH, specularPower);
-                    float3 specularColor = specular * lightColor * fresnel * NdotL;
-                    
-                    // EMISSION
-                    float3 emissionColor = triangleColor * Emission;
-                    
-                    // COMBINE ALL COMPONENTS
-                    float3 finalColor = diffuse * (1.0f - fresnel) +              // Diffuse (reduced by fresnel)
-                                       environmentReflection * fresnel +           // Environment reflections
-                                       specularColor +                             // Direct specular
-                                       emissionColor;                              // Emission
-                    
-                    // Roughness affects reflection blur (simulated by mixing with diffuse)
-                    float reflectionBlur = Roughness * 0.3f;
-                    finalColor = mix(finalColor, diffuseColor, reflectionBlur);
-                    
-                    // Metallic boost for more dramatic effect
-                    if (Metallic > 0.5f) {
-                        finalColor *= 1.0f + (Metallic - 0.5f) * 0.5f; // Slight brightness boost
-                    }
-                    
-                    // Clamp color values
-                    finalColor = clamp(finalColor, 0.0f, 1.0f);
-                    
-                    // Store color
-                    int colorIndex = pixelIndex * 3;
-                    ScreenColors[colorIndex] = finalColor.x;
-                    ScreenColors[colorIndex + 1] = finalColor.y;
-                    ScreenColors[colorIndex + 2] = finalColor.z;
+                // === OPTIMIZATION 7: EARLY DEPTH TEST ===
+                // Check depth before expensive lighting calculations
+                if (ScreenDistances[pixelIndex] != 0.0f && depth >= ScreenDistances[pixelIndex]) {
+                    continue; // Skip if behind existing geometry
                 }
+                
+                // Update depth buffer
+                ScreenDistances[pixelIndex] = depth;
+                
+                // Store normal
+                int normalIndex = pixelIndex * 3;
+                ScreenNormals[normalIndex] = normal.x;
+                ScreenNormals[normalIndex + 1] = normal.y;
+                ScreenNormals[normalIndex + 2] = normal.z;
+                
+                // Calculate world position for this pixel
+                float3 worldPos = w * vertex1 + u * vertex2 + v * vertex3;
+                float3 viewDir = normalize(camPos - worldPos);
+                float3 normalizedNormal = normalize(normal);
+                
+                // === PBR LIGHTING CALCULATION (unchanged) ===
+                
+                // Basic light setup
+                float3 lightDir = normalize((float3)(1.0f, 1.0f, 1.0f));
+                float3 lightColor = (float3)(1.0f, 1.0f, 1.0f);
+                
+                // FRESNEL CALCULATION
+                float cosTheta = max(0.0f, dot(normalizedNormal, viewDir));
+                float fresnelBase = pow(1.0f - cosTheta, 5.0f);
+                float fresnel = mix(0.04f, 1.0f, fresnelBase);
+                fresnel = mix(fresnel, 1.0f, Metallic);
+                
+                // DIFFUSE CALCULATION
+                float NdotL = max(0.0f, dot(normalizedNormal, lightDir));
+                float3 diffuseColor = triangleColor * (1.0f - Metallic);
+                float3 diffuse = diffuseColor * NdotL * lightColor;
+                
+                // SPECULAR/REFLECTION CALCULATION
+                float3 incident = -viewDir;
+                float3 reflectedDir = incident - 2.0f * dot(normalizedNormal, incident) * normalizedNormal;
+                
+                // Sample screen space reflection first
+                float3 screenSpaceReflection = sampleScreenSpaceReflectionFiltered(
+                    ScreenColors, ScreenDistances, worldPos, reflectedDir, camPos, camDir, fov,
+                    screenWidth, screenHeight, 50.0f, 32, 0.5f
+                );
+                
+                // Fallback to skybox reflection
+                float3 skyboxReflection = sampleSkybox(reflectedDir, SkyBoxTop, SkyBoxBottom, 
+                                                       SkyBoxLeft, SkyBoxRight, 
+                                                       SkyBoxFront, SkyBoxBack, 
+                                                       skyBoxWidth, skyBoxHeight);
+                
+                // Choose reflection source
+                float3 environmentReflection = (length(screenSpaceReflection) > 0.001f) ? 
+                                              screenSpaceReflection : skyboxReflection;
+                
+                // For metals, tint reflections with base color
+                float3 metallicTint = mix((float3)(1.0f, 1.0f, 1.0f), triangleColor, Metallic);
+                environmentReflection *= metallicTint;
+                
+                // SPECULAR HIGHLIGHT
+                float3 halfVector = normalize(lightDir + viewDir);
+                float NdotH = max(0.0f, dot(normalizedNormal, halfVector));
+                
+                float alpha = Roughness * Roughness;
+                float specularPower = 2.0f / (alpha * alpha) - 2.0f;
+                specularPower = max(1.0f, specularPower);
+                
+                float specular = pow(NdotH, specularPower);
+                float3 specularColor = specular * lightColor * fresnel * NdotL;
+                
+                // EMISSION
+                float3 emissionColor = triangleColor * Emission;
+                
+                // COMBINE ALL COMPONENTS
+                float3 finalColor = diffuse * (1.0f - fresnel) +
+                                   environmentReflection * fresnel +
+                                   specularColor +
+                                   emissionColor;
+                
+                // Roughness affects reflection blur
+                float reflectionBlur = Roughness * 0.3f;
+                finalColor = mix(finalColor, diffuseColor, reflectionBlur);
+                
+                // Metallic boost
+                if (Metallic > 0.5f) {
+                    finalColor *= 1.0f + (Metallic - 0.5f) * 0.5f;
+                }
+                
+                // Clamp color values
+                finalColor = clamp(finalColor, 0.0f, 1.0f);
+                
+                // Store color
+                int colorIndex = pixelIndex * 3;
+                ScreenColors[colorIndex] = finalColor.x;
+                ScreenColors[colorIndex + 1] = finalColor.y;
+                ScreenColors[colorIndex + 2] = finalColor.z;
             }
         }
     }
