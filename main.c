@@ -456,23 +456,29 @@ void CreateCube(float centerX, float centerY, float centerZ, float size, struct 
     float v7[3] = {centerX + halfSize, centerY + halfSize, centerZ + halfSize}; // max, max, max
     float v8[3] = {centerX - halfSize, centerY + halfSize, centerZ + halfSize}; // min, max, max
 
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v3[0], v3[1], v3[2], v2[0], v2[1], v2[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v4[0], v4[1], v4[2], v3[0], v3[1], v3[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    // Front face (z = min) - normal pointing towards -Z
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v4[0], v4[1], v4[2], v2[0], v2[1], v2[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v4[0], v4[1], v4[2], v3[0], v3[1], v3[2], v2[0], v2[1], v2[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
     
-    AddTriangle(triangles, v5[0], v5[1], v5[2], v6[0], v6[1], v6[2], v7[0], v7[1], v7[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
-    AddTriangle(triangles, v5[0], v5[1], v5[2], v7[0], v7[1], v7[2], v8[0], v8[1], v8[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    // Back face (z = max) - normal pointing towards +Z
+    AddTriangle(triangles, v6[0], v6[1], v6[2], v7[0], v7[1], v7[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v7[0], v7[1], v7[2], v8[0], v8[1], v8[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
     
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v5[0], v5[1], v5[2], v8[0], v8[1], v8[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v8[0], v8[1], v8[2], v4[0], v4[1], v4[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    // Left face (x = min) - normal pointing towards -X
+    AddTriangle(triangles, v5[0], v5[1], v5[2], v8[0], v8[1], v8[2], v1[0], v1[1], v1[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v8[0], v8[1], v8[2], v4[0], v4[1], v4[2], v1[0], v1[1], v1[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
     
-    AddTriangle(triangles, v2[0], v2[1], v2[2], v3[0], v3[1], v3[2], v7[0], v7[1], v7[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
-    AddTriangle(triangles, v2[0], v2[1], v2[2], v7[0], v7[1], v7[2], v6[0], v6[1], v6[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    // Right face (x = max) - normal pointing towards +X
+    AddTriangle(triangles, v2[0], v2[1], v2[2], v3[0], v3[1], v3[2], v6[0], v6[1], v6[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v3[0], v3[1], v3[2], v7[0], v7[1], v7[2], v6[0], v6[1], v6[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
     
-    AddTriangle(triangles, v4[0], v4[1], v4[2], v8[0], v8[1], v8[2], v7[0], v7[1], v7[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
-    AddTriangle(triangles, v4[0], v4[1], v4[2], v7[0], v7[1], v7[2], v3[0], v3[1], v3[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    // Top face (y = max) - normal pointing towards +Y
+    AddTriangle(triangles, v4[0], v4[1], v4[2], v8[0], v8[1], v8[2], v3[0], v3[1], v3[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v8[0], v8[1], v8[2], v7[0], v7[1], v7[2], v3[0], v3[1], v3[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
     
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
-    AddTriangle(triangles, v1[0], v1[1], v1[2], v6[0], v6[1], v6[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    // Bottom face (y = min) - normal pointing towards -Y
+    AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
+    AddTriangle(triangles, v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
 }
 
 struct Screen {
