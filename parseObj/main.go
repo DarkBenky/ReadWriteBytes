@@ -17,21 +17,17 @@ type Vertex struct {
 
 type Triangle struct {
 	Vertex1, Vertex2, Vertex3, Normal Vertex
-	AdditionalFields                  []float32
-	index                             int32 // Index of the triangle in the original OBJ file
+	Roughness                         float32
+	Metallic                          float32
+	Emission                          float32
+	Color                             [3]float32 // RGB color
+	index                             int32      // Index of the triangle in the original OBJ file
 }
 
 type FileObject struct {
 	// File Header
-	FileSize             uint32
-	HeaderSize           uint32
-	TriangleMetadataSize uint32
-
-	// Triangle Metadata (part of header)
-	AdditionalFieldsCount uint32
-	TriangleStructSize    uint32
-	FieldNames            []byte // Will be null-terminated when written to file
-
+	FileSize           uint32
+	TriangleStructSize uint32
 	// Triangle Data
 	Triangles []Triangle
 }
@@ -291,15 +287,11 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 	fileObj := &FileObject{}
 	if additionFieldsNames == nil {
 		fileObj = &FileObject{
-			Triangles:             allTriangles,
-			AdditionalFieldsCount: uint32(0),
+			Triangles: allTriangles,
 		}
 	} else {
-		cStrings := convertStringToCString(additionFieldsNames)
 		fileObj = &FileObject{
-			Triangles:             allTriangles,
-			AdditionalFieldsCount: uint32(len(additionFieldsNames)),
-			FieldNames:            cStrings,
+			Triangles:  allTriangles,
 		}
 	}
 	return fileObj, nil
@@ -339,17 +331,10 @@ func writeFile(filename string, obj *FileObject) error {
 	defer file.Close()
 	w := bufio.NewWriter(file)
 
-	triangleStructSize := uint32(48 + int(obj.AdditionalFieldsCount)*4)
-	triangleMetadataSize := uint32(4 + len(obj.FieldNames) + 4)
-	headerSize := uint32(4) + triangleMetadataSize
-	fileSize := uint32(4+4) + headerSize + uint32(len(obj.Triangles))*triangleStructSize
+	triangleStructSize := uint32(unsafe.Sizeof(Triangle{}))
+	fileSize := uint32(4+4) + uint32(len(obj.Triangles))*triangleStructSize
 
 	w.Write(uint32ToBytes(fileSize))             // File Size
-	w.Write(uint32ToBytes(headerSize))           // Header Size
-	w.Write(uint32ToBytes(triangleMetadataSize)) // Triangle Metadata Size
-
-	w.Write(uint32ToBytes(obj.AdditionalFieldsCount)) // Additional Fields Count
-	w.Write(obj.FieldNames)                           // Field Names
 	w.Write(uint32ToBytes(triangleStructSize))        // Triangle Struct Size
 
 	for _, tri := range obj.Triangles {
@@ -368,9 +353,6 @@ func writeFile(filename string, obj *FileObject) error {
 		w.Write(float32ToBytes(tri.Normal.Y))
 		w.Write(float32ToBytes(tri.Normal.Z))
 		// Additional fields
-		for _, f := range tri.AdditionalFields {
-			w.Write(float32ToBytes(f))
-		}
 	}
 
 	return w.Flush()
@@ -742,7 +724,7 @@ func ReadBVHFromFile(filename string) (*BVHLinear, error) {
 
 // Helper function to check if a node is a leaf
 func isLeafNode(node BVHNode) bool {
-    return node.TriangleIndex >= 0
+	return node.TriangleIndex >= 0
 }
 
 func main() {
@@ -782,6 +764,5 @@ func main() {
 
 	println("OBJ file parsed and written successfully.")
 	println("File size:", obj.FileSize)
-	println("Header size:", obj.HeaderSize)
 	println("Number of triangles:", len(obj.Triangles))
 }

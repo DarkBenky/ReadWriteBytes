@@ -3739,6 +3739,18 @@ float rand_01() {
     return (float)rand() / RAND_MAX;
 }
 
+void writeFile(const char *filename, struct Triangles *triangles) {
+    FILE *file = fopen(filename, "w");
+    if (file) {
+        fprintf(file, "%s", data);
+        fclose(file);
+    } else {
+        printf("Error: Could not open file %s for writing\n", filename);
+    }
+
+    uint32_t triangleStructSize = sizeof(struct Triangle);
+}
+
 int main() {
     // load sky box texture
     struct SkyBox skyBox;
