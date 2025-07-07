@@ -3739,16 +3739,49 @@ float rand_01() {
     return (float)rand() / RAND_MAX;
 }
 
-void writeFile(const char *filename, struct Triangles *triangles) {
-    FILE *file = fopen(filename, "w");
-    if (file) {
-        fprintf(file, "%s", data);
-        fclose(file);
-    } else {
+void writeFileTriangles(const char *filename, struct Triangles *triangles) {
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
         printf("Error: Could not open file %s for writing\n", filename);
+        return;
     }
 
-    uint32_t triangleStructSize = sizeof(struct Triangle);
+    // Triangle size: 3 vertices (36) + normal (12) + roughness (4) + metallic (4) + emission (4) + colors (12) + index (4) = 76 bytes
+    #define SIZE_OF_TRIANGLE 76
+    uint32_t fileSize = 8 + triangles->count * SIZE_OF_TRIANGLE; // 8 bytes header (file size + triangle count)
+    uint32_t triangleStructSize = SIZE_OF_TRIANGLE; // Create a variable to hold the value
+
+    fwrite(&fileSize, sizeof(uint32_t), 1, file); // Write file size
+    fwrite(&triangleStructSize, sizeof(uint32_t), 1, file); // Write triangle struct size (fixed)
+
+    for (int i = 0; i < triangles->count; i++) {
+        int idx = i * 3;
+        
+        // Write vertices (36 bytes)
+        fwrite(&triangles->v1[idx], sizeof(float), 3, file);     // 12 bytes
+        fwrite(&triangles->v2[idx], sizeof(float), 3, file);     // 12 bytes  
+        fwrite(&triangles->v3[idx], sizeof(float), 3, file);     // 12 bytes
+        
+        // Write normals (12 bytes)
+        fwrite(&triangles->normals[idx], sizeof(float), 3, file); // 12 bytes
+        
+        // Write material properties (12 bytes)
+        fwrite(&triangles->Roughness[i], sizeof(float), 1, file); // 4 bytes
+        fwrite(&triangles->Metallic[i], sizeof(float), 1, file);  // 4 bytes
+        fwrite(&triangles->Emission[i], sizeof(float), 1, file);  // 4 bytes
+        
+        // Write colors (12 bytes)
+        fwrite(&triangles->colors[idx], sizeof(float), 3, file);  // 12 bytes
+        
+        // Write triangle index (4 bytes)
+        uint32_t triangleIndex = i;
+        fwrite(&triangleIndex, sizeof(uint32_t), 1, file);        // 4 bytes
+    }
+
+    fclose(file);
+    printf("Triangles written to %s successfully\n", filename);
+    printf("File size: %u bytes\n", fileSize);
+    printf("Triangle count: %d\n", triangles->count);
 }
 
 int main() {
@@ -4027,7 +4060,7 @@ int main() {
         printf("Failed to initialize OpenCL, falling back to CPU\n");
     }
 
-    
+    writeFileTriangles("triangles.bin", triangles);
 
     while (1) {
         // Calculate delta step based on elapsed time since the last frame

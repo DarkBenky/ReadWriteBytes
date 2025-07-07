@@ -291,7 +291,7 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 		}
 	} else {
 		fileObj = &FileObject{
-			Triangles:  allTriangles,
+			Triangles: allTriangles,
 		}
 	}
 	return fileObj, nil
@@ -334,8 +334,8 @@ func writeFile(filename string, obj *FileObject) error {
 	triangleStructSize := uint32(unsafe.Sizeof(Triangle{}))
 	fileSize := uint32(4+4) + uint32(len(obj.Triangles))*triangleStructSize
 
-	w.Write(uint32ToBytes(fileSize))             // File Size
-	w.Write(uint32ToBytes(triangleStructSize))        // Triangle Struct Size
+	w.Write(uint32ToBytes(fileSize))           // File Size
+	w.Write(uint32ToBytes(triangleStructSize)) // Triangle Struct Size
 
 	for _, tri := range obj.Triangles {
 		// vertices + normal (48 bytes)
@@ -353,9 +353,64 @@ func writeFile(filename string, obj *FileObject) error {
 		w.Write(float32ToBytes(tri.Normal.Y))
 		w.Write(float32ToBytes(tri.Normal.Z))
 		// Additional fields
+		w.Write(float32ToBytes(tri.Roughness))
+		w.Write(float32ToBytes(tri.Metallic))
+		w.Write(float32ToBytes(tri.Emission))
+		w.Write(float32ToBytes(tri.Color[0]))
+		w.Write(float32ToBytes(tri.Color[1]))
+		w.Write(float32ToBytes(tri.Color[2]))
+		// Triangle index
+		w.Write(uint32ToBytes(uint32(tri.index)))
 	}
 
 	return w.Flush()
+}
+
+func readFile(filename string) (*FileObject, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var fileObj FileObject
+	header := make([]byte, 8) // 4 bytes for file size + 4
+	headerSize := 8
+	if _, err := file.Read(header); err != nil {
+		return nil, err
+	}
+	fileObj.FileSize = bytesToUint32(header[:4])
+	fileObj.TriangleStructSize = bytesToUint32(header[4:8])
+	numberOfTriangles := (fileObj.FileSize - uint32(headerSize)) / fileObj.TriangleStructSize
+	println("Number of triangles:", numberOfTriangles)
+	fileObj.Triangles = make([]Triangle, numberOfTriangles)
+	triangleSize := int(fileObj.TriangleStructSize)
+	for i := 0; i < int(numberOfTriangles); i++ {
+		triangleData := make([]byte, triangleSize)
+		if _, err := file.Read(triangleData); err != nil {
+			return nil, err
+		}
+		tri := &fileObj.Triangles[i]
+		tri.Vertex1.X = *(*float32)(unsafe.Pointer(&triangleData[0]))
+		tri.Vertex1.Y = *(*float32)(unsafe.Pointer(&triangleData[4]))
+		tri.Vertex1.Z = *(*float32)(unsafe.Pointer(&triangleData[8]))
+		tri.Vertex2.X = *(*float32)(unsafe.Pointer(&triangleData[12]))
+		tri.Vertex2.Y = *(*float32)(unsafe.Pointer(&triangleData[16]))
+		tri.Vertex2.Z = *(*float32)(unsafe.Pointer(&triangleData[20]))
+		tri.Vertex3.X = *(*float32)(unsafe.Pointer(&triangleData[24]))
+		tri.Vertex3.Y = *(*float32)(unsafe.Pointer(&triangleData[28]))
+		tri.Vertex3.Z = *(*float32)(unsafe.Pointer(&triangleData[32]))
+		tri.Normal.X = *(*float32)(unsafe.Pointer(&triangleData[36]))
+		tri.Normal.Y = *(*float32)(unsafe.Pointer(&triangleData[40]))
+		tri.Normal.Z = *(*float32)(unsafe.Pointer(&triangleData[44]))
+		tri.Roughness = *(*float32)(unsafe.Pointer(&triangleData[48]))
+		tri.Metallic = *(*float32)(unsafe.Pointer(&triangleData[52]))
+		tri.Emission = *(*float32)(unsafe.Pointer(&triangleData[56]))
+		tri.Color[0] = *(*float32)(unsafe.Pointer(&triangleData[60]))
+		tri.Color[1] = *(*float32)(unsafe.Pointer(&triangleData[64]))
+		tri.Color[2] = *(*float32)(unsafe.Pointer(&triangleData[68]))
+		tri.index = int32(bytesToUint32(triangleData[72:76]))
+	}
+	return &fileObj, nil
 }
 
 func getFileSize(filename string) (uint32, error) {
@@ -729,6 +784,11 @@ func isLeafNode(node BVHNode) bool {
 
 func main() {
 	obj, err := parseObjFile("test.obj", nil)
+	if err != nil {
+		panic(err)
+	}
+
+	obj, err = readFile("triangles.bin")
 	if err != nil {
 		panic(err)
 	}
