@@ -387,10 +387,10 @@ int initializeSkyboxBuffers(struct OpenCLContext *ocl, struct SkyBox *skyBox) {
 
 void CreateBoardPlane(float centerX, float centerY, float centerZ, float size, int numberOfSquares, struct Triangles *triangles) {
     // Define two alternating colors for checkerboard pattern
-    float color1R = 0.9f, color1G = 0.9f, color1B = 0.9f; // Light color (white-ish)
-    float color2R = 0.1f, color2G = 0.1f, color2B = 0.1f; // Dark color (black-ish)
-    float Metallic = 0.95f, Roughness = 0.75f, Emission = 0.25f; // Material properties
-    float Metallic1 = 0.0f, Roughness1 = 0.0f, Emission1 = 0.85f; // Material properties
+    float color1R = 0.995f, color1G = 0.98f, color1B = 0.92f; // Light color (white-ish)
+    float color2R = 0.05f, color2G = 0.01f, color2B = 0.01f; // Dark color (black-ish)
+    float Metallic = 0.01f, Roughness = 0.955f, Emission = 0.0f; // Material properties
+    float Metallic1 = 0.995f, Roughness1 = 0.02f, Emission1 = 0.02f; // Material properties
     
     for (int i = 0; i < numberOfSquares; i++) {
         for (int j = 0; j < numberOfSquares; j++) {
@@ -4132,6 +4132,7 @@ int main() {
         CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
     }
 
+    CreateCube(0.0f, 0.0f, 0.0f, 100.0f, triangles, 1.0f, 1.0f, 1.0f, 0.01f, 0.01f, 0.01f);
 
     struct OpenCLContext ocl;
     int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox);
