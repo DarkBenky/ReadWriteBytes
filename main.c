@@ -176,6 +176,7 @@ struct OpenCLContext {
     cl_kernel normals_kernel;
     cl_kernel triangle_kernel;  // Add triangle kernel
     cl_kernel skybox_kernel;
+    cl_kernel applyReflections_kernel;
     // buffers
     cl_mem buffer_points;
     cl_mem buffer_velocities;
@@ -193,6 +194,9 @@ struct OpenCLContext {
     cl_mem buffer_triangle_v3;
     cl_mem buffer_triangle_normals;
     cl_mem buffer_screen_colors;
+    cl_mem buffer_screen_material_roughness;
+    cl_mem buffer_screen_material_metallic;
+    cl_mem buffer_screen_material_emission;
 
     // Triangle properties
     cl_mem buffer_triangle_roughness;
@@ -386,7 +390,7 @@ void CreateBoardPlane(float centerX, float centerY, float centerZ, float size, i
     float color1R = 0.9f, color1G = 0.9f, color1B = 0.9f; // Light color (white-ish)
     float color2R = 0.1f, color2G = 0.1f, color2B = 0.1f; // Dark color (black-ish)
     float Metallic = 0.95f, Roughness = 0.75f, Emission = 0.25f; // Material properties
-    float Metallic1 = 0.10f, Roughness1 = 0.25f, Emission1 = 0.85f; // Material properties
+    float Metallic1 = 0.0f, Roughness1 = 0.0f, Emission1 = 0.85f; // Material properties
     
     for (int i = 0; i < numberOfSquares; i++) {
         for (int j = 0; j < numberOfSquares; j++) {
@@ -542,17 +546,66 @@ void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct
     }
 }
 
+void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox) {
+    cl_int err;
+    
+    // Set kernel arguments for applyReflections
+    cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+    cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+    cl_float fov = camera->fov;
+    cl_int screen_width = ScreenWidth;
+    cl_int screen_height = ScreenHeight;
+    cl_int skybox_width = skyBox->top->width;
+    cl_int skybox_height = skyBox->top->height;
+    
+    err = clSetKernelArg(ocl->applyReflections_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 1, sizeof(cl_mem), &ocl->buffer_distances);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 2, sizeof(cl_mem), &ocl->buffer_normals);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 3, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 4, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 5, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 6, sizeof(cl_float3), &cam_pos);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 7, sizeof(cl_float3), &cam_dir);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 8, sizeof(cl_float), &fov);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 9, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 10, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 11, sizeof(cl_mem), &ocl->buffer_skybox_top);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 12, sizeof(cl_mem), &ocl->buffer_skybox_bottom);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 13, sizeof(cl_mem), &ocl->buffer_skybox_left);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 14, sizeof(cl_mem), &ocl->buffer_skybox_right);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 15, sizeof(cl_mem), &ocl->buffer_skybox_front);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 16, sizeof(cl_mem), &ocl->buffer_skybox_back);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 17, sizeof(cl_int), &skybox_width);
+    err |= clSetKernelArg(ocl->applyReflections_kernel, 18, sizeof(cl_int), &skybox_height);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting applyReflections kernel arguments: %d\n", err);
+        return;
+    }
+    
+    // Execute reflection kernel
+    size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->applyReflections_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error executing applyReflections kernel: %d\n", err);
+        return;
+    }
+    
+    clFinish(ocl->queue);
+    printf("Applied reflections successfully\n");
+}
+
 void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen, struct SkyBox *skyBox) {
     if (triangles->count == 0) return;
     
     cl_int err;
     
-    // Only set the camera parameters that change each frame
+    // Set camera parameters that change each frame
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
     cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
     cl_float fov = camera->fov;
     
-    // Only update arguments 6-8 (camera data)
+    // Update camera arguments (indices 6-8)
     err = clSetKernelArg(ocl->triangle_kernel, 6, sizeof(cl_float3), &cam_pos);
     err |= clSetKernelArg(ocl->triangle_kernel, 7, sizeof(cl_float3), &cam_dir);
     err |= clSetKernelArg(ocl->triangle_kernel, 8, sizeof(cl_float), &fov);
@@ -3030,14 +3083,15 @@ int uploadTriangleDataOnce(struct OpenCLContext *ocl, struct Triangles *triangle
 int setupStaticKernelArguments(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox) {
     cl_int err;
     
-    // Set all the static arguments that never change
     cl_int screen_width = ScreenWidth;
     cl_int screen_height = ScreenHeight;
     cl_int num_triangles = triangles->count;
-    cl_int skybox_width = skyBox->top->width;
-    cl_int skybox_height = skyBox->top->height;
     
-    // Set static buffer arguments (0-5, 9-24)
+    // Correct argument indices based on kernel signature:
+    // renderTriangles(v1, v2, v3, normals, ScreenDistances, ScreenNormals, camPos, camDir, fov, 
+    //                screenWidth, screenHeight, numTriangles, TriangleColors, ScreenColors, 
+    //                roughness, metallic, emission)
+    
     err = clSetKernelArg(ocl->triangle_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
     err |= clSetKernelArg(ocl->triangle_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
     err |= clSetKernelArg(ocl->triangle_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
@@ -3052,28 +3106,19 @@ int setupStaticKernelArguments(struct OpenCLContext *ocl, struct Triangles *tria
     err |= clSetKernelArg(ocl->triangle_kernel, 11, sizeof(cl_int), &num_triangles);
     err |= clSetKernelArg(ocl->triangle_kernel, 12, sizeof(cl_mem), &ocl->buffer_triangle_colors);
     err |= clSetKernelArg(ocl->triangle_kernel, 13, sizeof(cl_mem), &ocl->buffer_screen_colors);
-    
-    // Skybox arguments (14-21)
-    err |= clSetKernelArg(ocl->triangle_kernel, 14, sizeof(cl_mem), &ocl->buffer_skybox_top);
-    err |= clSetKernelArg(ocl->triangle_kernel, 15, sizeof(cl_mem), &ocl->buffer_skybox_bottom);
-    err |= clSetKernelArg(ocl->triangle_kernel, 16, sizeof(cl_mem), &ocl->buffer_skybox_left);
-    err |= clSetKernelArg(ocl->triangle_kernel, 17, sizeof(cl_mem), &ocl->buffer_skybox_right);
-    err |= clSetKernelArg(ocl->triangle_kernel, 18, sizeof(cl_mem), &ocl->buffer_skybox_front);
-    err |= clSetKernelArg(ocl->triangle_kernel, 19, sizeof(cl_mem), &ocl->buffer_skybox_back);
-    err |= clSetKernelArg(ocl->triangle_kernel, 20, sizeof(cl_int), &skybox_width);
-    err |= clSetKernelArg(ocl->triangle_kernel, 21, sizeof(cl_int), &skybox_height);
-    
-    // Triangle material properties (22-24)
-    err |= clSetKernelArg(ocl->triangle_kernel, 22, sizeof(cl_mem), &ocl->buffer_triangle_roughness);
-    err |= clSetKernelArg(ocl->triangle_kernel, 23, sizeof(cl_mem), &ocl->buffer_triangle_metallic);
-    err |= clSetKernelArg(ocl->triangle_kernel, 24, sizeof(cl_mem), &ocl->buffer_triangle_emission);
+    err |= clSetKernelArg(ocl->triangle_kernel, 14, sizeof(cl_mem), &ocl->buffer_triangle_roughness);
+    err |= clSetKernelArg(ocl->triangle_kernel, 15, sizeof(cl_mem), &ocl->buffer_triangle_metallic);
+    err |= clSetKernelArg(ocl->triangle_kernel, 16, sizeof(cl_mem), &ocl->buffer_triangle_emission);
+    // screen materials properties
+    err |= clSetKernelArg(ocl->triangle_kernel, 17, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
+    err |= clSetKernelArg(ocl->triangle_kernel, 18, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
+    err |= clSetKernelArg(ocl->triangle_kernel, 19, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
     
     if (err != CL_SUCCESS) {
         printf("Error setting static triangle kernel arguments: %d\n", err);
         return 0;
     }
     
-    printf("Static kernel arguments set successfully\n");
     return 1;
 }
 
@@ -3165,6 +3210,13 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         return 0;
     }
 
+    // Create applyReflections kernel
+    ocl->applyReflections_kernel = clCreateKernel(ocl->program, "applyReflections", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating applyReflections kernel: %d\n", err);
+        return 0;
+    }
+
     // Create skybox kernel
     ocl->skybox_kernel = clCreateKernel(ocl->program, "renderSkyBox", &err);
     if (err != CL_SUCCESS) {
@@ -3190,6 +3242,26 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
                                        NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating points buffer: %d\n", err);
+        return 0;
+    }
+
+    // crete screen material properties buffers
+    ocl->buffer_screen_material_roughness = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
+                                           ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating screen material roughness buffer: %d\n", err);
+        return 0;
+    }
+    ocl->buffer_screen_material_metallic = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
+                                           ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating screen material metallic buffer: %d\n", err);
+        return 0;
+    }
+    ocl->buffer_screen_material_emission = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
+                                           ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating screen material emission buffer: %d\n", err);
         return 0;
     }
     
@@ -3428,6 +3500,9 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     renderSkyboxOpenCL(ocl, camera, skyBox); // You'll need to pass skyBox as parameter
     // *** TRIANGLE RENDERING ***
     renderTrianglesOpenCL(ocl, triangles, camera, screen, skyBox);
+    // *** Screen Space Projection Kernel and sky box ***
+    applyReflectionsOpenCL(ocl, camera, skyBox);
+
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
@@ -3701,6 +3776,7 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
     if (ocl->triangle_kernel) clReleaseKernel(ocl->triangle_kernel);
     if (ocl->blur_kernel) clReleaseKernel(ocl->blur_kernel);
     if (ocl->normals_kernel) clReleaseKernel(ocl->normals_kernel);
+    if (ocl->applyReflections_kernel) clReleaseKernel(ocl->applyReflections_kernel);
     
     if (ocl->program) clReleaseProgram(ocl->program);
     if (ocl->queue) clReleaseCommandQueue(ocl->queue);
@@ -3785,6 +3861,8 @@ void writeFileTriangles(const char *filename, struct Triangles *triangles) {
 }
 
 int main() {
+    srand(time(NULL));
+
     // load sky box texture
     struct SkyBox skyBox;
     if (!loadSkyBox(&skyBox)) {
@@ -4049,6 +4127,7 @@ int main() {
         float b = (float)rand_01();
         float Roughness = (float)rand_01();
         float Metallic = (float)rand_01();
+        // float Metallic = 0.0f; // Set Metallic to 1.0f for all cubes
         float Emissive = (float)rand_01();
         CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
     }

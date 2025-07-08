@@ -321,18 +321,12 @@ __kernel void renderTriangles(
     const int numTriangles,
     __global const float *TriangleColors,
     __global float *ScreenColors,
-    // skybox parameters
-    __global const float *SkyBoxTop,
-    __global const float *SkyBoxBottom, 
-    __global const float *SkyBoxLeft,
-    __global const float *SkyBoxRight,
-    __global const float *SkyBoxFront,
-    __global const float *SkyBoxBack,
-    const int skyBoxWidth,
-    const int skyBoxHeight,
     __global const float* roughness,
     __global const float* metallic,
-    __global const float* emission
+    __global const float* emission,
+    __global float *ScreenMaterialRoughness,
+    __global float *ScreenMaterialMetallic,
+    __global float *ScreenMaterialEmission
 ) {
     int triangleId = get_global_id(0);
     if (triangleId >= numTriangles) return;
@@ -358,23 +352,20 @@ __kernel void renderTriangles(
                                    TriangleColors[triangleId * 3 + 2]);
 
     // === OPTIMIZATION 1: BACK-FACE CULLING ===
-    // Calculate view direction to triangle center
     float3 triangleCenter = (vertex1 + vertex2 + vertex3) / 3.0f;
     float3 viewDirection = normalize(camPos - triangleCenter);
     
-    // If normal points away from camera, skip this triangle
     if (dot(normal, viewDirection) < 0.0f) {
-        return; // Back-face culling - skip this triangle
+        return; // Back-face culling
     }
 
-    // Compute camera basis (moved after culling to save computation)
+    // Compute camera basis
     float3 forward = normalize(camDir);
     float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
     float3 right = normalize(cross(forward, camUp));
     float3 up = cross(right, forward);
 
     // === OPTIMIZATION 2: EARLY DEPTH REJECTION ===
-    // Quick check if triangle is behind camera
     float3 rel1 = vertex1 - camPos;
     float3 rel2 = vertex2 - camPos;
     float3 rel3 = vertex3 - camPos;
@@ -383,64 +374,52 @@ __kernel void renderTriangles(
     float depth2 = dot(rel2, forward);
     float depth3 = dot(rel3, forward);
     
-    // If all vertices are behind camera, skip
     if (depth1 <= 0.001f && depth2 <= 0.001f && depth3 <= 0.001f) return;
-    
-    // If any vertex is behind camera, this triangle needs clipping (skip for now)
     if (depth1 <= 0.001f || depth2 <= 0.001f || depth3 <= 0.001f) return;
 
     // Project vertices to screen space
     float3 screenPos1, screenPos2, screenPos3;
     
-    // Project vertex1
     float fovScale1 = 1.0f / (depth1 * fov);
     screenPos1.x = dot(rel1, right) * fovScale1 * screenWidth * 0.5f + screenWidth * 0.5f;
     screenPos1.y = -dot(rel1, up) * fovScale1 * screenHeight * 0.5f + screenHeight * 0.5f;
     screenPos1.z = depth1;
 
-    // Project vertex2
     float fovScale2 = 1.0f / (depth2 * fov);
     screenPos2.x = dot(rel2, right) * fovScale2 * screenWidth * 0.5f + screenWidth * 0.5f;
     screenPos2.y = -dot(rel2, up) * fovScale2 * screenHeight * 0.5f + screenHeight * 0.5f;
     screenPos2.z = depth2;
 
-    // Project vertex3
     float fovScale3 = 1.0f / (depth3 * fov);
     screenPos3.x = dot(rel3, right) * fovScale3 * screenWidth * 0.5f + screenWidth * 0.5f;
     screenPos3.y = -dot(rel3, up) * fovScale3 * screenHeight * 0.5f + screenHeight * 0.5f;
     screenPos3.z = depth3;
 
     // === OPTIMIZATION 3: FRUSTUM CULLING ===
-    // Check if triangle is completely outside screen bounds
     float minX_f = min(min(screenPos1.x, screenPos2.x), screenPos3.x);
     float maxX_f = max(max(screenPos1.x, screenPos2.x), screenPos3.x);
     float minY_f = min(min(screenPos1.y, screenPos2.y), screenPos3.y);
     float maxY_f = max(max(screenPos1.y, screenPos2.y), screenPos3.y);
     
-    // Skip if triangle is completely outside screen
     if (maxX_f < 0 || minX_f >= screenWidth || maxY_f < 0 || minY_f >= screenHeight) {
         return;
     }
 
-    // Calculate bounding box (clamped to screen)
     int minX = max(0, (int)minX_f);
     int maxX = min(screenWidth - 1, (int)maxX_f);
     int minY = max(0, (int)minY_f);
     int maxY = min(screenHeight - 1, (int)maxY_f);
 
     // === OPTIMIZATION 4: SMALL TRIANGLE CULLING ===
-    // Skip triangles that are too small (less than 1 pixel area)
-    // FIX: Use fabs instead of abs for floating point values
     float triangleArea = fabs((screenPos2.x - screenPos1.x) * (screenPos3.y - screenPos1.y) - 
                             (screenPos3.x - screenPos1.x) * (screenPos2.y - screenPos1.y)) * 0.5f;
     if (triangleArea < 0.5f) {
-        return; // Triangle too small to render
+        return;
     }
 
     // === OPTIMIZATION 5: PRECOMPUTE BARYCENTRIC CONSTANTS ===
-    // FIX: Rename variables to avoid conflict with kernel parameter names
-    float2 edge1 = screenPos3.xy - screenPos1.xy;  // Renamed from v0
-    float2 edge2 = screenPos2.xy - screenPos1.xy;  // Renamed from v1
+    float2 edge1 = screenPos3.xy - screenPos1.xy;
+    float2 edge2 = screenPos2.xy - screenPos1.xy;
     
     float dot00 = dot(edge1, edge1);
     float dot01 = dot(edge1, edge2);
@@ -448,7 +427,6 @@ __kernel void renderTriangles(
     
     float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
     
-    // Check for degenerate triangle
     if (isinf(invDenom) || isnan(invDenom)) {
         return;
     }
@@ -456,8 +434,7 @@ __kernel void renderTriangles(
     // Rasterize triangle
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
-            // === OPTIMIZATION 6: OPTIMIZED BARYCENTRIC CALCULATION ===
-            float2 pixelPos = (float2)(x + 0.5f, y + 0.5f) - screenPos1.xy;  // Renamed from v2
+            float2 pixelPos = (float2)(x + 0.5f, y + 0.5f) - screenPos1.xy;
             
             float dot02 = dot(edge1, pixelPos);
             float dot12 = dot(edge2, pixelPos);
@@ -465,25 +442,20 @@ __kernel void renderTriangles(
             float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
             float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
 
-            // Check if point is in triangle
             if (u >= 0 && v >= 0 && u + v <= 1) {
                 float w = 1.0f - u - v;
                 
-                // Interpolate depth
                 float depth = w * screenPos1.z + u * screenPos2.z + v * screenPos3.z;
                 
                 int pixelIndex = y * screenWidth + x;
                 
-                // === OPTIMIZATION 7: EARLY DEPTH TEST ===
-                // Check depth before expensive lighting calculations
                 if (ScreenDistances[pixelIndex] != 0.0f && depth >= ScreenDistances[pixelIndex]) {
-                    continue; // Skip if behind existing geometry
+                    continue;
                 }
                 
-                // Update depth buffer
                 ScreenDistances[pixelIndex] = depth;
                 
-                // Store normal
+                // Store normal and material properties for post-processing
                 int normalIndex = pixelIndex * 3;
                 ScreenNormals[normalIndex] = normal.x;
                 ScreenNormals[normalIndex + 1] = normal.y;
@@ -494,48 +466,16 @@ __kernel void renderTriangles(
                 float3 viewDir = normalize(camPos - worldPos);
                 float3 normalizedNormal = normalize(normal);
                 
-                // === PBR LIGHTING CALCULATION (unchanged) ===
-                
-                // Basic light setup
+                // === SIMPLIFIED PBR LIGHTING (NO REFLECTIONS) ===
                 float3 lightDir = normalize((float3)(1.0f, 1.0f, 1.0f));
                 float3 lightColor = (float3)(1.0f, 1.0f, 1.0f);
                 
-                // FRESNEL CALCULATION
-                float cosTheta = max(0.0f, dot(normalizedNormal, viewDir));
-                float fresnelBase = pow(1.0f - cosTheta, 5.0f);
-                float fresnel = mix(0.04f, 1.0f, fresnelBase);
-                fresnel = mix(fresnel, 1.0f, Metallic);
-                
-                // DIFFUSE CALCULATION
+                // Basic diffuse lighting
                 float NdotL = max(0.0f, dot(normalizedNormal, lightDir));
                 float3 diffuseColor = triangleColor * (1.0f - Metallic);
                 float3 diffuse = diffuseColor * NdotL * lightColor;
                 
-                // SPECULAR/REFLECTION CALCULATION
-                float3 incident = -viewDir;
-                float3 reflectedDir = incident - 2.0f * dot(normalizedNormal, incident) * normalizedNormal;
-                
-                // Sample screen space reflection first
-                float3 screenSpaceReflection = sampleScreenSpaceReflectionFiltered(
-                    ScreenColors, ScreenDistances, worldPos, reflectedDir, camPos, camDir, fov,
-                    screenWidth, screenHeight, 50.0f, 32, 0.5f
-                );
-                
-                // Fallback to skybox reflection
-                float3 skyboxReflection = sampleSkybox(reflectedDir, SkyBoxTop, SkyBoxBottom, 
-                                                       SkyBoxLeft, SkyBoxRight, 
-                                                       SkyBoxFront, SkyBoxBack, 
-                                                       skyBoxWidth, skyBoxHeight);
-                
-                // Choose reflection source
-                float3 environmentReflection = (length(screenSpaceReflection) > 0.001f) ? 
-                                              screenSpaceReflection : skyboxReflection;
-                
-                // For metals, tint reflections with base color
-                float3 metallicTint = mix((float3)(1.0f, 1.0f, 1.0f), triangleColor, Metallic);
-                environmentReflection *= metallicTint;
-                
-                // SPECULAR HIGHLIGHT
+                // Basic specular highlight
                 float3 halfVector = normalize(lightDir + viewDir);
                 float NdotH = max(0.0f, dot(normalizedNormal, halfVector));
                 
@@ -544,25 +484,13 @@ __kernel void renderTriangles(
                 specularPower = max(1.0f, specularPower);
                 
                 float specular = pow(NdotH, specularPower);
-                float3 specularColor = specular * lightColor * fresnel * NdotL;
+                float3 specularColor = specular * lightColor * 0.1f; // Reduced specular
                 
-                // EMISSION
+                // Emission
                 float3 emissionColor = triangleColor * Emission;
                 
-                // COMBINE ALL COMPONENTS
-                float3 finalColor = diffuse * (1.0f - fresnel) +
-                                   environmentReflection * fresnel +
-                                   specularColor +
-                                   emissionColor;
-                
-                // Roughness affects reflection blur
-                float reflectionBlur = Roughness * 0.3f;
-                finalColor = mix(finalColor, diffuseColor, reflectionBlur);
-                
-                // Metallic boost
-                if (Metallic > 0.5f) {
-                    finalColor *= 1.0f + (Metallic - 0.5f) * 0.5f;
-                }
+                // Combine without reflections
+                float3 finalColor = diffuse + specularColor + emissionColor;
                 
                 // Clamp color values
                 finalColor = clamp(finalColor, 0.0f, 1.0f);
@@ -572,9 +500,115 @@ __kernel void renderTriangles(
                 ScreenColors[colorIndex] = finalColor.x;
                 ScreenColors[colorIndex + 1] = finalColor.y;
                 ScreenColors[colorIndex + 2] = finalColor.z;
+
+                // Store material properties
+                ScreenMaterialRoughness[pixelIndex] = Roughness;
+                ScreenMaterialMetallic[pixelIndex] = Metallic;
+                ScreenMaterialEmission[pixelIndex] = Emission;
             }
         }
     }
+}
+
+float3 reflect(const float3 I, const float3 N) {
+    float3 n = normalize(N);
+    float3 i = normalize(I);
+    return i - 2.0f * dot(i, n) * n;
+}
+
+__kernel void applyReflections(
+    __global float *ScreenColors,
+    __global const float *ScreenDistances,
+    __global const float *ScreenNormals,
+    __global const float *ScreenMaterialRoughness,  // Per-pixel material data
+    __global const float *ScreenMaterialMetallic,
+    __global const float *ScreenMaterialEmission,
+    const float3 camPos,
+    const float3 camDir,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight,
+    // Skybox parameters
+    __global const float *SkyBoxTop,
+    __global const float *SkyBoxBottom,
+    __global const float *SkyBoxLeft,
+    __global const float *SkyBoxRight,
+    __global const float *SkyBoxFront,
+    __global const float *SkyBoxBack,
+    const int skyBoxWidth,
+    const int skyBoxHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int pixelIndex = y * screenWidth + x;
+    float depth = ScreenDistances[pixelIndex];
+    
+    if (depth <= 0.001f) return; // Skip empty pixels
+    
+    // Get pixel normal and material properties
+    int normalIndex = pixelIndex * 3;
+    float3 normal = (float3)(ScreenNormals[normalIndex], 
+                             ScreenNormals[normalIndex + 1], 
+                             ScreenNormals[normalIndex + 2]);
+    
+    // Reconstruct world position
+    float3 forward = normalize(camDir);
+    float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
+    float3 right = normalize(cross(forward, camUp));
+    float3 up = cross(right, forward);
+    
+    float ndcX = (x + 0.5f) / screenWidth * 2.0f - 1.0f;
+    float ndcY = -((y + 0.5f) / screenHeight * 2.0f - 1.0f);
+    
+    float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
+    float3 worldPos = camPos + rayDir * depth;
+    
+    // Calculate reflection
+    float3 viewDir = normalize(camPos - worldPos);
+    float3 reflectedDir = reflect(-viewDir, normalize(normal));
+    
+    // Sample screen space reflection
+    float3 screenSpaceReflection = sampleScreenSpaceReflectionFiltered(
+        ScreenColors, ScreenDistances, worldPos, reflectedDir, camPos, camDir, fov,
+        screenWidth, screenHeight, 5000.0f, 8000, 0.5f
+    );
+    
+    // Fallback to skybox
+    float3 skyboxReflection = sampleSkybox(reflectedDir, SkyBoxTop, SkyBoxBottom,
+                                           SkyBoxLeft, SkyBoxRight,
+                                           SkyBoxFront, SkyBoxBack,
+                                           skyBoxWidth, skyBoxHeight);
+    
+    // Choose reflection source
+    float3 environmentReflection = (length(screenSpaceReflection) > 0.001f) ? 
+                                     screenSpaceReflection : skyboxReflection;
+    
+    // Retrieve material properties
+    float roughness = ScreenMaterialRoughness[pixelIndex]; 
+    float metallic  = ScreenMaterialMetallic[pixelIndex];
+    float emission  = ScreenMaterialEmission[pixelIndex]; // New material property
+    
+    // Compute Fresnel factor and adjust using metallic factor
+    float fresnel = 0.04f + (1.0f - 0.04f) * pow(1.0f - max(0.0f, dot(normal, viewDir)), 5.0f);
+    fresnel = mix(fresnel, 1.0f, metallic);
+    
+    // Adjust the reflection blend factor by reducing it with higher emission
+    float reflectionFactor = fresnel * (1.0f - roughness) * (1.0f - emission);
+    
+    // Blend reflection with existing base color
+    int colorIndex = pixelIndex * 3;
+    float3 baseColor = (float3)(ScreenColors[colorIndex], 
+                                ScreenColors[colorIndex + 1], 
+                                ScreenColors[colorIndex + 2]);
+    
+    float3 finalColor = mix(baseColor, environmentReflection, reflectionFactor);
+    
+    ScreenColors[colorIndex]     = clamp(finalColor.x, 0.0f, 1.0f);
+    ScreenColors[colorIndex + 1] = clamp(finalColor.y, 0.0f, 1.0f);
+    ScreenColors[colorIndex + 2] = clamp(finalColor.z, 0.0f, 1.0f);
 }
 
 // 3. Calculate smooth normals from blurred distance field using gradients
