@@ -94,11 +94,11 @@ func ensureCounterClockwise(vertices []Vertex) []Vertex {
 }
 
 func Normalize(v Vertex) Vertex {
-	length := v.X*v.X + v.Y*v.Y + v.Z*v.Z
+	length := float32(math.Sqrt(float64(v.X*v.X + v.Y*v.Y + v.Z*v.Z)))
 	if length == 0 {
 		return Vertex{0, 0, 0}
 	}
-	invLength := 1.0 / float32(length)
+	invLength := 1.0 / length
 	return Vertex{v.X * invLength, v.Y * invLength, v.Z * invLength}
 }
 
@@ -107,7 +107,26 @@ func Triangulate(v []Vertex) []Triangle {
 		return nil
 	}
 	if len(v) == 3 {
-		return []Triangle{{Vertex1: v[0], Vertex2: v[1], Vertex3: v[2]}}
+		// FIXED: Calculate proper normal for simple triangle
+		edge1 := Vertex{v[1].X - v[0].X, v[1].Y - v[0].Y, v[1].Z - v[0].Z}
+		edge2 := Vertex{v[2].X - v[0].X, v[2].Y - v[0].Y, v[2].Z - v[0].Z}
+
+		normal := Vertex{
+			edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+			edge1.Z*edge2.X - edge1.X*edge2.Z,
+			edge1.X*edge2.Y - edge1.Y*edge2.X,
+		}
+		normal = Normalize(normal)
+
+		// FIX: Flip the normal to point outward
+		normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+
+		return []Triangle{{
+			Vertex1: v[0],
+			Vertex2: v[1],
+			Vertex3: v[2],
+			Normal:  normal,
+		}}
 	}
 
 	vertices := ensureCounterClockwise(v)
@@ -129,15 +148,29 @@ func Triangulate(v []Vertex) []Triangle {
 			next := (i + 1) % len(indices)
 
 			if isEar(vertices, indices[prev], indices[curr], indices[next]) {
+				// FIXED: Calculate proper normal for ear triangle
+				v1 := vertices[indices[prev]]
+				v2 := vertices[indices[curr]]
+				v3 := vertices[indices[next]]
+
+				edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
+				edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
+
+				normal := Vertex{
+					edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+					edge1.Z*edge2.X - edge1.X*edge2.Z,
+					edge1.X*edge2.Y - edge1.Y*edge2.X,
+				}
+				normal = Normalize(normal)
+
+				// FIX: Flip the normal to point outward
+				normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+
 				triangle := Triangle{
-					Vertex1: vertices[indices[prev]],
-					Vertex2: vertices[indices[curr]],
-					Vertex3: vertices[indices[next]],
-					Normal: Normalize(Vertex{
-						X: vertices[indices[curr]].Y - vertices[indices[prev]].Y,
-						Y: vertices[indices[curr]].X - vertices[indices[prev]].X,
-						Z: vertices[indices[curr]].Z - vertices[indices[prev]].Z,
-					}),
+					Vertex1: v1,
+					Vertex2: v2,
+					Vertex3: v3,
+					Normal:  normal,
 				}
 				triangles = append(triangles, triangle)
 
@@ -157,10 +190,29 @@ func Triangulate(v []Vertex) []Triangle {
 	}
 
 	if len(indices) == 3 {
+		// FIXED: Calculate proper normal for final triangle
+		v1 := vertices[indices[0]]
+		v2 := vertices[indices[1]]
+		v3 := vertices[indices[2]]
+
+		edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
+		edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
+
+		normal := Vertex{
+			edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+			edge1.Z*edge2.X - edge1.X*edge2.Z,
+			edge1.X*edge2.Y - edge1.Y*edge2.X,
+		}
+		normal = Normalize(normal)
+
+		// FIX: Flip the normal to point outward
+		normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+
 		triangle := Triangle{
-			Vertex1: vertices[indices[0]],
-			Vertex2: vertices[indices[1]],
-			Vertex3: vertices[indices[2]],
+			Vertex1: v1,
+			Vertex2: v2,
+			Vertex3: v3,
+			Normal:  normal,
 		}
 		triangles = append(triangles, triangle)
 	}
@@ -168,20 +220,161 @@ func Triangulate(v []Vertex) []Triangle {
 	return triangles
 }
 
-func convertStringToCString(s []string) []byte {
-	size := 0
-	for _, str := range s {
-		size += len(str) + 1 // +1 for null terminator
+type Material struct {
+	Name  string
+	Kd    [3]float32 // Diffuse
+	Ks    [3]float32 // Specular
+	Ke    [3]float32 // Emissive
+	Ns    float32    // Shininess
+	Ni    float32    // Refractive index
+	D     float32    // Transparency
+	Illum int        // Illumination model
+}
+
+type TriangleMaterial struct {
+	Name      string
+	Roughness float32
+	Metallic  float32
+	Emission  float32
+	Color     [3]float32 // RGB color
+}
+
+func extractMaterials(filename string) ([]Material, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
 	}
-	result := make([]byte, size)
-	for i, str := range s {
-		copy(result[i*len(str):], str)
-		result[i*len(str)+len(str)] = 0 // null terminator
+	defer file.Close()
+
+	var (
+		materials []Material
+		current   *Material = nil
+	)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
+		}
+
+		switch parts[0] {
+		case "newmtl":
+			if len(parts) < 2 {
+				continue
+			}
+			// If we were building a material, save it
+			if current != nil {
+				materials = append(materials, *current)
+			}
+			current = &Material{Name: parts[1]}
+
+		case "Kd":
+			if current != nil && len(parts) == 4 {
+				current.Kd = [3]float32{parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])}
+			}
+		case "Ks":
+			if current != nil && len(parts) == 4 {
+				current.Ks = [3]float32{parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])}
+			}
+		case "Ke":
+			if current != nil && len(parts) == 4 {
+				current.Ke = [3]float32{parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])}
+			}
+		case "Ns":
+			if current != nil && len(parts) == 2 {
+				current.Ns = parseFloat(parts[1])
+			}
+		case "Ni":
+			if current != nil && len(parts) == 2 {
+				current.Ni = parseFloat(parts[1])
+			}
+		case "d":
+			if current != nil && len(parts) == 2 {
+				current.D = parseFloat(parts[1])
+			}
+		case "illum":
+			if current != nil && len(parts) == 2 {
+				current.Illum = int(parseFloat(parts[1]))
+			}
+		}
 	}
-	return result
+
+	// Add last material if one was being parsed
+	if current != nil {
+		materials = append(materials, *current)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return materials, nil
+}
+
+func parseFloat(s string) float32 {
+	f, _ := strconv.ParseFloat(s, 32)
+	return float32(f)
+}
+
+func extractTriangleMaterials(filename string) ([]TriangleMaterial, error) {
+	materials, err := extractMaterials(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var triangleMaterials []TriangleMaterial
+	for _, mat := range materials {
+		// Convert Ns (0–1000) to roughness (0–1)
+		roughness := float32(0.95)
+
+		// Convert Ni (1.0–1.5) to metallic (0–1)
+		metallic := float32(0.05)
+
+		// Emission is grayscale average of Ke
+		emission := float32(0.5)
+
+		triangleMaterials = append(triangleMaterials, TriangleMaterial{
+			Name:      mat.Name,
+			Roughness: roughness,
+			Metallic:  metallic,
+			Emission:  emission,
+			Color:     mat.Kd,
+		})
+	}
+
+	return triangleMaterials, nil
+}
+
+func clamp(val, min, max float32) float32 {
+	if val < min {
+		return min
+	}
+	if val > max {
+		return max
+	}
+	return val
 }
 
 func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, error) {
+	// Load materials first
+	materialPath := strings.TrimSuffix(filename, ".obj") + ".mtl"
+	triangleMaterials, err := extractTriangleMaterials(materialPath)
+	if err != nil {
+		fmt.Printf("Warning: Could not load materials from %s: %v\n", materialPath, err)
+		// Continue without materials - will use defaults
+	}
+
+	// Create a map for quick material lookup by name
+	materialMap := make(map[string]TriangleMaterial)
+	for _, mat := range triangleMaterials {
+		materialMap[mat.Name] = mat
+	}
+
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -190,6 +383,9 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 
 	var vertices []Vertex
 	var faces [][]int
+	var currentMaterial string = "" // Track current material being used
+	var faceMaterials []string      // Store which material each face uses
+
 	scanner := bufio.NewScanner(file)
 
 	for scanner.Scan() {
@@ -217,20 +413,46 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 					})
 				}
 			}
-		case "f":
-			if len(parts) >= 4 {
-				var faceIndices []int
-				for i := 1; i < len(parts); i++ {
-					indexStr := strings.Split(parts[i], "/")[0]
-					index, err := strconv.Atoi(indexStr)
-					if err == nil {
-						faceIndices = append(faceIndices, index-1)
-					}
-				}
-				if len(faceIndices) >= 3 {
-					faces = append(faces, faceIndices)
-				}
+		case "usemtl":
+			// Material usage directive
+			if len(parts) >= 2 {
+				currentMaterial = parts[1]
 			}
+		case "f":
+            if len(parts) >= 4 {
+                var faceIndices []int
+                for i := 1; i < len(parts); i++ {
+                    // FIXED: Handle different face formats
+                    // f v1 v2 v3 (vertex only)
+                    // f v1/vt1 v2/vt2 v3/vt3 (vertex/texture)
+                    // f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3 (vertex/texture/normal)
+                    // f v1//vn1 v2//vn2 v3//vn3 (vertex//normal)
+                    
+                    indexParts := strings.Split(parts[i], "/")
+                    if len(indexParts) > 0 && indexParts[0] != "" {
+                        index, err := strconv.Atoi(indexParts[0])
+                        if err == nil {
+                            // Handle negative indices (relative to end of vertex list)
+                            if index < 0 {
+                                index = len(vertices) + index + 1
+                            }
+                            if index > 0 && index <= len(vertices) {
+                                faceIndices = append(faceIndices, index-1)
+                            } else {
+                                fmt.Printf("Warning: Invalid vertex index %d (have %d vertices)\n", index, len(vertices))
+                                break
+                            }
+                        } else {
+                            fmt.Printf("Warning: Could not parse vertex index: %s\n", indexParts[0])
+                            break
+                        }
+                    }
+                }
+                if len(faceIndices) >= 3 {
+                    faces = append(faces, faceIndices)
+                    faceMaterials = append(faceMaterials, currentMaterial)
+                }
+            }
 		}
 	}
 
@@ -241,23 +463,73 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 	var allTriangles []Triangle
 	triangleIndex := int32(0)
 
-	for _, face := range faces {
+	for faceIdx, face := range faces {
+		// Get material for this face
+		var material TriangleMaterial
+		if faceIdx < len(faceMaterials) && faceMaterials[faceIdx] != "" {
+			if mat, exists := materialMap[faceMaterials[faceIdx]]; exists {
+				material = mat
+			} else {
+				// Default material if not found
+				material = TriangleMaterial{
+					Name:      "default",
+					Roughness: 0.5,
+					Metallic:  0.0,
+					Emission:  0.0,
+					Color:     [3]float32{0.8, 0.8, 0.8}, // Default gray
+				}
+			}
+		} else {
+			// Default material if no material specified
+			material = TriangleMaterial{
+				Name:      "default",
+				Roughness: 0.5,
+				Metallic:  0.0,
+				Emission:  0.0,
+				Color:     [3]float32{0.8, 0.8, 0.8}, // Default gray
+			}
+		}
+
 		if len(face) == 3 {
 			// Simple triangle case
 			if face[0] >= 0 && face[0] < len(vertices) &&
 				face[1] >= 0 && face[1] < len(vertices) &&
 				face[2] >= 0 && face[2] < len(vertices) {
+
+				// FIXED: Calculate face normal with correct winding order
+				v1, v2, v3 := vertices[face[0]], vertices[face[1]], vertices[face[2]]
+
+				// Use counter-clockwise winding order for outward-facing normals
+				edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
+				edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
+
+				// Cross product: edge1 × edge2 for counter-clockwise winding
+				normal := Vertex{
+					edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+					edge1.Z*edge2.X - edge1.X*edge2.Z,
+					edge1.X*edge2.Y - edge1.Y*edge2.X,
+				}
+				normal = Normalize(normal)
+
+				// FIX: Flip the normal to point outward
+				normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+
 				triangle := Triangle{
-					Vertex1: vertices[face[0]],
-					Vertex2: vertices[face[1]],
-					Vertex3: vertices[face[2]],
-					index:   triangleIndex, // Correct assignment
+					Vertex1:   vertices[face[0]],
+					Vertex2:   vertices[face[1]],
+					Vertex3:   vertices[face[2]],
+					Normal:    normal,
+					Roughness: material.Roughness,
+					Metallic:  material.Metallic,
+					Emission:  material.Emission,
+					Color:     material.Color,
+					index:     triangleIndex,
 				}
 				allTriangles = append(allTriangles, triangle)
-				triangleIndex++ // Increment after each triangle
+				triangleIndex++
 			}
 		} else if len(face) > 3 {
-			// Polygon case - triangulate
+			// FIXED: Polygon case - triangulate with consistent winding order
 			faceVertices := make([]Vertex, len(face))
 			valid := true
 			for i, idx := range face {
@@ -271,12 +543,30 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 			if valid {
 				triangles := Triangulate(faceVertices)
 				for _, tri := range triangles {
+					// Recalculate normal for triangulated face to ensure consistency
+					edge1 := Vertex{tri.Vertex2.X - tri.Vertex1.X, tri.Vertex2.Y - tri.Vertex1.Y, tri.Vertex2.Z - tri.Vertex1.Z}
+					edge2 := Vertex{tri.Vertex3.X - tri.Vertex1.X, tri.Vertex3.Y - tri.Vertex1.Y, tri.Vertex3.Z - tri.Vertex1.Z}
+
+					normal := Vertex{
+						edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+						edge1.Z*edge2.X - edge1.X*edge2.Z,
+						edge1.X*edge2.Y - edge1.Y*edge2.X,
+					}
+					normal = Normalize(normal)
+
+					// FIX: Flip the normal to point outward
+					normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+
 					triangle := Triangle{
-						Vertex1: tri.Vertex1,
-						Vertex2: tri.Vertex2,
-						Vertex3: tri.Vertex3,
-						Normal:  tri.Normal,
-						index:   triangleIndex, // Correct assignment
+						Vertex1:   tri.Vertex1,
+						Vertex2:   tri.Vertex2,
+						Vertex3:   tri.Vertex3,
+						Normal:    normal,
+						Roughness: material.Roughness,
+						Metallic:  material.Metallic,
+						Emission:  material.Emission,
+						Color:     material.Color,
+						index:     triangleIndex,
 					}
 					allTriangles = append(allTriangles, triangle)
 					triangleIndex++
@@ -284,16 +574,16 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 			}
 		}
 	}
-	fileObj := &FileObject{}
-	if additionFieldsNames == nil {
-		fileObj = &FileObject{
-			Triangles: allTriangles,
-		}
-	} else {
-		fileObj = &FileObject{
-			Triangles: allTriangles,
-		}
+
+	fileObj := &FileObject{
+		Triangles: allTriangles,
 	}
+
+	fmt.Printf("Loaded %d triangles with materials\n", len(allTriangles))
+	if len(triangleMaterials) > 0 {
+		fmt.Printf("Found %d materials in MTL file\n", len(triangleMaterials))
+	}
+
 	return fileObj, nil
 }
 
@@ -783,15 +1073,15 @@ func isLeafNode(node BVHNode) bool {
 }
 
 func main() {
-	obj, err := parseObjFile("test.obj", nil)
+	obj, err := parseObjFile("room.obj", nil)
 	if err != nil {
 		panic(err)
 	}
 
-	obj, err = readFile("triangles.bin")
-	if err != nil {
-		panic(err)
-	}
+	// obj, err = readFile("triangles.bin")
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	// Build BVH
 	bvhLinear := &BVHLinear{}
@@ -806,23 +1096,21 @@ func main() {
 	fmt.Println("BVH written to output.bvh")
 
 	// Original file writing
-	err = writeFile("output.bin", obj)
+	err = writeFile("room.bin", obj)
 	if err != nil {
 		panic(err)
 	}
 
-	realFileSize, err := getFileSize("output.bin")
+	realFileSize, err := getFileSize("room.bin")
 	if err != nil {
 		panic(err)
 	}
-	encodedFileSize, err := getEncodedFileSize("output.bin")
+	encodedFileSize, err := getEncodedFileSize("room.bin")
 	if err != nil {
 		panic(err)
 	}
 	fmt.Println("Encoded file size:", encodedFileSize)
 	fmt.Println("Real file size:", realFileSize)
 
-	println("OBJ file parsed and written successfully.")
-	println("File size:", obj.FileSize)
 	println("Number of triangles:", len(obj.Triangles))
 }

@@ -27,8 +27,8 @@
 #define FrameCount 30
 #define NUM_THREADS 0
 #define USE_GPU 1
-#define NUMBER_OF_TRIANGLES 100000
-#define NUMBER_OF_CUBES 200
+#define NUMBER_OF_TRIANGLES 1000000
+#define NUMBER_OF_CUBES 1
 pthread_t threads[NUM_THREADS];
 
 struct RawImage {
@@ -3860,6 +3860,74 @@ void writeFileTriangles(const char *filename, struct Triangles *triangles) {
     printf("Triangle count: %d\n", triangles->count);
 }
 
+void readFileTriangles(const char *filename, struct Triangles *triangles, float scale) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error: Could not open file %s for reading\n", filename);
+        return;
+    }
+
+    uint32_t fileSize, triangleStructSize;
+    fread(&fileSize, sizeof(uint32_t), 1, file); // Read file size
+    fread(&triangleStructSize, sizeof(uint32_t), 1, file); // Read triangle struct size
+
+    int triangleCount = (fileSize - 8) / triangleStructSize; // Calculate number of triangles
+    printf("Reading %d triangles from %s with scale factor %.2f\n", triangleCount, filename, scale);
+
+    // Check if we exceed the maximum number of triangles
+    if (triangleCount > NUMBER_OF_TRIANGLES) {
+        printf("Warning: File contains %d triangles, but maximum is %d. Only loading first %d triangles.\n", 
+               triangleCount, NUMBER_OF_TRIANGLES, NUMBER_OF_TRIANGLES);
+        triangleCount = NUMBER_OF_TRIANGLES;
+    }
+
+    triangles->count += triangleCount;
+
+    // Read triangle data and apply scaling
+    for (int i = 0; i < triangleCount; i++) {
+        int idx = i * 3;
+
+        // Read vertices and apply scale
+        float v1[3], v2[3], v3[3];
+        fread(v1, sizeof(float), 3, file);
+        fread(v2, sizeof(float), 3, file);
+        fread(v3, sizeof(float), 3, file);
+        
+        // Apply scaling to vertices
+        triangles->v1[idx]     = v1[0] * scale;
+        triangles->v1[idx + 1] = v1[1] * scale;
+        triangles->v1[idx + 2] = v1[2] * scale;
+        
+        triangles->v2[idx]     = v2[0] * scale;
+        triangles->v2[idx + 1] = v2[1] * scale;
+        triangles->v2[idx + 2] = v2[2] * scale;
+        
+        triangles->v3[idx]     = v3[0] * scale;
+        triangles->v3[idx + 1] = v3[1] * scale;
+        triangles->v3[idx + 2] = v3[2] * scale;
+
+        // Read normals (normals don't need scaling, they should remain unit vectors)
+        fread(&triangles->normals[idx], sizeof(float), 3, file);
+        
+        // Read material properties (unchanged)
+        fread(&triangles->Roughness[i], sizeof(float), 1, file);
+        fread(&triangles->Metallic[i], sizeof(float), 1, file);
+        fread(&triangles->Emission[i], sizeof(float), 1, file);
+        
+        // Read colors (unchanged)
+        fread(&triangles->colors[idx], sizeof(float), 3, file);
+        
+        // Read triangle index (skip it since we don't use it)
+        uint32_t triangleIndex;
+        fread(&triangleIndex, sizeof(uint32_t), 1, file);
+    }
+    
+    fclose(file);
+    printf("Triangles read from %s successfully with scale factor %.2f\n", filename, scale);
+    printf("File size: %u bytes\n", fileSize);
+    printf("Triangle count: %d\n", triangles->count);
+}
+
 int main() {
     srand(time(NULL));
 
@@ -4115,7 +4183,7 @@ int main() {
     }
 
     clock_t lastTime = clock();
-    CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
+    // CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
     for (int i = 0; i <= NUMBER_OF_CUBES; i++) {
         float x = (float)(rand_01() * 500.0f);
@@ -4132,15 +4200,19 @@ int main() {
         CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
     }
 
-    CreateCube(0.0f, 0.0f, 0.0f, 100.0f, triangles, 1.0f, 1.0f, 1.0f, 0.01f, 0.01f, 0.01f);
+    printf("Triangles count: %d\n", triangles->count);
+
+    writeFileTriangles("triangles.bin", triangles);
+
+    readFileTriangles("parseObj/room.bin", triangles, 25.0f);
+
+    printf("Triangles count after reading: %d\n", triangles->count);
 
     struct OpenCLContext ocl;
     int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox);
     if (!useOpenCL) {
         printf("Failed to initialize OpenCL, falling back to CPU\n");
     }
-
-    writeFileTriangles("triangles.bin", triangles);
 
     while (1) {
         // Calculate delta step based on elapsed time since the last frame
