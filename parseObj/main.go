@@ -118,8 +118,8 @@ func Triangulate(v []Vertex) []Triangle {
 		}
 		normal = Normalize(normal)
 
-		// FIX: Flip the normal to point outward
-		normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+		// Keep normal as calculated (outward-facing for CCW winding)
+		// normal = Vertex{normal.X, normal.Y, normal.Z}
 
 		return []Triangle{{
 			Vertex1: v[0],
@@ -163,8 +163,8 @@ func Triangulate(v []Vertex) []Triangle {
 				}
 				normal = Normalize(normal)
 
-				// FIX: Flip the normal to point outward
-				normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+				// Keep normal as calculated (outward-facing for CCW winding)
+				// normal = Vertex{normal.X, normal.Y, normal.Z}
 
 				triangle := Triangle{
 					Vertex1: v1,
@@ -205,8 +205,8 @@ func Triangulate(v []Vertex) []Triangle {
 		}
 		normal = Normalize(normal)
 
-		// FIX: Flip the normal to point outward
-		normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+		// Keep normal as calculated (outward-facing for CCW winding)
+		// normal = Vertex{normal.X, normal.Y, normal.Z}
 
 		triangle := Triangle{
 			Vertex1: v1,
@@ -330,13 +330,13 @@ func extractTriangleMaterials(filename string) ([]TriangleMaterial, error) {
 	var triangleMaterials []TriangleMaterial
 	for _, mat := range materials {
 		// Convert Ns (0–1000) to roughness (0–1)
-		roughness := float32(0.95)
+		roughness := float32(0.99)
 
 		// Convert Ni (1.0–1.5) to metallic (0–1)
-		metallic := float32(0.05)
+		metallic := float32(0.01)
 
 		// Emission is grayscale average of Ke
-		emission := float32(0.5)
+		emission := float32(0.0)
 
 		triangleMaterials = append(triangleMaterials, TriangleMaterial{
 			Name:      mat.Name,
@@ -419,40 +419,40 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 				currentMaterial = parts[1]
 			}
 		case "f":
-            if len(parts) >= 4 {
-                var faceIndices []int
-                for i := 1; i < len(parts); i++ {
-                    // FIXED: Handle different face formats
-                    // f v1 v2 v3 (vertex only)
-                    // f v1/vt1 v2/vt2 v3/vt3 (vertex/texture)
-                    // f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3 (vertex/texture/normal)
-                    // f v1//vn1 v2//vn2 v3//vn3 (vertex//normal)
-                    
-                    indexParts := strings.Split(parts[i], "/")
-                    if len(indexParts) > 0 && indexParts[0] != "" {
-                        index, err := strconv.Atoi(indexParts[0])
-                        if err == nil {
-                            // Handle negative indices (relative to end of vertex list)
-                            if index < 0 {
-                                index = len(vertices) + index + 1
-                            }
-                            if index > 0 && index <= len(vertices) {
-                                faceIndices = append(faceIndices, index-1)
-                            } else {
-                                fmt.Printf("Warning: Invalid vertex index %d (have %d vertices)\n", index, len(vertices))
-                                break
-                            }
-                        } else {
-                            fmt.Printf("Warning: Could not parse vertex index: %s\n", indexParts[0])
-                            break
-                        }
-                    }
-                }
-                if len(faceIndices) >= 3 {
-                    faces = append(faces, faceIndices)
-                    faceMaterials = append(faceMaterials, currentMaterial)
-                }
-            }
+			if len(parts) >= 4 {
+				var faceIndices []int
+				for i := 1; i < len(parts); i++ {
+					// FIXED: Handle different face formats
+					// f v1 v2 v3 (vertex only)
+					// f v1/vt1 v2/vt2 v3/vt3 (vertex/texture)
+					// f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3 (vertex/texture/normal)
+					// f v1//vn1 v2//vn2 v3//vn3 (vertex//normal)
+
+					indexParts := strings.Split(parts[i], "/")
+					if len(indexParts) > 0 && indexParts[0] != "" {
+						index, err := strconv.Atoi(indexParts[0])
+						if err == nil {
+							// Handle negative indices (relative to end of vertex list)
+							if index < 0 {
+								index = len(vertices) + index + 1
+							}
+							if index > 0 && index <= len(vertices) {
+								faceIndices = append(faceIndices, index-1)
+							} else {
+								fmt.Printf("Warning: Invalid vertex index %d (have %d vertices)\n", index, len(vertices))
+								break
+							}
+						} else {
+							fmt.Printf("Warning: Could not parse vertex index: %s\n", indexParts[0])
+							break
+						}
+					}
+				}
+				if len(faceIndices) >= 3 {
+					faces = append(faces, faceIndices)
+					faceMaterials = append(faceMaterials, currentMaterial)
+				}
+			}
 		}
 	}
 
@@ -474,8 +474,8 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 				material = TriangleMaterial{
 					Name:      "default",
 					Roughness: 0.5,
-					Metallic:  0.0,
-					Emission:  0.0,
+					Metallic:  0.5,
+					Emission:  0.5,
 					Color:     [3]float32{0.8, 0.8, 0.8}, // Default gray
 				}
 			}
@@ -484,8 +484,8 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 			material = TriangleMaterial{
 				Name:      "default",
 				Roughness: 0.5,
-				Metallic:  0.0,
-				Emission:  0.0,
+				Metallic:  0.5,
+				Emission:  0.5,
 				Color:     [3]float32{0.8, 0.8, 0.8}, // Default gray
 			}
 		}
@@ -511,8 +511,8 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 				}
 				normal = Normalize(normal)
 
-				// FIX: Flip the normal to point outward
-				normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+				// Keep normal as calculated (outward-facing for CCW winding)
+				// normal = Vertex{normal.X, normal.Y, normal.Z}
 
 				triangle := Triangle{
 					Vertex1:   vertices[face[0]],
@@ -554,8 +554,8 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 					}
 					normal = Normalize(normal)
 
-					// FIX: Flip the normal to point outward
-					normal = Vertex{-normal.X, -normal.Y, -normal.Z}
+					// Keep normal as calculated (outward-facing for CCW winding)
+					// normal = Vertex{normal.X, normal.Y, normal.Z}
 
 					triangle := Triangle{
 						Vertex1:   tri.Vertex1,
@@ -1073,7 +1073,7 @@ func isLeafNode(node BVHNode) bool {
 }
 
 func main() {
-	obj, err := parseObjFile("room.obj", nil)
+	obj, err := parseObjFile("monkey.obj", nil)
 	if err != nil {
 		panic(err)
 	}

@@ -782,7 +782,8 @@ __kernel void renderTriangles(
     float3 triangleCenter = (vertex1 + vertex2 + vertex3) / 3.0f;
     float3 viewDirection = normalize(camPos - triangleCenter);
     
-    if (dot(faceNormal, viewDirection) < 0.0f) {
+    // Fixed: For back-face culling, cull when normal points away from viewer
+    if (dot(faceNormal, viewDirection) <= 0.0f) {
         return; // Back-face culling
     }
 
@@ -891,35 +892,16 @@ __kernel void renderTriangles(
                 ScreenNormals[normalIndex + 1] = interpolatedNormal.y;
                 ScreenNormals[normalIndex + 2] = interpolatedNormal.z;
                 
-                // Calculate world position for this pixel
-                float3 worldPos = w * vertex1 + u * vertex2 + v * vertex3;
-                float3 viewDir = normalize(camPos - worldPos);
+                // === SIMPLE SHADING ===
+                // Just use a simple normal-based shading for depth perception
+                float3 simpleLight = normalize((float3)(0.3f, 0.7f, 0.5f)); // Soft light direction
+                float lightIntensity = max(0.65f, dot(interpolatedNormal, simpleLight)); // Clamp to avoid too dark areas
                 
-                // === SIMPLIFIED PBR LIGHTING (using interpolated normal) ===
-                float3 lightDir = normalize((float3)(1.0f, 1.0f, 1.0f));
-                float3 lightColor = (float3)(1.0f, 1.0f, 1.0f);
+                float3 finalColor = triangleColor * lightIntensity;
                 
-                // Basic diffuse lighting with interpolated normal
-                float NdotL = max(0.0f, dot(interpolatedNormal, lightDir));
-                float3 diffuseColor = triangleColor * (1.0f - Metallic);
-                float3 diffuse = diffuseColor * NdotL * lightColor;
-                
-                // Basic specular highlight with interpolated normal
-                float3 halfVector = normalize(lightDir + viewDir);
-                float NdotH = max(0.0f, dot(interpolatedNormal, halfVector));
-                
-                float alpha = Roughness * Roughness;
-                float specularPower = 2.0f / (alpha * alpha) - 2.0f;
-                specularPower = max(1.0f, specularPower);
-                
-                float specular = pow(NdotH, specularPower);
-                float3 specularColor = specular * lightColor * 0.1f; // Reduced specular
-                
-                // Emission
+                // Add emission if present
                 float3 emissionColor = triangleColor * Emission;
-                
-                // Combine without reflections
-                float3 finalColor = diffuse + specularColor + emissionColor;
+                finalColor += emissionColor;
                 
                 // Clamp color values
                 finalColor = clamp(finalColor, 0.0f, 1.0f);

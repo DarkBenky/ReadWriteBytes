@@ -27,7 +27,7 @@
 #define FrameCount 30
 #define NUM_THREADS 0
 #define USE_GPU 1
-#define NUMBER_OF_TRIANGLES 1000000
+#define NUMBER_OF_TRIANGLES 100000
 #define NUMBER_OF_CUBES 1
 pthread_t threads[NUM_THREADS];
 
@@ -496,8 +496,9 @@ struct Screen {
     float normals[ScreenWidth][ScreenHeight][3]; // Normal vectors for lighting
 };
 
-void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox) {
+void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox, float *gpuTimeMs) {
     cl_int err;
+    cl_event kernel_event;  // Add this line
     
     // Set skybox kernel arguments
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
@@ -528,22 +529,25 @@ void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct
         return;
     }
     
-    // Execute skybox kernel
+    // Execute skybox kernel with event for profiling
     size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
-    err = clEnqueueNDRangeKernel(ocl->queue, ocl->skybox_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL);
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->skybox_kernel, 2, NULL, global_work_size, NULL, 0, NULL, &kernel_event);
     if (err != CL_SUCCESS) {
         printf("Error executing skybox kernel: %d\n", err);
         return;
     }
 
     clFinish(ocl->queue);
-    float test_pixel[3];
-    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_screen_colors, CL_TRUE, 0, 
-                             3 * sizeof(float), test_pixel, 0, NULL, NULL);
-    if (err == CL_SUCCESS) {
-        printf("Skybox test pixel: R=%.3f G=%.3f B=%.3f\n", 
-               test_pixel[0], test_pixel[1], test_pixel[2]);
+
+    // Get profiling info if gpuTimeMs is not NULL
+    if (gpuTimeMs != NULL) {
+        cl_ulong start_time, end_time;
+        clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
+        clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END, sizeof(end_time), &end_time, NULL);
+        *gpuTimeMs = (end_time - start_time) * 1e-6; // convert ns to ms
     }
+
+    clReleaseEvent(kernel_event); // Always release events to avoid leaks
 }
 
 void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox) {
@@ -683,12 +687,20 @@ struct TimePartition {
     float projectLightParticlesTime;
 };
 
+struct GPUTimings {
+    float renderSkyBoxTime;
+    float renderTrianglesTime;
+    float applyReflectionsTime;
+    float applyBlurTime;
+    float readBackTime;
+};
+
 // Function prototypes
 void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
 void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
 void renderParticlesToBuffer(struct RenderThreadData *data);
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings);
 
 void createThreads() {
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -2888,7 +2900,7 @@ void saveScreenColor(struct Screen *screen, const char *filename) {
     fclose(file);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct gpuTimings *gpuTimings) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
     clearScreen(screen);
@@ -2899,7 +2911,7 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     timePartition->clearScreenTime += dt;
     // printf("Clear screen time: %f\n", dt);
     if (USE_GPU == 1) {
-        projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox);
+        projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox, gpuTimings);
         // save normal screen
         saveScreenNormal(screen, "normal.bin");
         saveScreenColor(screen, "color.bin");
@@ -3149,13 +3161,20 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         printf("Error creating OpenCL context: %d\n", err);
         return 0;
     }
-    
-    // Create command queue
-    ocl->queue = clCreateCommandQueue(ocl->context, ocl->device, 0, &err);
+
+    // Create command queue WITH PROFILING ENABLED
+    ocl->queue = clCreateCommandQueue(ocl->context, ocl->device, CL_QUEUE_PROFILING_ENABLE, &err);
     if (err != CL_SUCCESS) {
         printf("Error creating OpenCL command queue: %d\n", err);
         return 0;
     }
+    
+    // Create command queue
+    // ocl->queue = clCreateCommandQueue(ocl->context, ocl->device, 0, &err);
+    // if (err != CL_SUCCESS) {
+    //     printf("Error creating OpenCL command queue: %d\n", err);
+    //     return 0;
+    // }
     
     // Read kernel source
     FILE *file = fopen("openGlShaders/screenCordinates.cl", "r");
@@ -3423,7 +3442,7 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
     return 1;
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox) {
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings) {
     cl_int err;  // ADD THIS LINE - it's missing!
     
     // Use pre-allocated buffers instead of malloc
@@ -3497,7 +3516,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     }
 
     // *** RENDER SKYBOX FIRST (fills background) ***
-    renderSkyboxOpenCL(ocl, camera, skyBox); // You'll need to pass skyBox as parameter
+    renderSkyboxOpenCL(ocl, camera, skyBox, &gpuTimings->renderSkyBoxTime);
+    printf("Skybox rendered in %f ms\n", gpuTimings->renderSkyBoxTime);
     // *** TRIANGLE RENDERING ***
     renderTrianglesOpenCL(ocl, triangles, camera, screen, skyBox);
     // *** Screen Space Projection Kernel and sky box ***
@@ -4214,6 +4234,8 @@ int main() {
         printf("Failed to initialize OpenCL, falling back to CPU\n");
     }
 
+    struct GPUTimings gpuTimings;
+
     while (1) {
         // Calculate delta step based on elapsed time since the last frame
         clock_t currentTime = clock();
@@ -4253,7 +4275,7 @@ int main() {
         float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
         
         clock_t startRenderTime = clock();
-        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles, &skyBox);
+        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles, &skyBox, &gpuTimings);
         clock_t endRenderTime = clock();
         dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
         timePartition->renderTime += dt1;

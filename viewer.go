@@ -450,7 +450,7 @@ func (g *Game) UpdatePixels() error {
 		}
 		// Check if we have 4 bytes per pixel (RGBA) uint8
 		expectedSize := screenWidth * screenHeight * 4 // RGBA format
-		if len(colorData) >= expectedSize {
+		if len(colorData) == expectedSize && (colorData[0] != 0 || colorData[1] != 0 || colorData[2] != 0 || colorData[3] != 0) {
 			// File has RGBA format (4 bytes per pixel)
 			g.img.WritePixels(colorData[:expectedSize])
 		} else {
