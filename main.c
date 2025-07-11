@@ -550,7 +550,7 @@ void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct
     clReleaseEvent(kernel_event); // Always release events to avoid leaks
 }
 
-void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox) {
+void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox, float *gpuTimeMs) {
     cl_int err;
     
     // Set kernel arguments for applyReflections
@@ -589,20 +589,29 @@ void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, st
     
     // Execute reflection kernel
     size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
-    err = clEnqueueNDRangeKernel(ocl->queue, ocl->applyReflections_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL);
+    cl_event kernel_event;
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->applyReflections_kernel, 2, NULL, global_work_size, NULL, 0, NULL, &kernel_event);
     if (err != CL_SUCCESS) {
         printf("Error executing applyReflections kernel: %d\n", err);
         return;
     }
-    
+
     clFinish(ocl->queue);
+
+    cl_ulong start_time, end_time;
+    clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
+    clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END, sizeof(end_time), &end_time, NULL);
+    *gpuTimeMs = (end_time - start_time) * 1e-6; // convert ns to ms
+
+    clReleaseEvent(kernel_event); // Always release events to avoid leaks
 }
 
-void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen, struct SkyBox *skyBox) {
+void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen, struct SkyBox *skyBox, float *gpuTimeMs) {
     if (triangles->count == 0) return;
     
     cl_int err;
-    
+    cl_event kernel_event;
+
     // Set camera parameters that change each frame
     cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
     cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
@@ -620,12 +629,20 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
     
     // Execute triangle rendering kernel
     size_t global_work_size = triangles->count;
-    err = clEnqueueNDRangeKernel(ocl->queue, ocl->triangle_kernel, 1, NULL, &global_work_size, NULL, 0, NULL, NULL);
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->triangle_kernel, 1, NULL, &global_work_size, NULL, 0, NULL, &kernel_event);
     if (err != CL_SUCCESS) {
         printf("Error executing triangle kernel: %d\n", err);
         return;
     }
     clFinish(ocl->queue);
+
+
+    cl_ulong start_time, end_time;
+    clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
+    clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END, sizeof(end_time), &end_time, NULL);
+    *gpuTimeMs = (end_time - start_time) * 1e-6; // convert ns to ms
+
+    clReleaseEvent(kernel_event);
 }
 
 // Initialize render thread system
@@ -3519,9 +3536,12 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     renderSkyboxOpenCL(ocl, camera, skyBox, &gpuTimings->renderSkyBoxTime);
     printf("Skybox rendered in %f ms\n", gpuTimings->renderSkyBoxTime);
     // *** TRIANGLE RENDERING ***
-    renderTrianglesOpenCL(ocl, triangles, camera, screen, skyBox);
+    renderTrianglesOpenCL(ocl, triangles, camera, screen, skyBox, &gpuTimings->renderTrianglesTime);
+    printf("Triangles rendered in %f ms\n", gpuTimings->renderTrianglesTime);
     // *** Screen Space Projection Kernel and sky box ***
-    applyReflectionsOpenCL(ocl, camera, skyBox);
+    applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime);
+    printf("Reflections applied in %f ms\n", gpuTimings->applyReflectionsTime);
+
 
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)

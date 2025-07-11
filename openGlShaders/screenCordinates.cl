@@ -771,12 +771,9 @@ __kernel void renderTriangles(
                                    TriangleColors[triangleId * 3 + 1], 
                                    TriangleColors[triangleId * 3 + 2]);
 
-    // IMPROVED: Calculate vertex normals from adjacent triangles
-    float vertexThreshold = 0.001f; // Threshold for considering vertices as the same
-    
-    float3 vertexNormal1 = calculateVertexNormal(vertex1, triangleId, v1, v2, v3, normals, numTriangles, vertexThreshold);
-    float3 vertexNormal2 = calculateVertexNormal(vertex2, triangleId, v1, v2, v3, normals, numTriangles, vertexThreshold);
-    float3 vertexNormal3 = calculateVertexNormal(vertex3, triangleId, v1, v2, v3, normals, numTriangles, vertexThreshold);
+    float3 vertexNormal1 = normalize(faceNormal);
+    float3 vertexNormal2 = normalize(faceNormal);
+    float3 vertexNormal3 = normalize(faceNormal);
 
     // === OPTIMIZATION 1: BACK-FACE CULLING ===
     float3 triangleCenter = (vertex1 + vertex2 + vertex3) / 3.0f;
@@ -920,3 +917,111 @@ __kernel void renderTriangles(
         }
     }
 }
+
+// ) {
+//     int x = get_global_id(0);
+//     int y = get_global_id(1);
+//     if (x >= screenWidth || y >= screenHeight) return;
+
+//     int pixelIndex = y * screenWidth + x;
+
+//     // Camera basis
+//     float3 forward = normalize(camDir);
+//     float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
+//     float3 right = normalize(cross(forward, camUp));
+//     float3 up = cross(right, forward);
+
+//     float ndcX = (x + 0.5f) / screenWidth * 2.0f - 1.0f;
+//     float ndcY = -((y + 0.5f) / screenHeight * 2.0f - 1.0f);
+
+//     float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
+
+//     float minDepth = 1e30f;
+//     float3 bestNormal = (float3)(0.0f, 0.0f, 1.0f);
+//     float3 bestColor = (float3)(0.0f, 0.0f, 0.0f);
+//     float bestRoughness = 0.0f;
+//     float bestMetallic = 0.0f;
+//     float bestEmission = 0.0f;
+
+//     // For each triangle
+//     for (int tri = 0; tri < numTriangles; tri++) {
+//         int idx = tri * 3;
+//         float3 p0 = (float3)(v1[idx], v1[idx+1], v1[idx+2]);
+//         float3 p1 = (float3)(v2[idx], v2[idx+1], v2[idx+2]);
+//         float3 p2 = (float3)(v3[idx], v3[idx+1], v3[idx+2]);
+
+//         // OPTIMIZATION: Early depth rejection (all vertices behind camera)
+//         float3 rel0 = p0 - camPos;
+//         float3 rel1 = p1 - camPos;
+//         float3 rel2 = p2 - camPos;
+//         float d0 = dot(rel0, forward);
+//         float d1 = dot(rel1, forward);
+//         float d2 = dot(rel2, forward);
+//         if (d0 <= 0.001f && d1 <= 0.001f && d2 <= 0.001f) continue;
+
+//         // OPTIMIZATION: Back-face culling
+//         float3 faceNormal = normalize(cross(p1 - p0, p2 - p0));
+//         float3 viewDir = normalize(camPos - ((p0 + p1 + p2) / 3.0f));
+//         if (dot(faceNormal, viewDir) <= 0.0f) continue;
+
+//         // Moller-Trumbore ray-triangle intersection
+//         float3 edge1 = p1 - p0;
+//         float3 edge2 = p2 - p0;
+//         float3 h = cross(rayDir, edge2);
+//         float a = dot(edge1, h);
+//         if (fabs(a) < 1e-6f) continue;
+
+//         float f = 1.0f / a;
+//         float3 s = camPos - p0;
+//         float u = f * dot(s, h);
+//         if (u < 0.0f || u > 1.0f) continue;
+
+//         float3 q = cross(s, edge1);
+//         float v = f * dot(rayDir, q);
+//         if (v < 0.0f || u + v > 1.0f) continue;
+
+//         float t = f * dot(edge2, q);
+//         if (t <= 0.001f) continue;
+
+//         if (t < minDepth) {
+//             minDepth = t;
+
+//             // Interpolate normal (use face normal for now)
+//             float3 n = (float3)(normals[idx], normals[idx+1], normals[idx+2]);
+//             bestNormal = normalize(n);
+
+//             // Color/materials
+//             float3 color = (float3)(TriangleColors[idx], TriangleColors[idx+1], TriangleColors[idx+2]);
+//             bestColor = color;
+//             bestRoughness = roughness[tri];
+//             bestMetallic = metallic[tri];
+//             bestEmission = emission[tri];
+//         }
+//     }
+
+//     if (minDepth < 1e30f) {
+//         ScreenDistances[pixelIndex] = minDepth;
+//         int nidx = pixelIndex * 3;
+//         ScreenNormals[nidx+0] = bestNormal.x;
+//         ScreenNormals[nidx+1] = bestNormal.y;
+//         ScreenNormals[nidx+2] = bestNormal.z;
+//         ScreenColors[nidx+0] = bestColor.x;
+//         ScreenColors[nidx+1] = bestColor.y;
+//         ScreenColors[nidx+2] = bestColor.z;
+//         ScreenMaterialRoughness[pixelIndex] = bestRoughness;
+//         ScreenMaterialMetallic[pixelIndex] = bestMetallic;
+//         ScreenMaterialEmission[pixelIndex] = bestEmission;
+//     } else {
+//         ScreenDistances[pixelIndex] = 0.0f;
+//         int nidx = pixelIndex * 3;
+//         ScreenNormals[nidx+0] = 0.0f;
+//         ScreenNormals[nidx+1] = 0.0f;
+//         ScreenNormals[nidx+2] = 1.0f;
+//         ScreenColors[nidx+0] = 0.0f;
+//         ScreenColors[nidx+1] = 0.0f;
+//         ScreenColors[nidx+2] = 0.0f;
+//         ScreenMaterialRoughness[pixelIndex] = 0.0f;
+//         ScreenMaterialMetallic[pixelIndex] = 0.0f;
+//         ScreenMaterialEmission[pixelIndex] = 0.0f;
+//     }
+// }
