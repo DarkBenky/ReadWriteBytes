@@ -596,7 +596,6 @@ void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, st
     }
     
     clFinish(ocl->queue);
-    printf("Applied reflections successfully\n");
 }
 
 void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen, struct SkyBox *skyBox) {
@@ -3443,7 +3442,8 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
 }
 
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings) {
-    cl_int err;  // ADD THIS LINE - it's missing!
+    cl_int err;
+    cl_event readback_events[5]; // Array to hold all readback events
     
     // Use pre-allocated buffers instead of malloc
     float *points_data = ocl->host_points_data;
@@ -3654,45 +3654,59 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     float *velocities_result = ocl->host_velocities_result;
     float *normals_result = ocl->host_normals_result;
     
-     // FIX: Read blurred distances instead of original distances
+    // FIX: Read blurred distances instead of original distances WITH PROFILING
     err = clEnqueueReadBuffer(ocl->queue, final_blurred_distances_buf, CL_TRUE, 0, 
-                             ScreenWidth * ScreenHeight * sizeof(float), distances_result, 0, NULL, NULL);
+                             ScreenWidth * ScreenHeight * sizeof(float), distances_result, 0, NULL, &readback_events[0]);
     if (err != CL_SUCCESS) {
         printf("Error reading blurred distances buffer: %d\n", err);
         return;
     }
     
-   // FIX: Read blurred opacities instead of original opacities
+    // FIX: Read blurred opacities instead of original opacities WITH PROFILING
     err = clEnqueueReadBuffer(ocl->queue, final_blurred_opacities_buf, CL_TRUE, 0, 
-                             ScreenWidth * ScreenHeight * sizeof(float), opacities_result, 0, NULL, NULL);
+                             ScreenWidth * ScreenHeight * sizeof(float), opacities_result, 0, NULL, &readback_events[1]);
     if (err != CL_SUCCESS) {
         printf("Error reading blurred opacities buffer: %d\n", err);
         return;
     }
     
     err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_velocities_screen, CL_TRUE, 0, 
-                             ScreenWidth * ScreenHeight * sizeof(float), velocities_result, 0, NULL, NULL);
+                             ScreenWidth * ScreenHeight * sizeof(float), velocities_result, 0, NULL, &readback_events[2]);
     if (err != CL_SUCCESS) {
         printf("Error reading velocities buffer: %d\n", err);
         return;
     }
     
-    // ADD NORMALS READBACK
+    // ADD NORMALS READBACK WITH PROFILING
     err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_normals, CL_TRUE, 0, 
-                             ScreenWidth * ScreenHeight * 3 * sizeof(float), normals_result, 0, NULL, NULL);
+                             ScreenWidth * ScreenHeight * 3 * sizeof(float), normals_result, 0, NULL, &readback_events[3]);
     if (err != CL_SUCCESS) {
         printf("Error reading normals buffer: %d\n", err);
         return;
     }
 
-    // READ BACK SCREEN COLORS
+    // READ BACK SCREEN COLORS WITH PROFILING
     err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_screen_colors, CL_TRUE, 0, 
-                             ScreenWidth * ScreenHeight * 3 * sizeof(float), ocl->host_screen_colors_result, 0, NULL, NULL);
+                             ScreenWidth * ScreenHeight * 3 * sizeof(float), ocl->host_screen_colors_result, 0, NULL, &readback_events[4]);
     if (err != CL_SUCCESS) {
         printf("Error reading screen colors buffer: %d\n", err);
         return;
     }
     
+    cl_ulong first_start, last_end;
+        
+    err = clGetEventProfilingInfo(readback_events[0], CL_PROFILING_COMMAND_START, sizeof(first_start), &first_start, NULL);
+    err |= clGetEventProfilingInfo(readback_events[4], CL_PROFILING_COMMAND_END, sizeof(last_end), &last_end, NULL);
+    
+    if (err == CL_SUCCESS) {
+        gpuTimings->readBackTime = (last_end - first_start) * 1e-6f; // convert ns to ms
+    } else {
+        printf("Error getting readback profiling info: %d\n", err);
+        gpuTimings->readBackTime = 0.0f;
+    }
+    
+    printf("Readback completed in %f ms\n", gpuTimings->readBackTime);
+
     // Clear the screen arrays first (INCLUDING NORMALS)
     memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
     memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
