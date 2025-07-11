@@ -29,6 +29,7 @@ The results show that writing frames is faster than reading them, with write ope
   - [X] applyReflectionsTime;
   - [ ] applyBlurTime;
   - [X] readBackTime;
+- [ ] Wire Frame
 - [ ] Better screen space reflections (Ray Tracing)
   - [ ] add shadows (with ray tracing)
 - [ ] Render in C code do not save to file
