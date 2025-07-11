@@ -8,7 +8,9 @@ import (
 	"io/ioutil"
 	"math"
 	"os"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -18,6 +20,8 @@ import (
 const (
 	screenWidth  = 800
 	screenHeight = 600
+	shareMemSize = screenWidth * screenHeight * 4 // Size for RGBA pixels
+	shareMemName = "/my_shared_mem"
 	frameDelay   = 35 * time.Millisecond // Match the C program's 60 FPS
 
 	// Camera movement speeds
@@ -358,7 +362,44 @@ type CameraImageData struct {
 // }
 
 func (g *Game) UpdatePixels() error {
-	// Open file for binary reading
+	// Handle color rendering from shared memory
+	if g.renderMode == renderColor {
+		// Read color data from shared memory instead of file
+		sharedData, err := openSharedMemory()
+		if err != nil {
+			// Fallback to file if shared memory fails
+			colorData, fileErr := ioutil.ReadFile("color.bin")
+			if fileErr != nil {
+				return fmt.Errorf("failed to read color from both shared memory (%v) and file (%v)", err, fileErr)
+			}
+			expectedSize := screenWidth * screenHeight * 4
+			if len(colorData) == expectedSize {
+				g.img.WritePixels(colorData[:expectedSize])
+			} else {
+				return fmt.Errorf("color data size mismatch, expected %d bytes, got %d", expectedSize, len(colorData))
+			}
+		} else {
+			defer closeSharedMemory(sharedData)
+
+			// Check if we have the expected amount of data
+			expectedSize := screenWidth * screenHeight * 4
+			if len(sharedData) >= expectedSize {
+				// Create a copy of the data since shared memory is volatile
+				colorData := make([]byte, expectedSize)
+				copy(colorData, sharedData[:expectedSize])
+
+				if g.img == nil {
+					g.img = ebiten.NewImage(screenWidth, screenHeight)
+				}
+				g.img.WritePixels(colorData)
+			} else {
+				return fmt.Errorf("shared memory size mismatch, expected %d bytes, got %d", expectedSize, len(sharedData))
+			}
+		}
+		return nil
+	}
+
+	// Open file for binary reading (for non-color modes)
 	data, err := os.ReadFile("output.bin")
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
@@ -383,10 +424,9 @@ func (g *Game) UpdatePixels() error {
 			case renderOpacity:
 				value = data[srcPos+2]
 			case renderNormal:
-				// Don't use the main data for normals, we'll read normal.bin separately
 				value = 0
 			case renderFluid:
-				value = data[srcPos] // Use distance for grayscale
+				value = data[srcPos]
 				for i := 0; i < 3; i++ {
 					g.pixelsOpacity[dstPos+i] = data[srcPos+2]
 					g.pixelsVelocity[dstPos+i] = data[srcPos+1]
@@ -415,15 +455,11 @@ func (g *Game) UpdatePixels() error {
 			return fmt.Errorf("failed to read normal file: %w", err)
 		}
 
-		// Check if we have 3 bytes per pixel (RGB) or 4 bytes per pixel (RGBA)
-		expectedSize4 := screenWidth * screenHeight * 4 // RGBA format
-
+		expectedSize4 := screenWidth * screenHeight * 4
 		if len(normalData) >= expectedSize4 {
-			// File has RGBA format (4 bytes per pixel)
 			g.img.WritePixels(normalData[:expectedSize4])
 		}
-	} else {
-		// For other render modes, handle fluid rendering and write pixels normally
+	} else if g.renderMode != renderColor { // Don't overwrite color data
 		if renderFluid == g.renderMode {
 			if g.imgVelocity == nil {
 				g.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
@@ -442,21 +478,7 @@ func (g *Game) UpdatePixels() error {
 
 		g.img.WritePixels(g.pixels[:])
 	}
-	if g.renderMode == renderColor {
-		// Read color data from file
-		colorData, err := ioutil.ReadFile("color.bin")
-		if err != nil {
-			return fmt.Errorf("failed to read color file: %w", err)
-		}
-		// Check if we have 4 bytes per pixel (RGBA) uint8
-		expectedSize := screenWidth * screenHeight * 4 // RGBA format
-		if len(colorData) == expectedSize && (colorData[0] != 0 || colorData[1] != 0 || colorData[2] != 0 || colorData[3] != 0) {
-			// File has RGBA format (4 bytes per pixel)
-			g.img.WritePixels(colorData[:expectedSize])
-		} else {
-			return fmt.Errorf("color data file is too small, expected %d bytes, got %d", expectedSize, len(colorData))
-		}
-	}
+
 	return nil
 }
 
@@ -786,7 +808,7 @@ func (g *Game) handleCameraMovement() {
 func (g *Game) Update() error {
 	// Toggle render mode between distance, velocity and opacity
 	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-		g.renderMode = (g.renderMode + 1) % 6 
+		g.renderMode = (g.renderMode + 1) % 6
 		fmt.Println("Render mode changed to", g.renderMode)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
@@ -866,7 +888,7 @@ func (g *Game) Update() error {
 	now := time.Now()
 	if now.Sub(g.lastUpdate) >= frameDelay {
 		if err := g.UpdatePixels(); err != nil {
-			fmt.Printf("Error updating pixels: %v\n", err)
+			fmt.Printf("Error updating pixels: %v", err)
 		}
 		// fmt.Println("Pixels updated")
 		// if err := g.UpdatePixelsGeneral("light.bin"); err != nil {
@@ -1156,6 +1178,44 @@ func (g *Game) cycleShaderOption() {
 
 	// If we get here, the selected option doesn't exist anymore
 	g.selectedOption = keys[0]
+}
+
+func openSharedMemory() ([]byte, error) {
+	// Convert Go string to C string
+	nameBytes := []byte(shareMemName + "\x00")
+
+	// Open shared memory using syscall
+	fd, _, errno := syscall.Syscall(syscall.SYS_OPEN,
+		uintptr(unsafe.Pointer(&nameBytes[0])),
+		syscall.O_RDONLY,
+		0)
+
+	if errno != 0 {
+		// Try the /dev/shm path instead
+		shmPath := "/dev/shm" + shareMemName
+		data, err := os.ReadFile(shmPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open shared memory: %v", errno)
+		}
+		return data[:shareMemSize], nil
+	}
+
+	defer syscall.Close(int(fd))
+
+	// Memory map the file
+	data, err := syscall.Mmap(int(fd), 0, shareMemSize, syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return nil, fmt.Errorf("failed to map shared memory: %w", err)
+	}
+
+	return data, nil
+}
+
+func closeSharedMemory(data []byte) error {
+	if len(data) == shareMemSize {
+		return syscall.Munmap(data)
+	}
+	return nil // For file-based reads, nothing to unmap
 }
 
 func main() {

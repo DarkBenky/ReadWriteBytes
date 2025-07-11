@@ -13,12 +13,20 @@
 #define TINYOBJ_LOADER_C_IMPLEMENTATION
 #include "tinyobj_loader_c.h"
 #include <jpeglib.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <string.h>
+
+void *SharedMem = NULL;
 
 #define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define ScreenWidth 800
 #define ScreenHeight 600
+#define SHM_NAME "/my_shared_mem"
+#define SIZE ScreenWidth * ScreenHeight * 4
 #define PARTICLE_RADIUS 4
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
@@ -2894,11 +2902,12 @@ void saveScreenNormal(struct Screen *screen, const char *filename) {
 }
 
 void saveScreenColor(struct Screen *screen, const char *filename) {
-    FILE *file = fopen(filename, "wb");
-    if (!file) {
-        perror("Failed to open file");
-        return;
-    }
+    // Save to file (existing code)
+    // FILE *file = fopen(filename, "wb");
+    // if (!file) {
+    //     perror("Failed to open file");
+    //     return;
+    // }
     static uint8_t buffer[ScreenWidth * ScreenHeight * 4];
 
     int i = 0;
@@ -2912,8 +2921,10 @@ void saveScreenColor(struct Screen *screen, const char *filename) {
         }
     }
 
-    fwrite(buffer, 1, ScreenWidth * ScreenHeight * 4, file);
-    fclose(file);
+    // fwrite(buffer, 1, ScreenWidth * ScreenHeight * 4, file);
+    // fclose(file);
+
+    memcpy(SharedMem, buffer, ScreenWidth * ScreenHeight * 4);
 }
 
 void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct gpuTimings *gpuTimings) {
@@ -2929,8 +2940,18 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     if (USE_GPU == 1) {
         projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox, gpuTimings);
         // save normal screen
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
         saveScreenNormal(screen, "normal.bin");
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
+        printf("Saved normals (file) in %.3f ms\n", ms);
+        clock_gettime(CLOCK_MONOTONIC, &start);
         saveScreenColor(screen, "color.bin");
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
+        printf("Saved colors in %.3f ms\n", ms);
     } else {
         projectParticles(particles, camera, screen, timePartition, threadsData, particleIndexes);
     }
@@ -3983,6 +4004,20 @@ void readFileTriangles(const char *filename, struct Triangles *triangles, float 
 }
 
 int main() {
+    int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (fd == -1) {
+        perror("shm_open");
+        return 1;
+    }
+
+    ftruncate(fd, SIZE); // Set size
+
+    SharedMem = mmap(0, SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (SharedMem == MAP_FAILED) {  // Fixed: was "ptr == MAP_FAILED"
+        perror("mmap");
+        return 1;
+    }
+
     srand(time(NULL));
 
     // load sky box texture

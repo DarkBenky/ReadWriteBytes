@@ -25,10 +25,10 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 - [ ] GPU Timeing
   - [X] renderSkyBoxTime;
-  - [ ] renderTrianglesTime;
-  - [ ] applyReflectionsTime;
+  - [X] renderTrianglesTime;
+  - [X] applyReflectionsTime;
   - [ ] applyBlurTime;
-  - [ ] readBackTime;
+  - [X] readBackTime;
 - [ ] Better screen space reflections (Ray Tracing)
   - [ ] add shadows (with ray tracing)
 - [ ] Render in C code do not save to file
