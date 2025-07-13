@@ -29,20 +29,15 @@ The results show that writing frames is faster than reading them, with write ope
   - [X] applyReflectionsTime;
   - [ ] applyBlurTime;
   - [X] readBackTime;
+- [ ] (Not For Now) Render in C code do not save to file
+  - [ ] (To Do) Write to shared memory - share image as shared memory
 - [ ] Wire Frame
 - [ ] Better screen space reflections (Ray Tracing)
   - [ ] add shadows (with ray tracing)
-- [ ] Render in C code do not save to file
-- [ ] Fix .obj file parsing
-- [ ] Update timimg
-  - [ ] add Gpu timing
-- [ ] move whole gpu code to one function that will call the other functions
-- [ ] add c code to parse obj files
+- [ ] (Look Into) Fix .obj file parsing
+- [ ] Update timimg (CPU)
 - [ ] add emission and bloom
-
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
-- [ ] share image as shared memory
-- [ ] MP is slower
 
 ### Add Open GL to the go code to project particles on GPU directly
 - Render headlessly the image and save it in the to drive so the go code can read it
