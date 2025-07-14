@@ -20,7 +20,7 @@ import (
 const (
 	screenWidth  = 800
 	screenHeight = 600
-	shareMemSize = screenWidth * screenHeight * 4 // Size for RGBA pixels
+	shareMemSize = screenWidth * screenHeight * 4 * 2 // Size for RGBA pixels Normals
 	shareMemName = "/my_shared_mem"
 	frameDelay   = 35 * time.Millisecond // Match the C program's 60 FPS
 
@@ -367,39 +367,56 @@ func (g *Game) UpdatePixels() error {
 		// Read color data from shared memory instead of file
 		sharedData, err := openSharedMemory()
 		if err != nil {
-			// Fallback to file if shared memory fails
-			colorData, fileErr := ioutil.ReadFile("color.bin")
-			if fileErr != nil {
-				return fmt.Errorf("failed to read color from both shared memory (%v) and file (%v)", err, fileErr)
-			}
-			expectedSize := screenWidth * screenHeight * 4
-			if len(colorData) == expectedSize {
-				g.img.WritePixels(colorData[:expectedSize])
-			} else {
-				return fmt.Errorf("color data size mismatch, expected %d bytes, got %d", expectedSize, len(colorData))
-			}
-		} else {
-			defer closeSharedMemory(sharedData)
-
-			// Check if we have the expected amount of data
-			expectedSize := screenWidth * screenHeight * 4
-			if len(sharedData) >= expectedSize {
-				// Create a copy of the data since shared memory is volatile
-				colorData := make([]byte, expectedSize)
-				copy(colorData, sharedData[:expectedSize])
-
-				if g.img == nil {
-					g.img = ebiten.NewImage(screenWidth, screenHeight)
-				}
-				g.img.WritePixels(colorData)
-			} else {
-				return fmt.Errorf("shared memory size mismatch, expected %d bytes, got %d", expectedSize, len(sharedData))
-			}
+			return fmt.Errorf("failed to read shared memory: %w", err)
 		}
-		return nil
+		defer closeSharedMemory(sharedData)
+
+		// Check if we have the expected amount of data
+		expectedSize := screenWidth * screenHeight * 4
+		if len(sharedData) >= expectedSize {
+			// Create a copy of the data since shared memory is volatile
+			colorData := make([]byte, expectedSize)
+			copy(colorData, sharedData[:expectedSize])
+
+			if g.img == nil {
+				g.img = ebiten.NewImage(screenWidth, screenHeight)
+			}
+			g.img.WritePixels(colorData)
+		} else {
+			return fmt.Errorf("shared memory size mismatch, expected %d bytes, got %d", expectedSize, len(sharedData))
+		}
+		return nil // Early return for color mode
 	}
 
-	// Open file for binary reading (for non-color modes)
+	// Handle normal rendering from shared memory
+	if g.renderMode == renderNormal {
+		sharedData, err := openSharedMemory()
+		if err != nil {
+			return fmt.Errorf("failed to read shared memory: %w", err)
+		}
+		defer closeSharedMemory(sharedData)
+
+		// Calculate offsets for normal data (second part of shared memory)
+		colorSize := screenWidth * screenHeight * 4
+		normalOffset := colorSize
+		expectedTotalSize := colorSize * 2 // Color + Normal data
+
+		if len(sharedData) >= expectedTotalSize {
+			// Extract normal data from shared memory at offset
+			normalData := make([]byte, colorSize)
+			copy(normalData, sharedData[normalOffset:normalOffset+colorSize])
+
+			if g.img == nil {
+				g.img = ebiten.NewImage(screenWidth, screenHeight)
+			}
+			g.img.WritePixels(normalData)
+		} else {
+			return fmt.Errorf("shared memory size mismatch for normals, expected %d bytes, got %d", expectedTotalSize, len(sharedData))
+		}
+		return nil // Early return for normal mode
+	}
+
+	// Handle other render modes (distance, velocity, opacity, fluid) from file
 	data, err := os.ReadFile("output.bin")
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
@@ -423,8 +440,6 @@ func (g *Game) UpdatePixels() error {
 				value = data[srcPos+1]
 			case renderOpacity:
 				value = data[srcPos+2]
-			case renderNormal:
-				value = 0
 			case renderFluid:
 				value = data[srcPos]
 				for i := 0; i < 3; i++ {
@@ -434,7 +449,7 @@ func (g *Game) UpdatePixels() error {
 				}
 			}
 
-			// Build a grayscale pixel based on the chosen channel (except for normals)
+			// Build a grayscale pixel based on the chosen channel
 			if g.renderMode != renderNormal && dstPos+3 <= len(g.pixels) {
 				g.pixels[dstPos] = value   // R
 				g.pixels[dstPos+1] = value // G
@@ -448,34 +463,25 @@ func (g *Game) UpdatePixels() error {
 		g.img = ebiten.NewImage(screenWidth, screenHeight)
 	}
 
-	// Handle normal rendering separately
-	if g.renderMode == renderNormal {
-		normalData, err := ioutil.ReadFile("normal.bin")
-		if err != nil {
-			return fmt.Errorf("failed to read normal file: %w", err)
+	// Handle fluid rendering
+	if g.renderMode == renderFluid {
+		if g.imgVelocity == nil {
+			g.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
+		}
+		if g.imgOpacity == nil {
+			g.imgOpacity = ebiten.NewImage(screenWidth, screenHeight)
+		}
+		if g.imgDistance == nil {
+			g.imgDistance = ebiten.NewImage(screenWidth, screenHeight)
 		}
 
-		expectedSize4 := screenWidth * screenHeight * 4
-		if len(normalData) >= expectedSize4 {
-			g.img.WritePixels(normalData[:expectedSize4])
-		}
-	} else if g.renderMode != renderColor { // Don't overwrite color data
-		if renderFluid == g.renderMode {
-			if g.imgVelocity == nil {
-				g.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
-			}
-			if g.imgOpacity == nil {
-				g.imgOpacity = ebiten.NewImage(screenWidth, screenHeight)
-			}
-			if g.imgDistance == nil {
-				g.imgDistance = ebiten.NewImage(screenWidth, screenHeight)
-			}
+		g.imgVelocity.WritePixels(g.pixelsVelocity[:])
+		g.imgOpacity.WritePixels(g.pixelsOpacity[:])
+		g.imgDistance.WritePixels(g.pixelsDistance[:])
+	}
 
-			g.imgVelocity.WritePixels(g.pixelsVelocity[:])
-			g.imgOpacity.WritePixels(g.pixelsOpacity[:])
-			g.imgDistance.WritePixels(g.pixelsDistance[:])
-		}
-
+	// Update main image for non-color/non-normal modes
+	if g.renderMode != renderColor && g.renderMode != renderNormal {
 		g.img.WritePixels(g.pixels[:])
 	}
 

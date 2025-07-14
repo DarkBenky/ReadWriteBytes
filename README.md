@@ -23,12 +23,17 @@ This experiment tests the performance of writing and reading frame data as binar
 The results show that writing frames is faster than reading them, with write operations capable of handling ~442 FPS while read operations can handle ~269 FPS. This suggests that the system could theoretically handle real-time frame processing for applications requiring up to 60 FPS.
 
 ## TODO
-- [ ] GPU Timeing
-  - [X] renderSkyBoxTime;
-  - [X] renderTrianglesTime;
-  - [X] applyReflectionsTime;
-  - [ ] applyBlurTime;
-  - [X] readBackTime;
+
+- [ ] convert timing to this format
+
+  ```c
+  struct timespec start, end;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  saveScreenNormal(screen, "normal.bin");
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
+  ```
+  
 - [ ] (Not For Now) Render in C code do not save to file
   - [ ] (To Do) Write to shared memory - share image as shared memory
 - [ ] Wire Frame
@@ -59,6 +64,12 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] GPU Timeing
+  - [X] renderSkyBoxTime;
+  - [X] renderTrianglesTime;
+  - [X] applyReflectionsTime;
+  - [X] applyBlurTime;
+  - [X] readBackTime;
 - [X] Triangles are static, we can upload them once and reuse them
 - [X] Screen Space Reflections ( general purpose function where you provide image ray and it will return color )
 - [X] add go code to parse obj files

@@ -26,7 +26,7 @@ void *SharedMem = NULL;
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define SHM_NAME "/my_shared_mem"
-#define SIZE ScreenWidth * ScreenHeight * 4
+#define SIZE ScreenWidth * ScreenHeight * 4 * 2 // Color + Normal
 #define PARTICLE_RADIUS 4
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
@@ -2878,53 +2878,43 @@ void saveScreen(struct Screen *screen, const char *filename) {
     fclose(file);
 }
 
-void saveScreenNormal(struct Screen *screen, const char *filename) {
-    FILE *file = fopen(filename, "wb");
-    if (!file) {
-        perror("Failed to open file");
-        return;
-    }
+void saveScreenColor(struct Screen *screen) {
     static uint8_t buffer[ScreenWidth * ScreenHeight * 4];
-
-    int i = 0;
-    for (int y = 0; y < ScreenHeight; y++) {
-        for (int x = 0; x < ScreenWidth; x++) {
-            // Convert from [-1,1] to [0,255] range
-            buffer[i++] = (uint8_t)((screen->normals[x][y][0] * 0.5f + 0.5f) * 255.0f);
-            buffer[i++] = (uint8_t)((screen->normals[x][y][1] * 0.5f + 0.5f) * 255.0f);
-            buffer[i++] = (uint8_t)((screen->normals[x][y][2] * 0.5f + 0.5f) * 255.0f);
-            buffer[i++] = (uint8_t)(255); // Normalize opacity to [0,255]
-        }
+    
+    // Single loop is more cache-friendly
+    int totalPixels = ScreenWidth * ScreenHeight;
+    for (int i = 0; i < totalPixels; i++) {
+        int x = i % ScreenWidth;
+        int y = i / ScreenWidth;
+        int bufferIdx = i * 4;
+        
+        buffer[bufferIdx]     = screen->colors[x][y][0];  // R
+        buffer[bufferIdx + 1] = screen->colors[x][y][1];  // G
+        buffer[bufferIdx + 2] = screen->colors[x][y][2];  // B
+        buffer[bufferIdx + 3] = 255; // Alpha
     }
-
-    fwrite(buffer, 1, ScreenWidth * ScreenHeight * 4, file);
-    fclose(file);
+    
+    memcpy(SharedMem, buffer, ScreenWidth * ScreenHeight * 4);
 }
 
-void saveScreenColor(struct Screen *screen, const char *filename) {
-    // Save to file (existing code)
-    // FILE *file = fopen(filename, "wb");
-    // if (!file) {
-    //     perror("Failed to open file");
-    //     return;
-    // }
+void saveScreenNormal(struct Screen *screen) {
     static uint8_t buffer[ScreenWidth * ScreenHeight * 4];
-
-    int i = 0;
-    for (int y = 0; y < ScreenHeight; y++) {
-        for (int x = 0; x < ScreenWidth; x++) {
-            // No conversion needed since colors is already uint8_t
-            buffer[i++] = screen->colors[x][y][0];  // R
-            buffer[i++] = screen->colors[x][y][1];  // G
-            buffer[i++] = screen->colors[x][y][2];  // B
-            buffer[i++] = 255; // Alpha
-        }
+    
+    int totalPixels = ScreenWidth * ScreenHeight;
+    for (int i = 0; i < totalPixels; i++) {
+        int x = i % ScreenWidth;
+        int y = i / ScreenWidth;
+        int bufferIdx = i * 4;
+        
+        // Convert from [-1,1] to [0,255] range
+        buffer[bufferIdx]     = (uint8_t)((screen->normals[x][y][0] * 0.5f + 0.5f) * 255.0f);
+        buffer[bufferIdx + 1] = (uint8_t)((screen->normals[x][y][1] * 0.5f + 0.5f) * 255.0f);
+        buffer[bufferIdx + 2] = (uint8_t)((screen->normals[x][y][2] * 0.5f + 0.5f) * 255.0f);
+        buffer[bufferIdx + 3] = 255; // Alpha
     }
-
-    // fwrite(buffer, 1, ScreenWidth * ScreenHeight * 4, file);
-    // fclose(file);
-
-    memcpy(SharedMem, buffer, ScreenWidth * ScreenHeight * 4);
+    
+    size_t offset = ScreenWidth * ScreenHeight * 4;
+    memcpy((uint8_t*)SharedMem + offset, buffer, ScreenWidth * ScreenHeight * 4);
 }
 
 void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct gpuTimings *gpuTimings) {
@@ -2942,16 +2932,15 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
         // save normal screen
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
-        saveScreenNormal(screen, "normal.bin");
+        saveScreenNormal(screen);
         clock_gettime(CLOCK_MONOTONIC, &end);
         double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
-        printf("Saved normals (file) in %.3f ms\n", ms);
+        printf("Saved normals (shared mem) in %.3f ms\n", ms);
         clock_gettime(CLOCK_MONOTONIC, &start);
-        saveScreenColor(screen, "color.bin");
+        saveScreenColor(screen);
         clock_gettime(CLOCK_MONOTONIC, &end);
-
         ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
-        printf("Saved colors in %.3f ms\n", ms);
+        printf("Saved colors (shared mem) in %.3f ms\n", ms);
     } else {
         projectParticles(particles, camera, screen, timePartition, threadsData, particleIndexes);
     }
@@ -3612,26 +3601,25 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     cl_float blur_sigma_range = 15.0f; // Sigma for depth differences. Try values like 10.0, 15.0, 20.0.
     cl_float blur_sigma_spatial = 2.5f; // Sigma for spatial distance. Try 1.5, 2.0, 2.5.
 
-    int blur_passes = 1; // Number of blur passes. 2-3 is usually sufficient for good smoothing.
+    int blur_passes = 1;
+
+    cl_event blur_events[blur_passes];  // Support up to 10 blur passes
+    int event_count = 0;
+
     if (blur_passes > 0) {
-        // Initial source for the first blur pass is the output of the projection kernel
         s_dist_src = ocl->buffer_distances;
         s_opac_src = ocl->buffer_opacities;
 
         for (int pass = 0; pass < blur_passes; ++pass) {
-            // Determine destination buffer for this pass to achieve ping-pong
-            // Pass 0 (1st pass): src=original, dst=temp
-            // Pass 1 (2nd pass): src=temp,    dst=original
-            // Pass 2 (3rd pass): src=original, dst=temp
-            if (pass % 2 == 0) { // Output to _temp buffers
+            if (pass % 2 == 0) {
                 s_dist_dst = ocl->buffer_distances_temp;
                 s_opac_dst = ocl->buffer_opacities_temp;
-            } else { // Output to original buffers (which now act as temp for this pass)
+            } else {
                 s_dist_dst = ocl->buffer_distances;
                 s_opac_dst = ocl->buffer_opacities;
             }
 
-            // Set blur kernel arguments for the current pass
+            // Set blur kernel arguments
             err = clSetKernelArg(ocl->blur_kernel, 0, sizeof(cl_mem), &s_dist_src);
             err |= clSetKernelArg(ocl->blur_kernel, 1, sizeof(cl_mem), &s_opac_src);
             err |= clSetKernelArg(ocl->blur_kernel, 2, sizeof(cl_mem), &s_dist_dst);
@@ -3641,27 +3629,55 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
             err |= clSetKernelArg(ocl->blur_kernel, 6, sizeof(cl_int), &blur_kernel_size);
             err |= clSetKernelArg(ocl->blur_kernel, 7, sizeof(cl_float), &blur_sigma_range);
             err |= clSetKernelArg(ocl->blur_kernel, 8, sizeof(cl_float), &blur_sigma_spatial);
+            
             if (err != CL_SUCCESS) {
                 printf("Error setting blur kernel arguments for pass %d: %d\n", pass, err);
                 return;
             }
 
-            // Execute blur kernel
+            // **Execute blur kernel WITH EVENT for timing**
             size_t blur_global_work_size[2] = {ScreenWidth, ScreenHeight};
-            err = clEnqueueNDRangeKernel(ocl->queue, ocl->blur_kernel, 2, NULL, blur_global_work_size, NULL, 0, NULL, NULL);
+            err = clEnqueueNDRangeKernel(ocl->queue, ocl->blur_kernel, 2, NULL, 
+                                        blur_global_work_size, NULL, 0, NULL, 
+                                        &blur_events[event_count]);
             if (err != CL_SUCCESS) {
                 printf("Error executing blur kernel for pass %d: %d\n", pass, err);
                 return;
             }
             
-            // The output of this pass (s_dist_dst, s_opac_dst) becomes the input for the next
+            event_count++;
             s_dist_src = s_dist_dst;
             s_opac_src = s_opac_dst;
         }
+    }
+
+    // **Wait for completion and calculate GPU timing**
+    clFinish(ocl->queue);
+
+    if (event_count > 0) {
+        cl_ulong first_start, last_end;
+        
+        // Get timing from first and last events
+        err = clGetEventProfilingInfo(blur_events[0], CL_PROFILING_COMMAND_START, 
+                                    sizeof(first_start), &first_start, NULL);
+        err |= clGetEventProfilingInfo(blur_events[event_count-1], CL_PROFILING_COMMAND_END, 
+                                    sizeof(last_end), &last_end, NULL);
+        
+        if (err == CL_SUCCESS) {
+            gpuTimings->applyBlurTime = (last_end - first_start) * 1e-6f; // ns to ms
+            printf("Blur completed in %.3f ms\n", gpuTimings->applyBlurTime);
+        } else {
+            printf("Error getting blur profiling info: %d\n", err);
+            gpuTimings->applyBlurTime = 0.0f;
+        }
+        
+        // **Release events to avoid memory leaks**
+        for (int i = 0; i < event_count; i++) {
+            clReleaseEvent(blur_events[i]);
+        }
     } else {
-        // No blur passes, the "final" blurred data is just the direct output of projection
-        s_dist_src = ocl->buffer_distances; // Or s_dist_dst, doesn't matter if passes = 0
-        s_opac_src = ocl->buffer_opacities;
+        gpuTimings->applyBlurTime = 0.0f;
+        printf("No blur passes executed\n");
     }
 
     cl_mem final_blurred_distances_buf = s_dist_src;
@@ -4306,6 +4322,8 @@ int main() {
     struct GPUTimings gpuTimings;
 
     while (1) {
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
         // Calculate delta step based on elapsed time since the last frame
         clock_t currentTime = clock();
         float dt = (float)(currentTime - lastTime) / (float)CLOCKS_PER_SEC; // Scale to a reasonable frame time
@@ -4346,11 +4364,15 @@ int main() {
         clock_t startRenderTime = clock();
         render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles, &skyBox, &gpuTimings);
         clock_t endRenderTime = clock();
+        clock_gettime(CLOCK_MONOTONIC, &end);
         dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
         timePartition->renderTime += dt1;
 
     
-        float currentFPS = 1.0f / dt1;
+        // float currentFPS = 1.0f / dt1;
+
+        double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
+        float currentFPS = 1000.0f / ms;
         
         if (frameCount < FrameCount) {
             averageFPS[frameCount] = currentFPS;
