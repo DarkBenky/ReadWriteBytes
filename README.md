@@ -24,6 +24,8 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
+- [ ] Add text support
+- [ ] Add Timing for rendering of particles
 - [ ] Add chart for gpu timing
 - [ ] convert timing to this format
 
