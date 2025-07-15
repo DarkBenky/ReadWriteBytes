@@ -24,6 +24,7 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
+- [ ] Add chart for gpu timing
 - [ ] convert timing to this format
 
   ```c

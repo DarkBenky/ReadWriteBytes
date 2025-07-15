@@ -1,3 +1,104 @@
+__kernel void gpuTimings(
+    __global float *ScreenColors,
+    const int screenWidth,
+    const int screenHeight,
+    const int SizeX,
+    const int SizeY,
+    const int PosX,
+    const int PosY,
+    const int PaddingY,
+    const float renderSkyBoxTime,
+    const float renderTrianglesTime,
+    const float applyReflectionsTime,
+    const float applyBlurTime,
+    const float readBackTime,
+    const float maxTime
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= SizeX || y >= SizeY) return;
+    
+    int pixelIndex = (y + PosY) * screenWidth + (x + PosX);
+    
+    // Check if we're within screen bounds
+    if ((x + PosX) >= screenWidth || (y + PosY) >= screenHeight) return;
+    
+    // **IMPORTANT: Only render if there's timing data to show**
+    // Skip rendering if all timing values are zero or very small
+    if (renderSkyBoxTime < 0.001f && renderTrianglesTime < 0.001f && 
+        applyReflectionsTime < 0.001f && applyBlurTime < 0.001f && 
+        readBackTime < 0.001f) {
+        return; // Don't modify pixels if no timing data
+    }
+    
+    // Create horizontal bar chart
+    float barHeight = (float)SizeY / 5.0f;
+    int barIndex = y / (int)barHeight;
+    float barProgress = (float)x / (float)SizeX;
+    
+    // **ONLY render bars, don't change background**
+    float timeValue = 0.0f;
+    float normalizedTime = 0.0f;
+    bool shouldRender = false;
+    float3 color = (float3)(0.0f, 0.0f, 0.0f);
+    
+    switch(barIndex) {
+        case 0: // SkyBox time (Red)
+            timeValue = renderSkyBoxTime;
+            normalizedTime = timeValue / maxTime;
+            if (barProgress <= normalizedTime && timeValue > 0.001f) {
+                color = (float3)(0.8f, 0.2f, 0.2f);
+                shouldRender = true;
+            }
+            break;
+        case 1: // Triangles time (Green)
+            timeValue = renderTrianglesTime;
+            normalizedTime = timeValue / maxTime;
+            if (barProgress <= normalizedTime && timeValue > 0.001f) {
+                color = (float3)(0.2f, 0.8f, 0.2f);
+                shouldRender = true;
+            }
+            break;
+        case 2: // Reflections time (Blue)
+            timeValue = applyReflectionsTime;
+            normalizedTime = timeValue / maxTime;
+            if (barProgress <= normalizedTime && timeValue > 0.001f) {
+                color = (float3)(0.2f, 0.2f, 0.8f);
+                shouldRender = true;
+            }
+            break;
+        case 3: // Blur time (Yellow)
+            timeValue = applyBlurTime;
+            normalizedTime = timeValue / maxTime;
+            if (barProgress <= normalizedTime && timeValue > 0.001f) {
+                color = (float3)(0.8f, 0.8f, 0.2f);
+                shouldRender = true;
+            }
+            break;
+        case 4: // ReadBack time (Magenta)
+            timeValue = readBackTime;
+            normalizedTime = timeValue / maxTime;
+            if (barProgress <= normalizedTime && timeValue > 0.001f) {
+                color = (float3)(0.8f, 0.2f, 0.8f);
+                shouldRender = true;
+            }
+            break;
+    }
+    
+    // Add bar separators (thin lines between bars)
+    if (y % (int)barHeight == 0 && y > 0) {
+        color = (float3)(0.3f, 0.3f, 0.3f); // Darker gray separator
+        shouldRender = true;
+    }
+    
+    if (shouldRender) {
+        ScreenColors[pixelIndex * 3]     = color.x;
+        ScreenColors[pixelIndex * 3 + 1] = color.y;
+        ScreenColors[pixelIndex * 3 + 2] = color.z;
+    }
+}
+
 __kernel void renderSkyBox(
     __global float *ScreenColors,
     const float3 camPos,
@@ -917,111 +1018,3 @@ __kernel void renderTriangles(
         }
     }
 }
-
-// ) {
-//     int x = get_global_id(0);
-//     int y = get_global_id(1);
-//     if (x >= screenWidth || y >= screenHeight) return;
-
-//     int pixelIndex = y * screenWidth + x;
-
-//     // Camera basis
-//     float3 forward = normalize(camDir);
-//     float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
-//     float3 right = normalize(cross(forward, camUp));
-//     float3 up = cross(right, forward);
-
-//     float ndcX = (x + 0.5f) / screenWidth * 2.0f - 1.0f;
-//     float ndcY = -((y + 0.5f) / screenHeight * 2.0f - 1.0f);
-
-//     float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
-
-//     float minDepth = 1e30f;
-//     float3 bestNormal = (float3)(0.0f, 0.0f, 1.0f);
-//     float3 bestColor = (float3)(0.0f, 0.0f, 0.0f);
-//     float bestRoughness = 0.0f;
-//     float bestMetallic = 0.0f;
-//     float bestEmission = 0.0f;
-
-//     // For each triangle
-//     for (int tri = 0; tri < numTriangles; tri++) {
-//         int idx = tri * 3;
-//         float3 p0 = (float3)(v1[idx], v1[idx+1], v1[idx+2]);
-//         float3 p1 = (float3)(v2[idx], v2[idx+1], v2[idx+2]);
-//         float3 p2 = (float3)(v3[idx], v3[idx+1], v3[idx+2]);
-
-//         // OPTIMIZATION: Early depth rejection (all vertices behind camera)
-//         float3 rel0 = p0 - camPos;
-//         float3 rel1 = p1 - camPos;
-//         float3 rel2 = p2 - camPos;
-//         float d0 = dot(rel0, forward);
-//         float d1 = dot(rel1, forward);
-//         float d2 = dot(rel2, forward);
-//         if (d0 <= 0.001f && d1 <= 0.001f && d2 <= 0.001f) continue;
-
-//         // OPTIMIZATION: Back-face culling
-//         float3 faceNormal = normalize(cross(p1 - p0, p2 - p0));
-//         float3 viewDir = normalize(camPos - ((p0 + p1 + p2) / 3.0f));
-//         if (dot(faceNormal, viewDir) <= 0.0f) continue;
-
-//         // Moller-Trumbore ray-triangle intersection
-//         float3 edge1 = p1 - p0;
-//         float3 edge2 = p2 - p0;
-//         float3 h = cross(rayDir, edge2);
-//         float a = dot(edge1, h);
-//         if (fabs(a) < 1e-6f) continue;
-
-//         float f = 1.0f / a;
-//         float3 s = camPos - p0;
-//         float u = f * dot(s, h);
-//         if (u < 0.0f || u > 1.0f) continue;
-
-//         float3 q = cross(s, edge1);
-//         float v = f * dot(rayDir, q);
-//         if (v < 0.0f || u + v > 1.0f) continue;
-
-//         float t = f * dot(edge2, q);
-//         if (t <= 0.001f) continue;
-
-//         if (t < minDepth) {
-//             minDepth = t;
-
-//             // Interpolate normal (use face normal for now)
-//             float3 n = (float3)(normals[idx], normals[idx+1], normals[idx+2]);
-//             bestNormal = normalize(n);
-
-//             // Color/materials
-//             float3 color = (float3)(TriangleColors[idx], TriangleColors[idx+1], TriangleColors[idx+2]);
-//             bestColor = color;
-//             bestRoughness = roughness[tri];
-//             bestMetallic = metallic[tri];
-//             bestEmission = emission[tri];
-//         }
-//     }
-
-//     if (minDepth < 1e30f) {
-//         ScreenDistances[pixelIndex] = minDepth;
-//         int nidx = pixelIndex * 3;
-//         ScreenNormals[nidx+0] = bestNormal.x;
-//         ScreenNormals[nidx+1] = bestNormal.y;
-//         ScreenNormals[nidx+2] = bestNormal.z;
-//         ScreenColors[nidx+0] = bestColor.x;
-//         ScreenColors[nidx+1] = bestColor.y;
-//         ScreenColors[nidx+2] = bestColor.z;
-//         ScreenMaterialRoughness[pixelIndex] = bestRoughness;
-//         ScreenMaterialMetallic[pixelIndex] = bestMetallic;
-//         ScreenMaterialEmission[pixelIndex] = bestEmission;
-//     } else {
-//         ScreenDistances[pixelIndex] = 0.0f;
-//         int nidx = pixelIndex * 3;
-//         ScreenNormals[nidx+0] = 0.0f;
-//         ScreenNormals[nidx+1] = 0.0f;
-//         ScreenNormals[nidx+2] = 1.0f;
-//         ScreenColors[nidx+0] = 0.0f;
-//         ScreenColors[nidx+1] = 0.0f;
-//         ScreenColors[nidx+2] = 0.0f;
-//         ScreenMaterialRoughness[pixelIndex] = 0.0f;
-//         ScreenMaterialMetallic[pixelIndex] = 0.0f;
-//         ScreenMaterialEmission[pixelIndex] = 0.0f;
-//     }
-// }

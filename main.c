@@ -185,6 +185,7 @@ struct OpenCLContext {
     cl_kernel triangle_kernel;  // Add triangle kernel
     cl_kernel skybox_kernel;
     cl_kernel applyReflections_kernel;
+    cl_kernel gpuTimings_kernel; // Add kernel for GPU timings
     // buffers
     cl_mem buffer_points;
     cl_mem buffer_velocities;
@@ -719,6 +720,59 @@ struct GPUTimings {
     float readBackTime;
 };
 
+// Add this to your C code after GPU operations
+void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) {
+    // Timing chart parameters
+    int chartPosX = 10;           // X position on screen
+    int chartPosY = 10;           // Y position on screen  
+    int chartWidth = 100;         // Width of timing chart
+    int chartHeight = 75;        // Height of timing chart
+    int paddingY = 5;             // Top padding
+    
+    // Find maximum time for normalization
+    float maxTime = fmaxf(gpuTimings->renderSkyBoxTime,
+                   fmaxf(gpuTimings->renderTrianglesTime,
+                   fmaxf(gpuTimings->applyReflectionsTime,
+                   fmaxf(gpuTimings->applyBlurTime, gpuTimings->readBackTime))));
+    
+    // Add some padding to max time
+    maxTime *= 1.1f;
+    if (maxTime < 0.1f) maxTime = 10.0f; // Minimum scale
+    
+    // Set kernel arguments
+    cl_int err = 0;
+    cl_int screen_width = ScreenWidth;
+    cl_int screen_height = ScreenHeight;
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 1, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 2, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 3, sizeof(cl_int), &chartWidth);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 4, sizeof(cl_int), &chartHeight);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 5, sizeof(cl_int), &chartPosX);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 6, sizeof(cl_int), &chartPosY);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 7, sizeof(cl_int), &paddingY);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 8, sizeof(cl_float), &gpuTimings->renderSkyBoxTime);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 9, sizeof(cl_float), &gpuTimings->renderTrianglesTime);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 10, sizeof(cl_float), &gpuTimings->applyReflectionsTime);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 11, sizeof(cl_float), &gpuTimings->applyBlurTime);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 12, sizeof(cl_float), &gpuTimings->readBackTime);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 13, sizeof(cl_float), &maxTime);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting gpuTimings kernel arguments: %d\n", err);
+        return;
+    }
+    
+    // Execute kernel
+    size_t global_work_size[2] = {chartWidth, chartHeight};
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->gpuTimings_kernel, 2, NULL, 
+                                global_work_size, NULL, 0, NULL, NULL);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error executing gpuTimings kernel: %d\n", err);
+    }
+}
+
 // Function prototypes
 void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
@@ -726,16 +780,16 @@ void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
 void renderParticlesToBuffer(struct RenderThreadData *data);
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings);
 
-void createThreads() {
-    for (int i = 0; i < NUM_THREADS; i++) {
-        threadSync[i].ready = 0;
-        threadSync[i].done = 0;
-        threadSync[i].collisionReady = 0;
-        threadSync[i].renderReady = 0;
-        threadIds[i] = i;
-        pthread_create(&threads[i], NULL, threadFunction, &threadIds[i]);
-    }
-}
+// void createThreads() {
+//     for (int i = 0; i < NUM_THREADS; i++) {
+//         threadSync[i].ready = 0;
+//         threadSync[i].done = 0;
+//         threadSync[i].collisionReady = 0;
+//         threadSync[i].renderReady = 0;
+//         threadIds[i] = i;
+//         pthread_create(&threads[i], NULL, threadFunction, &threadIds[i]);
+//     }
+// }
 
 
 void *threadFunction(void *arg) {
@@ -2917,7 +2971,7 @@ void saveScreenNormal(struct Screen *screen) {
     memcpy((uint8_t*)SharedMem + offset, buffer, ScreenWidth * ScreenHeight * 4);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct gpuTimings *gpuTimings) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
     clearScreen(screen);
@@ -3195,13 +3249,6 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         return 0;
     }
     
-    // Create command queue
-    // ocl->queue = clCreateCommandQueue(ocl->context, ocl->device, 0, &err);
-    // if (err != CL_SUCCESS) {
-    //     printf("Error creating OpenCL command queue: %d\n", err);
-    //     return 0;
-    // }
-    
     // Read kernel source
     FILE *file = fopen("openGlShaders/screenCordinates.cl", "r");
     if (!file) {
@@ -3241,6 +3288,12 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         return 0;
     }
     
+    ocl->gpuTimings_kernel = clCreateKernel(ocl->program, "gpuTimings", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating gpuTimings kernel: %d\n", err);
+        return 0;
+    }
+
     // Create particle projection kernel
     ocl->kernel = clCreateKernel(ocl->program, "project_points_to_screen", &err);
     if (err != CL_SUCCESS) {
@@ -3551,7 +3604,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     // *** Screen Space Projection Kernel and sky box ***
     applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime);
     printf("Reflections applied in %f ms\n", gpuTimings->applyReflectionsTime);
-
+    // *** GPU Timings Kernel ***
+    renderGPUTimings(ocl, gpuTimings);
 
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)
@@ -4044,108 +4098,12 @@ int main() {
     }
     printf("SkyBox loaded successfully\n");
 
-    // tinyobj_attrib_t attrib;  // Fix typo: was inyobj_attrib_t
-    // tinyobj_shape_t* shapes = NULL;
-    // size_t num_shapes;
-    // tinyobj_material_t* materials = NULL;
-    // size_t num_materials;
-
-    // // Initialize attribute structure
-    // tinyobj_attrib_init(&attrib);
-
-    // // Load and triangulate .obj file with correct parameters
-    // int result = tinyobj_parse_obj(
-    //     &attrib, &shapes, &num_shapes, &materials, &num_materials,
-    //     "model.obj", my_file_reader, NULL, TINYOBJ_FLAG_TRIANGULATE
-    // );
-    // if (result != TINYOBJ_SUCCESS) {
-    //     fprintf(stderr, "Error loading OBJ\n");
-    //     return 1;
-    // }
-
     struct Triangles *triangles = (struct Triangles *)malloc(sizeof(struct Triangles));
     if (!triangles) {
         perror("Failed to allocate memory for triangles");
         return 1;
     }
     triangles->count = 0;
-
-    // // Extract triangles from loaded OBJ data
-    // for (size_t i = 0; i < num_shapes; ++i) {
-    //     // Access face data directly from attrib structure
-    //     size_t face_offset = shapes[i].face_offset;
-    //     size_t num_faces = shapes[i].length / 3; // Each triangle has 3 vertices
-        
-    //     // Process each face (which is already triangulated)
-    //     for (size_t f = 0; f < num_faces; ++f) {
-    //         if (triangles->count >= NUMBER_OF_TRIANGLES) {
-    //             printf("Warning: Model has more triangles than buffer size (%d)\n", NUMBER_OF_TRIANGLES);
-    //             break;
-    //         }
-            
-    //         // Get the three vertices of this triangle
-    //         float v1[3], v2[3], v3[3];
-            
-    //         for (size_t v = 0; v < 3; ++v) {
-    //             tinyobj_vertex_index_t idx = attrib.faces[face_offset + f * 3 + v];
-                
-    //             // Extract vertex coordinates
-    //             float vx = attrib.vertices[3 * idx.v_idx + 0];
-    //             float vy = attrib.vertices[3 * idx.v_idx + 1];
-    //             float vz = attrib.vertices[3 * idx.v_idx + 2];
-                
-    //             if (v == 0) {
-    //                 v1[0] = vx; v1[1] = vy; v1[2] = vz;
-    //             } else if (v == 1) {
-    //                 v2[0] = vx; v2[1] = vy; v2[2] = vz;
-    //             } else {
-    //                 v3[0] = vx; v3[1] = vy; v3[2] = vz;
-    //             }
-    //         }
-            
-    //         // Add triangle to your structure
-    //         AddTriangle(triangles, 
-    //                    v1[0], v1[1], v1[2],
-    //                    v2[0], v2[1], v2[2],
-    //                    v3[0], v3[1], v3[2],
-    //                    rand(), rand(), rand()); // Normals will be recalculated later
-    //     }
-        
-    //     // Break if we've reached the triangle limit
-    //     if (triangles->count >= NUMBER_OF_TRIANGLES) {
-    //         break;
-    //     }
-    // }
-
-    // printf("Loaded %d triangles from OBJ file\n", triangles->count);
-
-    // const float scaleFactor = 10.0f;
-
-    // for (int i = 0; i < triangles->count; i++) {
-    //     int idx = i * 3;
-    //     triangles->v1[idx + 0] *= scaleFactor;
-    //     triangles->v1[idx + 1] *= scaleFactor;
-    //     triangles->v1[idx + 2] *= scaleFactor;
-    //     triangles->v2[idx + 0] *= scaleFactor;
-    //     triangles->v2[idx + 1] *= scaleFactor;
-    //     triangles->v2[idx + 2] *= scaleFactor;
-    //     triangles->v3[idx + 0] *= scaleFactor;
-    //     triangles->v3[idx + 1] *= scaleFactor;
-    //     triangles->v3[idx + 2] *= scaleFactor;
-
-    //     // Optionally, recalc normals if needed:
-    //     float ux = triangles->v2[idx + 0] - triangles->v1[idx + 0];
-    //     float uy = triangles->v2[idx + 1] - triangles->v1[idx + 1];
-    //     float uz = triangles->v2[idx + 2] - triangles->v1[idx + 2];
-    //     float vx = triangles->v3[idx + 0] - triangles->v1[idx + 0];
-    //     float vy = triangles->v3[idx + 1] - triangles->v1[idx + 1];
-    //     float vz = triangles->v3[idx + 2] - triangles->v1[idx + 2];
-    //     triangles->normals[idx + 0] = uy * vz - uz * vy;
-    //     triangles->normals[idx + 1] = uz * vx - ux * vz;
-    //     triangles->normals[idx + 2] = ux * vy - uy * vx;
-    // }
-
-    
 
     struct Camera camera;
     camera.ray.origin[0] = 50.0f;
@@ -4178,7 +4136,7 @@ int main() {
         // Initialize basic fields
         threadData[i]->maxVelocity = 0.0f;
     }
-    createThreads();
+    // createThreads();
 
     struct PointSOA *particles = (struct PointSOA *)malloc(sizeof(struct PointSOA));
     if (!particles) {
@@ -4210,7 +4168,7 @@ int main() {
         }
     }
 
-    asignDataToThreads(particles, &camera, NUM_PARTICLES);
+    // asignDataToThreads(particles, &camera, NUM_PARTICLES);
 
     struct Screen *screen = (struct Screen *)malloc(sizeof(struct Screen));
     if (!screen) {
