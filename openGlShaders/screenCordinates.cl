@@ -1,3 +1,97 @@
+void renderFont(
+    const int fontSizeX,     // Total font texture width
+    const int fontSizeY,     // Total font texture height  
+    const int spriteSizeX,   // Individual character width (e.g., 8)
+    const int spriteSizeY,   // Individual character height (e.g., 8)
+    const char character,
+    __global float *ScreenColors,
+    __global const char *FontData,
+    const int screenWidth,
+    const int screenHeight,
+    const int posX,          // Screen position to render character
+    const int posY           // Screen position to render character
+) {
+    int ascii_code = (int)character;
+    int idx = ascii_code - 32; // ASCII offset for printable characters
+
+    int cols = (fontSizeX / spriteSizeX);
+    int rows = (fontSizeY / spriteSizeY);
+
+    // Calculate character position in font texture
+    int charCol = idx % cols;
+    int charRow = idx / cols;
+    
+    int fontStartX = charCol * spriteSizeX;
+    int fontStartY = charRow * spriteSizeY;
+
+    // Render character pixel by pixel
+    for (int charY = 0; charY < spriteSizeY; charY++) {
+        for (int charX = 0; charX < spriteSizeX; charX++) {
+            // Font texture coordinates
+            int fontX = fontStartX + charX;
+            int fontY = fontStartY + charY;
+            
+            // Screen coordinates
+            int screenX = posX + charX;
+            int screenY = posY + charY;
+
+            // Bounds checking
+            if (screenX < 0 || screenX >= screenWidth || 
+                screenY < 0 || screenY >= screenHeight) {
+                continue; // Skip out of bounds pixels
+            }
+            
+            if (fontX >= fontSizeX || fontY >= fontSizeY) {
+                continue; // Skip invalid font coordinates
+            }
+
+            // Read pixel from font data
+            int fontPixelIndex = fontY * fontSizeX + fontX;
+            char fontPixel = FontData[fontPixelIndex];
+            
+            // Only render if font pixel is "on" (1 = foreground, 0 = background)
+            if (fontPixel == 0) {
+                int screenPixelIndex = screenY * screenWidth + screenX;
+                int colorIndex = screenPixelIndex * 3;
+
+                // Set the color for this pixel
+                ScreenColors[colorIndex]     = 1.0f; // R
+                ScreenColors[colorIndex + 1] = 1.0f; // G  
+                ScreenColors[colorIndex + 2] = 1.0f; // B
+            }
+        }
+    }
+}
+
+__kernel void renderText(
+    const int fontSizeX,     // Total font texture width
+    const int fontSizeY,     // Total font texture height  
+    const int spriteSizeX,   // Individual character width (e.g., 8)
+    const int spriteSizeY,   // Individual character height (e.g., 8)
+    __global float *ScreenColors,
+    __global const char *FontData,
+    const int screenWidth,
+    const int screenHeight,
+    __global const int *posX,          // Screen position to render character
+    __global const int *posY  ,         // Screen position to render character
+    __global const char *character,
+    const int NumberOfCharacters
+) {
+    int globalId = get_global_id(0);
+    
+    if (globalId >= NumberOfCharacters) return; // Out of bounds check
+    
+    char currentChar = character[globalId];
+    
+    // Calculate position for this character
+    int posXValue = posX[globalId];
+    int posYValue = posY[globalId];
+    
+    // Render the character at the specified position
+    renderFont(fontSizeX, fontSizeY, spriteSizeX, spriteSizeY, currentChar,
+               ScreenColors, FontData, screenWidth, screenHeight, posXValue, posYValue);
+}
+
 __kernel void gpuTimings(
     __global float *ScreenColors,
     const int screenWidth,

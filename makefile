@@ -1,5 +1,5 @@
 CC = clang
-CFLAGS = -O3 -march=native -Wall -Wextra
+CFLAGS = -O3 -march=native
 LDFLAGS = -lm -lOpenCL -ljpeg
 
 all: main

@@ -20,6 +20,10 @@
 
 void *SharedMem = NULL;
 
+#define MAX_TEXT_LENGTH 256
+int     posX[MAX_TEXT_LENGTH];
+int     posY[MAX_TEXT_LENGTH];
+char    text[MAX_TEXT_LENGTH];
 #define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
@@ -38,10 +42,15 @@ void *SharedMem = NULL;
 #define NUMBER_OF_TRIANGLES 100000
 #define NUMBER_OF_CUBES 1
 pthread_t threads[NUM_THREADS];
-
 struct RawImage {
     unsigned char *data; // RGB pixel data
     int width, height, components;
+};
+
+struct ImageFont {
+    int width;      
+    int height;     
+    char *data;
 };
 
 struct RawImage* load_jpeg(const char *filename) {
@@ -186,6 +195,7 @@ struct OpenCLContext {
     cl_kernel skybox_kernel;
     cl_kernel applyReflections_kernel;
     cl_kernel gpuTimings_kernel; // Add kernel for GPU timings
+    cl_kernel renderText_kernel; // Add kernel for rendering text
     // buffers
     cl_mem buffer_points;
     cl_mem buffer_velocities;
@@ -196,6 +206,9 @@ struct OpenCLContext {
     cl_mem buffer_distances_temp;
     cl_mem buffer_opacities_temp;
     cl_mem buffer_triangle_colors;
+
+    // buffer for rendering text
+    cl_mem buffer_font_data;  // Add buffer for font data
     
     // Add triangle buffers
     cl_mem buffer_triangle_v1;
@@ -723,8 +736,8 @@ struct GPUTimings {
 // Add this to your C code after GPU operations
 void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) {
     // Timing chart parameters
-    int chartPosX = 10;           // X position on screen
-    int chartPosY = 10;           // Y position on screen  
+    int chartPosX = 700;           // X position on screen
+    int chartPosY = 510;           // Y position on screen  
     int chartWidth = 100;         // Width of timing chart
     int chartHeight = 75;        // Height of timing chart
     int paddingY = 5;             // Top padding
@@ -778,18 +791,18 @@ void calculateParticleScreenCoordinates(struct ThreadData *threadData);
 void *threadFunction(void *arg);
 void CollideParticlesInGridInThread(struct ThreadDataCollideParticles *data);
 void renderParticlesToBuffer(struct RenderThreadData *data);
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font);
 
-// void createThreads() {
-//     for (int i = 0; i < NUM_THREADS; i++) {
-//         threadSync[i].ready = 0;
-//         threadSync[i].done = 0;
-//         threadSync[i].collisionReady = 0;
-//         threadSync[i].renderReady = 0;
-//         threadIds[i] = i;
-//         pthread_create(&threads[i], NULL, threadFunction, &threadIds[i]);
-//     }
-// }
+void createThreads() {
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threadSync[i].ready = 0;
+        threadSync[i].done = 0;
+        threadSync[i].collisionReady = 0;
+        threadSync[i].renderReady = 0;
+        threadIds[i] = i;
+        pthread_create(&threads[i], NULL, threadFunction, &threadIds[i]);
+    }
+}
 
 
 void *threadFunction(void *arg) {
@@ -2971,7 +2984,7 @@ void saveScreenNormal(struct Screen *screen) {
     memcpy((uint8_t*)SharedMem + offset, buffer, ScreenWidth * ScreenHeight * 4);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
     // printf("\n--- Starting render ---\n");
     int start = clock();
     clearScreen(screen);
@@ -2982,7 +2995,7 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
     timePartition->clearScreenTime += dt;
     // printf("Clear screen time: %f\n", dt);
     if (USE_GPU == 1) {
-        projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox, gpuTimings);
+        projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox, gpuTimings, font);
         // save normal screen
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
@@ -3171,6 +3184,76 @@ int uploadTriangleDataOnce(struct OpenCLContext *ocl, struct Triangles *triangle
     return 1;
 }
 
+void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, const char *text, int startX, int startY) {
+    if (!font->data || !text) return;
+    
+    int textLen = strlen(text);
+    if (textLen == 0) return;
+    
+    cl_int err;
+    
+    for (int i = 0; i < textLen; i++) {
+        posX[i] = startX + i * 8;  // 8 pixel spacing between characters
+        posY[i] = startY;
+    }
+    
+    // Create temporary buffers for this text rendering
+    cl_mem buffer_posX = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       textLen * sizeof(int), posX, &err);
+    cl_mem buffer_posY = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       textLen * sizeof(int), posY, &err);
+    cl_mem buffer_text = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       textLen * sizeof(char), (void*)text, &err);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error creating text rendering buffers: %d\n", err);
+        return;
+    }
+    
+    // Set kernel arguments
+    cl_int fontSizeX = font->width;
+    cl_int fontSizeY = font->height;
+    cl_int spriteSizeX = 8;  // Character width
+    cl_int spriteSizeY = 8;  // Character height
+    cl_int screenWidth = ScreenWidth;
+    cl_int screenHeight = ScreenHeight;
+    cl_int numChars = textLen;
+    
+    err = clSetKernelArg(ocl->renderText_kernel, 0, sizeof(cl_int), &fontSizeX);
+    err |= clSetKernelArg(ocl->renderText_kernel, 1, sizeof(cl_int), &fontSizeY);
+    err |= clSetKernelArg(ocl->renderText_kernel, 2, sizeof(cl_int), &spriteSizeX);
+    err |= clSetKernelArg(ocl->renderText_kernel, 3, sizeof(cl_int), &spriteSizeY);
+    err |= clSetKernelArg(ocl->renderText_kernel, 4, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    err |= clSetKernelArg(ocl->renderText_kernel, 5, sizeof(cl_mem), &ocl->buffer_font_data);
+    err |= clSetKernelArg(ocl->renderText_kernel, 6, sizeof(cl_int), &screenWidth);
+    err |= clSetKernelArg(ocl->renderText_kernel, 7, sizeof(cl_int), &screenHeight);
+    err |= clSetKernelArg(ocl->renderText_kernel, 8, sizeof(cl_mem), &buffer_posX);
+    err |= clSetKernelArg(ocl->renderText_kernel, 9, sizeof(cl_mem), &buffer_posY);
+    err |= clSetKernelArg(ocl->renderText_kernel, 10, sizeof(cl_mem), &buffer_text);
+    err |= clSetKernelArg(ocl->renderText_kernel, 11, sizeof(cl_int), &numChars);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting RenderText kernel arguments: %d\n", err);
+        clReleaseMemObject(buffer_posX);
+        clReleaseMemObject(buffer_posY);
+        clReleaseMemObject(buffer_text);
+        return;
+    }
+    
+    // Execute kernel
+    size_t global_work_size = textLen;
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderText_kernel, 1, NULL, 
+                                &global_work_size, NULL, 0, NULL, NULL);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error executing RenderText kernel: %d\n", err);
+    }
+    
+    // Cleanup
+    clReleaseMemObject(buffer_posX);
+    clReleaseMemObject(buffer_posY);
+    clReleaseMemObject(buffer_text);
+}
 
 int setupStaticKernelArguments(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox) {
     cl_int err;
@@ -3214,7 +3297,7 @@ int setupStaticKernelArguments(struct OpenCLContext *ocl, struct Triangles *tria
     return 1;
 }
 
-int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox) {
+int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox, struct ImageFont *imageFont) {
     cl_int err;
     
     // Get platform
@@ -3285,6 +3368,13 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         clGetProgramBuildInfo(ocl->program, ocl->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
         printf("Build log: %s\n", log);
         free(log);
+        return 0;
+    }
+
+    // crete kernel for rendering text
+    ocl->renderText_kernel = clCreateKernel(ocl->program, "renderText", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating renderText kernel: %d\n", err);
         return 0;
     }
     
@@ -3479,6 +3569,17 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         return 0;
     }
 
+    // Buffer for font
+    size_t font_size = imageFont->width * imageFont->height * sizeof(char);
+    ocl->buffer_font_data = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                          font_size, imageFont->data, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating font buffer: %d\n", err);
+        return 0;
+    }
+    printf("Font uploaded to GPU: %dx%d pixels (%zu bytes)\n", imageFont->width, imageFont->height, font_size);
+
+
     // *** INITIALIZE SKYBOX BUFFERS AND UPLOAD DATA ***
     if (!initializeSkyboxBuffers(ocl, skyBox)) {
         printf("Failed to initialize skybox buffers during OpenCL init\n");
@@ -3521,7 +3622,7 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
     return 1;
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings) {
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
     cl_int err;
     cl_event readback_events[5]; // Array to hold all readback events
     
@@ -3598,14 +3699,24 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     // *** RENDER SKYBOX FIRST (fills background) ***
     renderSkyboxOpenCL(ocl, camera, skyBox, &gpuTimings->renderSkyBoxTime);
     printf("Skybox rendered in %f ms\n", gpuTimings->renderSkyBoxTime);
+    snprintf(text, sizeof(text), "Skybox %f ms", gpuTimings->renderSkyBoxTime);
+    // int chartPosX = 700;           // X position on screen
+    // int chartPosY = 510;           // Y position on screen  
+    renderTextOpenCL(ocl, font, text, 550, 515);
     // *** TRIANGLE RENDERING ***
     renderTrianglesOpenCL(ocl, triangles, camera, screen, skyBox, &gpuTimings->renderTrianglesTime);
     printf("Triangles rendered in %f ms\n", gpuTimings->renderTrianglesTime);
+    snprintf(text, sizeof(text), "Tris %f ms", gpuTimings->renderTrianglesTime);
+    renderTextOpenCL(ocl, font, text, 550, 530);
     // *** Screen Space Projection Kernel and sky box ***
     applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime);
     printf("Reflections applied in %f ms\n", gpuTimings->applyReflectionsTime);
+    snprintf(text, sizeof(text), "Ref %f ms", gpuTimings->applyReflectionsTime);
+    renderTextOpenCL(ocl, font, text, 550, 545);
     // *** GPU Timings Kernel ***
     renderGPUTimings(ocl, gpuTimings);
+    snprintf(text, sizeof(text), "Read %f ms", gpuTimings->readBackTime);
+    renderTextOpenCL(ocl, font, text, 550, 575);
 
     
     // Set kernel arguments (FIXED ARGUMENT INDICES)
@@ -3720,6 +3831,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         if (err == CL_SUCCESS) {
             gpuTimings->applyBlurTime = (last_end - first_start) * 1e-6f; // ns to ms
             printf("Blur completed in %.3f ms\n", gpuTimings->applyBlurTime);
+            snprintf(text, sizeof(text), "Blur %f ms", gpuTimings->applyBlurTime);
+            renderTextOpenCL(ocl, font, text, 550, 560);
         } else {
             printf("Error getting blur profiling info: %d\n", err);
             gpuTimings->applyBlurTime = 0.0f;
@@ -3817,6 +3930,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     }
     
     printf("Readback completed in %f ms\n", gpuTimings->readBackTime);
+
 
     // Clear the screen arrays first (INCLUDING NORMALS)
     memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
@@ -4073,7 +4187,54 @@ void readFileTriangles(const char *filename, struct Triangles *triangles, float 
     printf("Triangle count: %d\n", triangles->count);
 }
 
+
+
+void loadFont(struct ImageFont *font, const char *filename) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error: Could not open font file %s\n", filename);
+        return;
+    }
+    
+    // Load first uint32 little-endian value as width
+    fread(&font->width, sizeof(uint32_t), 1, file);
+    // Load second uint32 little-endian value as height
+    fread(&font->height, sizeof(uint32_t), 1, file);
+    
+    printf("Loading font: %dx%d pixels\n", font->width, font->height);
+    
+    // Allocate memory for font data
+    int totalPixels = font->width * font->height;
+    font->data = (char *)malloc(totalPixels * sizeof(char));
+    if (!font->data) {
+        printf("Error: Could not allocate memory for font data\n");
+        fclose(file);
+        return;
+    }
+    
+    // Read the bit data (each bit is stored as a byte in your Python code)
+    for (int i = 0; i < totalPixels; i++) {
+        uint8_t bit;
+        if (fread(&bit, sizeof(uint8_t), 1, file) != 1) {
+            printf("Error: Could not read bit data at position %d\n", i);
+            free(font->data);
+            font->data = NULL;
+            fclose(file);
+            return;
+        }
+        font->data[i] = (char)bit;  // Store as 0 or 1
+    }
+    
+    fclose(file);
+    printf("Font loaded successfully: %d pixels\n", totalPixels);
+}
+
+
 int main() {
+    // load font
+    struct ImageFont font;
+    loadFont(&font, "fonts/fonts.bin");
+
     int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     if (fd == -1) {
         perror("shm_open");
@@ -4272,7 +4433,7 @@ int main() {
     printf("Triangles count after reading: %d\n", triangles->count);
 
     struct OpenCLContext ocl;
-    int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox);
+    int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox, &font);
     if (!useOpenCL) {
         printf("Failed to initialize OpenCL, falling back to CPU\n");
     }
@@ -4320,7 +4481,7 @@ int main() {
         float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
         
         clock_t startRenderTime = clock();
-        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles, &skyBox, &gpuTimings);
+        render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles, &skyBox, &gpuTimings, &font);
         clock_t endRenderTime = clock();
         clock_gettime(CLOCK_MONOTONIC, &end);
         dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
