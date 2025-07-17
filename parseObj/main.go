@@ -1072,143 +1072,20 @@ func isLeafNode(node BVHNode) bool {
 	return node.TriangleIndex >= 0
 }
 
-func (g *Game) UpdatePixels() error {
-	// Handle color rendering from shared memory
-	if g.renderMode == renderColor {
-		// Read color data from shared memory instead of file
-		sharedData, err := openSharedMemory()
-		if err != nil {
-			return fmt.Errorf("failed to read shared memory: %w", err)
-		}
-		defer closeSharedMemory(sharedData)
-
-		// Check if we have the expected amount of data
-		expectedSize := screenWidth * screenHeight * 4
-		if len(sharedData) >= expectedSize {
-			// Create a copy of the data since shared memory is volatile
-			colorData := make([]byte, expectedSize)
-			copy(colorData, sharedData[:expectedSize])
-
-			if g.img == nil {
-				g.img = ebiten.NewImage(screenWidth, screenHeight)
-			}
-			g.img.WritePixels(colorData)
-		} else {
-			return fmt.Errorf("shared memory size mismatch, expected %d bytes, got %d", expectedSize, len(sharedData))
-		}
-		return nil // Early return for color mode
-	}
-
-	// Handle normal rendering from shared memory
-	if g.renderMode == renderNormal {
-		sharedData, err := openSharedMemory()
-		if err != nil {
-			return fmt.Errorf("failed to read shared memory: %w", err)
-		}
-		defer closeSharedMemory(sharedData)
-
-		// Calculate offsets for normal data (second part of shared memory)
-		colorSize := screenWidth * screenHeight * 4
-		normalOffset := colorSize
-		expectedTotalSize := colorSize * 2 // Color + Normal data
-
-		if len(sharedData) >= expectedTotalSize {
-			// Extract normal data from shared memory at offset
-			normalData := make([]byte, colorSize)
-			copy(normalData, sharedData[normalOffset:normalOffset+colorSize])
-
-			if g.img == nil {
-				g.img = ebiten.NewImage(screenWidth, screenHeight)
-			}
-			g.img.WritePixels(normalData)
-		} else {
-			return fmt.Errorf("shared memory size mismatch for normals, expected %d bytes, got %d", expectedTotalSize, len(sharedData))
-		}
-		return nil // Early return for normal mode
-	}
-
-	// Handle other render modes (distance, velocity, opacity, fluid) from file
-	data, err := os.ReadFile("output.bin")
-	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
-	}
-
-	// Each pixel in the file has 3 bytes: distance, velocity, and opacity
-	for y := 0; y < screenHeight-1; y++ {
-		for x := 0; x < screenWidth-1; x++ {
-			srcPos := (y*screenWidth + x) * 3 // 3 bytes per pixel
-			dstPos := (y*screenWidth + x) * 4 // 4 bytes per pixel for RGBA
-
-			if srcPos+3 > len(data) {
-				continue // Skip if not enough data
-			}
-
-			var value uint8
-			switch g.renderMode {
-			case renderDistance:
-				value = data[srcPos]
-			case renderVelocity:
-				value = data[srcPos+1]
-			case renderOpacity:
-				value = data[srcPos+2]
-			case renderFluid:
-				value = data[srcPos]
-				for i := 0; i < 3; i++ {
-					g.pixelsOpacity[dstPos+i] = data[srcPos+2]
-					g.pixelsVelocity[dstPos+i] = data[srcPos+1]
-					g.pixelsDistance[dstPos+i] = data[srcPos]
-				}
-			}
-
-			// Build a grayscale pixel based on the chosen channel
-			if g.renderMode != renderNormal && dstPos+3 <= len(g.pixels) {
-				g.pixels[dstPos] = value   // R
-				g.pixels[dstPos+1] = value // G
-				g.pixels[dstPos+2] = value // B
-				g.pixels[dstPos+3] = 255   // A
-			}
-		}
-	}
-
-	if g.img == nil {
-		g.img = ebiten.NewImage(screenWidth, screenHeight)
-	}
-
-	// Handle fluid rendering
-	if g.renderMode == renderFluid {
-		if g.imgVelocity == nil {
-			g.imgVelocity = ebiten.NewImage(screenWidth, screenHeight)
-		}
-		if g.imgOpacity == nil {
-			g.imgOpacity = ebiten.NewImage(screenWidth, screenHeight)
-		}
-		if g.imgDistance == nil {
-			g.imgDistance = ebiten.NewImage(screenWidth, screenHeight)
-		}
-
-		g.imgVelocity.WritePixels(g.pixelsVelocity[:])
-		g.imgOpacity.WritePixels(g.pixelsOpacity[:])
-		g.imgDistance.WritePixels(g.pixelsDistance[:])
-	}
-
-	// Update main image for non-color/non-normal modes
-	if g.renderMode != renderColor && g.renderMode != renderNormal {
-		g.img.WritePixels(g.pixels[:])
-	}
-
-	return nil
-}
-
 func main() {
-	obj, err := parseObjFile("monkey.obj", nil)
+	obj1, err := parseObjFile("monkey.obj", nil)
 	if err != nil {
 		panic(err)
 	}
 
-	// obj, err = readFile("triangles.bin")
-	// if err != nil {
-	// 	panic(err)
-	// }
+	obj, err := readFile("triangles.bin")
+	if err != nil {
+		panic(err)
+	}
+
+	// add triangles from obj1 to obj
+	obj.Triangles = append(obj.Triangles, obj1.Triangles...)
+
 
 	// Build BVH
 	bvhLinear := &BVHLinear{}
@@ -1224,6 +1101,11 @@ func main() {
 
 	// Original file writing
 	err = writeFile("room.bin", obj)
+	if err != nil {
+		panic(err)
+	}
+
+	err = writeFile("encoded.bin", obj)
 	if err != nil {
 		panic(err)
 	}
