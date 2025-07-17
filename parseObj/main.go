@@ -1100,21 +1100,21 @@ func main() {
 	fmt.Println("BVH written to output.bvh")
 
 	// Original file writing
-	err = writeFile("room.bin", obj)
-	if err != nil {
-		panic(err)
-	}
+	// err = writeFile("room.bin", obj)
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	err = writeFile("encoded.bin", obj)
 	if err != nil {
 		panic(err)
 	}
 
-	realFileSize, err := getFileSize("room.bin")
+	realFileSize, err := getFileSize("encoded.bin")
 	if err != nil {
 		panic(err)
 	}
-	encodedFileSize, err := getEncodedFileSize("room.bin")
+	encodedFileSize, err := getEncodedFileSize("encoded.bin")
 	if err != nil {
 		panic(err)
 	}
