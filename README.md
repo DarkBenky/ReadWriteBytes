@@ -25,6 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] New Triangle Renderer ([link](https://chatgpt.com/c/6878486d-ee08-8004-b21e-31c714a8479f))
+- [ ] Trace Ray Function prototype ![trace diagram](trace.png)
 - [ ] Add Timing for rendering of particles
 - [ ] Add chart for gpu timing
 - [ ] convert timing to this format
