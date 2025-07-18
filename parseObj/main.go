@@ -960,17 +960,13 @@ func (bvh *BVHLinear) WriteBVHToFile(filename string) error {
 
 	w := bufio.NewWriter(file)
 
-	// Write header
-	// 1. Magic number for BVH file type (4 bytes)
-	w.Write([]byte("BVH1")) // BVH format version 1
-
-	// 2. Number of nodes (4 bytes)
+	// 1. Number of nodes (4 bytes)
 	w.Write(uint32ToBytes(uint32(len(bvh.Nodes))))
 
-	// 3. Number of triangles (4 bytes)
+	// 2. Number of triangles (4 bytes)
 	w.Write(uint32ToBytes(uint32(len(bvh.Triangles))))
 
-	// 4. Root node index (4 bytes) - always 0 for our implementation
+	// 3. Root node index (4 bytes) - always 0 for our implementation
 	w.Write(uint32ToBytes(0))
 
 	// Write all nodes
@@ -991,6 +987,27 @@ func (bvh *BVHLinear) WriteBVHToFile(filename string) error {
 	// Write triangle indices
 	// This is useful if the BVH needs to reference the original triangles
 	for _, tri := range bvh.Triangles {
+		w.Write(float32ToBytes(tri.Vertex1.X))
+		w.Write(float32ToBytes(tri.Vertex1.Y))
+		w.Write(float32ToBytes(tri.Vertex1.Z))
+		w.Write(float32ToBytes(tri.Vertex2.X))
+		w.Write(float32ToBytes(tri.Vertex2.Y))
+		w.Write(float32ToBytes(tri.Vertex2.Z))
+		w.Write(float32ToBytes(tri.Vertex3.X))
+		w.Write(float32ToBytes(tri.Vertex3.Y))
+		w.Write(float32ToBytes(tri.Vertex3.Z))
+		// Normal
+		w.Write(float32ToBytes(tri.Normal.X))
+		w.Write(float32ToBytes(tri.Normal.Y))
+		w.Write(float32ToBytes(tri.Normal.Z))
+		// Additional fields
+		w.Write(float32ToBytes(tri.Roughness))
+		w.Write(float32ToBytes(tri.Metallic))
+		w.Write(float32ToBytes(tri.Emission))
+		w.Write(float32ToBytes(tri.Color[0]))
+		w.Write(float32ToBytes(tri.Color[1]))
+		w.Write(float32ToBytes(tri.Color[2]))
+		// Triangle index
 		w.Write(uint32ToBytes(uint32(tri.index)))
 	}
 
@@ -1073,10 +1090,10 @@ func isLeafNode(node BVHNode) bool {
 }
 
 func main() {
-	obj1, err := parseObjFile("monkey.obj", nil)
-	if err != nil {
-		panic(err)
-	}
+	// obj1, err := parseObjFile("monkey.obj", nil)
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	obj, err := readFile("triangles.bin")
 	if err != nil {
@@ -1084,7 +1101,7 @@ func main() {
 	}
 
 	// add triangles from obj1 to obj
-	obj.Triangles = append(obj.Triangles, obj1.Triangles...)
+	// obj.Triangles = append(obj.Triangles, obj1.Triangles...)
 
 
 	// Build BVH
@@ -1093,17 +1110,11 @@ func main() {
 	fmt.Printf("Built BVH with %d nodes\n", len(bvhLinear.Nodes))
 
 	// Write BVH to binary file
-	err = bvhLinear.WriteBVHToFile("output.bvh")
+	err = bvhLinear.WriteBVHToFile("encoded.bvh")
 	if err != nil {
 		panic(err)
 	}
 	fmt.Println("BVH written to output.bvh")
-
-	// Original file writing
-	// err = writeFile("room.bin", obj)
-	// if err != nil {
-	// 	panic(err)
-	// }
 
 	err = writeFile("encoded.bin", obj)
 	if err != nil {

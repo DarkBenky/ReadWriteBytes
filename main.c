@@ -55,6 +55,30 @@ struct ImageFont {
     char *data;
 };
 
+struct Triangle {
+    float v1[3]; // Vertex 1
+    float v2[3]; // Vertex 2
+    float v3[3]; // Vertex 3
+    float normal[3]; // Normal vector
+    float color[3]; // RGB color
+    float Roughness; // Material roughness
+    float Metallic; // Material metallic
+    float Emission; // Material emission
+    int TriangleIndex; // Index of the triangle
+};
+
+struct BVHNode {
+    float   BoundingBox[6]; // minX, minY, minZ, maxX, maxY, maxZ
+    int     LeftChild;        // Index of left child node
+    int     RightChild;       // Index of right child node
+    int     TriangleIndex;
+};
+
+struct BVHLinear {
+    struct BVHNode  *Nodes; // Array of BVH nodes
+    struct Triangle *Triangles; // Array of triangles
+};
+
 struct RawImage* load_jpeg(const char *filename) {
     FILE *f = fopen(filename, "rb");
     if (!f) return NULL;
@@ -249,6 +273,7 @@ struct Camera {
     struct Ray ray;
     float fov;
 };
+
 
 struct Triangles {
     float v1 [NUMBER_OF_TRIANGLES * 3];
@@ -4322,6 +4347,147 @@ void loadFont(struct ImageFont *font, const char *filename) {
     printf("Font loaded successfully: %d pixels\n", totalPixels);
 }
 
+void ReadBVH(struct BVHLinear *bvh, const char *filename) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error: Could not open BVH file %s\n", filename);
+        return;
+    }
+
+    int NumberOfTriangles = 0;
+    int NumberOfNodes = 0;
+
+    // Load first uint32 little-endian value as Number of Nodes
+    if (fread(&NumberOfNodes, sizeof(uint32_t), 1, file) != 1) {
+        printf("Error: Could not read number of nodes\n");
+        fclose(file);
+        return;
+    }
+    
+    // Load second uint32 little-endian value as Number of Triangles
+    if (fread(&NumberOfTriangles, sizeof(uint32_t), 1, file) != 1) {
+        printf("Error: Could not read number of triangles\n");
+        fclose(file);
+        return;
+    }
+
+    printf("Reading BVH: %d nodes, %d triangles\n", NumberOfNodes, NumberOfTriangles);
+
+    // Allocate memory for BVH nodes
+    bvh->Nodes = (struct BVHNode *)malloc(NumberOfNodes * sizeof(struct BVHNode));
+    if (!bvh->Nodes) {
+        fclose(file);
+        printf("Error: Could not allocate memory for BVH nodes\n");
+        return;
+    }
+
+    // Allocate memory for triangles container
+    bvh->Triangles = (struct Triangle *)malloc(sizeof(struct Triangle) * NumberOfTriangles);
+    if (!bvh->Triangles) {
+        printf("Error: Could not allocate memory for triangles container\n");
+        free(bvh->Nodes);
+        fclose(file);
+        return;
+    }
+
+    // Read all BVH nodes
+    for (int i = 0; i < NumberOfNodes; i++) {
+        if (fread(&bvh->Nodes[i], sizeof(struct BVHNode), 1, file) != 1) {
+            printf("Error: Could not read BVH node %d\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+    }
+
+    // Read all triangles
+    for (int i = 0; i < NumberOfTriangles; i++) {
+        struct Triangle *triangle = &bvh->Triangles[i];
+        
+        // Read vertex 1
+        if (fread(triangle->v1, sizeof(float), 3, file) != 3) {
+            printf("Error: Could not read triangle %d vertex 1\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        // Read vertex 2
+        if (fread(triangle->v2, sizeof(float), 3, file) != 3) {
+            printf("Error: Could not read triangle %d vertex 2\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        // Read vertex 3
+        if (fread(triangle->v3, sizeof(float), 3, file) != 3) {
+            printf("Error: Could not read triangle %d vertex 3\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        // Read normal vector
+        if (fread(triangle->normal, sizeof(float), 3, file) != 3) {
+            printf("Error: Could not read triangle %d normal\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        // Read color
+        if (fread(triangle->color, sizeof(float), 3, file) != 3) {
+            printf("Error: Could not read triangle %d color\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        // Read material properties
+        if (fread(&triangle->Roughness, sizeof(float), 1, file) != 1) {
+            printf("Error: Could not read triangle %d roughness\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        if (fread(&triangle->Metallic, sizeof(float), 1, file) != 1) {
+            printf("Error: Could not read triangle %d metallic\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        if (fread(&triangle->Emission, sizeof(float), 1, file) != 1) {
+            printf("Error: Could not read triangle %d emission\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+        
+        // Read triangle index
+        if (fread(&triangle->TriangleIndex, sizeof(int), 1, file) != 1) {
+            printf("Error: Could not read triangle %d index\n", i);
+            free(bvh->Nodes);
+            free(bvh->Triangles);
+            fclose(file);
+            return;
+        }
+    }
+
+    fclose(file);
+    printf("BVH loaded successfully: %d nodes, %d triangles\n", NumberOfNodes, NumberOfTriangles);
+}
 
 int main() {
     // load font
@@ -4501,28 +4667,26 @@ int main() {
 
     clock_t lastTime = clock();
 
-    printf("Triangles count: %d\n", triangles->count);
-
-    readFileTriangles("parseObj/encoded.bin", triangles, 25.0f);
+    // readFileTriangles("parseObj/encoded.bin", triangles, 25.0f);
 
     printf("Triangles count after reading: %d\n", triangles->count);
 
-    // for (int i = 0; i <= NUMBER_OF_CUBES; i++) {
-    //     float x = (float)(rand_01() * 500.0f);
-    //     float y = (float)(rand_01() * 500.0f);
-    //     float z = (float)(rand_01() * 500.0f);
-    //     float size = 25.0f;
-    //     float r = (float)rand_01();
-    //     float g = (float)rand_01();
-    //     float b = (float)rand_01();
-    //     float Roughness = (float)rand_01();
-    //     float Metallic = (float)rand_01();
-    //     // float Metallic = 0.0f; // Set Metallic to 1.0f for all cubes
-    //     float Emissive = (float)rand_01();
-    //     CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
-    // }
+    for (int i = 0; i <= NUMBER_OF_CUBES; i++) {
+        float x = (float)(rand_01() * 500.0f);
+        float y = (float)(rand_01() * 500.0f);
+        float z = (float)(rand_01() * 500.0f);
+        float size = 25.0f;
+        float r = (float)rand_01();
+        float g = (float)rand_01();
+        float b = (float)rand_01();
+        float Roughness = (float)rand_01();
+        float Metallic = (float)rand_01();
+        // float Metallic = 0.0f; // Set Metallic to 1.0f for all cubes
+        float Emissive = (float)rand_01();
+        CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
+    }
 
-    // CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
+    CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
     struct OpenCLContext ocl;
     int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox, &font);
