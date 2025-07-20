@@ -26,6 +26,7 @@ int     posY[MAX_TEXT_LENGTH];
 char    text[MAX_TEXT_LENGTH];
 char    textBuffer[MAX_TEXT_LENGTH * 4];
 int     textBufferLen = 0;
+#define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
 #define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
@@ -77,6 +78,8 @@ struct BVHNode {
 struct BVHLinear {
     struct BVHNode  *Nodes; // Array of BVH nodes
     struct Triangle *Triangles; // Array of triangles
+    int NodesCount; // Number of nodes in the BVH
+    int TrianglesCount; // Number of triangles in the BVH
 };
 
 struct RawImage* load_jpeg(const char *filename) {
@@ -217,11 +220,13 @@ struct OpenCLContext {
     cl_kernel kernel;
     cl_kernel blur_kernel;
     cl_kernel normals_kernel;
-    cl_kernel triangle_kernel;  // Add triangle kernel
+    cl_kernel triangle_kernel;  // triangle kernel
     cl_kernel skybox_kernel;
     cl_kernel applyReflections_kernel;
-    cl_kernel gpuTimings_kernel; // Add kernel for GPU timings
-    cl_kernel renderText_kernel; // Add kernel for rendering text
+    cl_kernel gpuTimings_kernel; // kernel for GPU timings
+    cl_kernel renderText_kernel; // kernel for rendering text
+    cl_kernel calculateVertex_kernel;    // Vertex calculation kernel
+    cl_kernel shadePixels_kernel;        // Pixel shading kernel
     // buffers
     cl_mem buffer_points;
     cl_mem buffer_velocities;
@@ -232,9 +237,12 @@ struct OpenCLContext {
     cl_mem buffer_distances_temp;
     cl_mem buffer_opacities_temp;
     cl_mem buffer_triangle_colors;
+    cl_mem buffer_projected_verts;       // Pre-calculated vertex coordinates
+    cl_mem buffer_triangle_bboxes;       // Pre-calculated bounding boxes  
+    cl_mem buffer_valid_triangles;       // Pre-calculated validity flags
 
     // buffer for rendering text
-    cl_mem buffer_font_data;  // Add buffer for font data
+    cl_mem buffer_font_data;  // buffer for font data
     
     // Add triangle buffers
     cl_mem buffer_triangle_v1;
@@ -655,7 +663,7 @@ void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, st
     clReleaseEvent(kernel_event); // Always release events to avoid leaks
 }
 
-void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, struct Screen *screen, struct SkyBox *skyBox, float *gpuTimeMs) {
+void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, float *gpuTimeMs) {
     if (triangles->count == 0) return;
     
     cl_int err;
@@ -694,6 +702,96 @@ void renderTrianglesOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
     *gpuTimeMs = (end_time - start_time) * 1e-6; // convert ns to ms
 
     clReleaseEvent(kernel_event);
+}
+
+void renderTrianglesOpenCL_TwoPass(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, float *gpuTimeMs) {
+    if (triangles->count == 0) return;
+    
+    cl_int err;
+    cl_event vertex_event, pixel_event;
+    
+    // === PASS 1: Calculate vertex coordinates ===
+    cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+    cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+    cl_float fov = camera->fov;
+    cl_int screen_width = ScreenWidth;
+    cl_int screen_height = ScreenHeight;
+    cl_int num_triangles = triangles->count;
+    
+    // Set arguments for vertex calculation kernel
+    err = clSetKernelArg(ocl->calculateVertex_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 3, sizeof(cl_mem), &ocl->buffer_triangle_normals);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 4, sizeof(cl_float3), &cam_pos);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 5, sizeof(cl_float3), &cam_dir);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 6, sizeof(cl_float), &fov);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 7, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 8, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 9, sizeof(cl_int), &num_triangles);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 10, sizeof(cl_mem), &ocl->buffer_projected_verts);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 11, sizeof(cl_mem), &ocl->buffer_triangle_bboxes);
+    err |= clSetKernelArg(ocl->calculateVertex_kernel, 12, sizeof(cl_mem), &ocl->buffer_valid_triangles);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting vertex kernel arguments: %d\n", err);
+        return;
+    }
+    
+    // Execute vertex calculation kernel
+    size_t vertex_global_size = triangles->count;
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->calculateVertex_kernel, 1, NULL, &vertex_global_size, NULL, 0, NULL, &vertex_event);
+    if (err != CL_SUCCESS) {
+        printf("Error executing vertex kernel: %d\n", err);
+        return;
+    }
+    
+    // === PASS 2: Shade pixels ===
+    // Set arguments for pixel shading kernel
+    err = clSetKernelArg(ocl->shadePixels_kernel, 0, sizeof(cl_mem), &ocl->buffer_projected_verts);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_bboxes);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 2, sizeof(cl_mem), &ocl->buffer_valid_triangles);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 3, sizeof(cl_mem), &ocl->buffer_screen_colors);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 4, sizeof(cl_mem), &ocl->buffer_distances);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 5, sizeof(cl_mem), &ocl->buffer_normals);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 6, sizeof(cl_int), &screen_width);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 7, sizeof(cl_int), &screen_height);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 8, sizeof(cl_int), &num_triangles);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 9, sizeof(cl_mem), &ocl->buffer_triangle_colors);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 10, sizeof(cl_mem), &ocl->buffer_triangle_roughness);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 11, sizeof(cl_mem), &ocl->buffer_triangle_metallic);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 12, sizeof(cl_mem), &ocl->buffer_triangle_emission);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 13, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 14, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 15, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
+    err |= clSetKernelArg(ocl->shadePixels_kernel, 16, sizeof(cl_mem), &ocl->buffer_triangle_normals);
+    
+    if (err != CL_SUCCESS) {
+        printf("Error setting pixel shader arguments: %d\n", err);
+        return;
+    }
+    
+    // Execute pixel shading kernel (waits for vertex kernel completion)
+    size_t pixel_global_size[2] = {ScreenWidth, ScreenHeight};
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->shadePixels_kernel, 2, NULL, pixel_global_size, NULL, 1, &vertex_event, &pixel_event);
+    if (err != CL_SUCCESS) {
+        printf("Error executing pixel shader kernel: %d\n", err);
+        return;
+    }
+    
+    clFinish(ocl->queue);
+    
+    // Calculate total GPU time if requested
+    if (gpuTimeMs != NULL) {
+        cl_ulong vertex_start, pixel_end;
+        clGetEventProfilingInfo(vertex_event, CL_PROFILING_COMMAND_START, sizeof(vertex_start), &vertex_start, NULL);
+        clGetEventProfilingInfo(pixel_event, CL_PROFILING_COMMAND_END, sizeof(pixel_end), &pixel_end, NULL);
+        *gpuTimeMs = (pixel_end - vertex_start) * 1e-6f; // convert ns to ms
+    }
+    
+    // Cleanup
+    clReleaseEvent(vertex_event);
+    clReleaseEvent(pixel_event);
 }
 
 // Initialize render thread system
@@ -3469,7 +3567,21 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         return 0;
     }
 
-    // crete kernel for rendering text
+    // kernel for projecting vertices to screen
+    ocl->calculateVertex_kernel = clCreateKernel(ocl->program, "calculateVertexCoordinate", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating calculateVertexCoordinate kernel: %d\n", err);
+        return 0;
+    }
+
+    // kernel for rendering particles
+    ocl->shadePixels_kernel = clCreateKernel(ocl->program, "ShadePixels", &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating ShadePixels kernel: %d\n", err);
+        return 0;
+    }
+
+    // kernel for rendering text
     ocl->renderText_kernel = clCreateKernel(ocl->program, "renderText", &err);
     if (err != CL_SUCCESS) {
         printf("Error creating renderText kernel: %d\n", err);
@@ -3482,14 +3594,14 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         return 0;
     }
 
-    // Create particle projection kernel
+    // particle projection kernel
     ocl->kernel = clCreateKernel(ocl->program, "project_points_to_screen", &err);
     if (err != CL_SUCCESS) {
         printf("Error creating OpenCL kernel: %d\n", err);
         return 0;
     }
 
-    // Create additional kernels
+    // kernels for blur-ing distances and opacities
     ocl->blur_kernel = clCreateKernel(ocl->program, "blur_distances", &err);
     if (err != CL_SUCCESS) {
         printf("Error creating blur kernel: %d\n", err);
@@ -3530,6 +3642,47 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
         printf("Error creating points buffer: %d\n", err);
         return 0;
     }
+
+
+    // buffer for projected vertices of triangles to screen
+    ocl->buffer_projected_verts = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                           triangles->count * 9 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating projected vertices buffer: %d\n", err);
+        return 0;
+    }
+
+    // buffer for bounding boxes of triangles
+    ocl->buffer_triangle_bboxes = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                           triangles->count * 4 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle bboxes buffer: %d\n", err);
+        return 0;
+    }
+
+    // buffer for valid triangles
+    ocl->buffer_valid_triangles = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                           triangles->count * sizeof(int), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating valid triangles buffer: %d\n", err);
+        return 0;
+    }
+
+
+    ocl->buffer_triangle_bboxes = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                            triangles->count * 4 * sizeof(float), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating triangle bboxes buffer: %d\n", err);
+        return 0;
+    }
+
+    ocl->buffer_valid_triangles = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, 
+                                            triangles->count * sizeof(int), NULL, &err);
+    if (err != CL_SUCCESS) {
+        printf("Error creating valid triangles buffer: %d\n", err);
+        return 0;
+    }
+
 
     // crete screen material properties buffers
     ocl->buffer_screen_material_roughness = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, 
@@ -3803,7 +3956,15 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     addTextOpenCL(ocl, font, text, 545, 515);
 
     // *** TRIANGLE RENDERING ***
-    renderTrianglesOpenCL(ocl, triangles, camera, screen, skyBox, &gpuTimings->renderTrianglesTime);
+    if (RENDER_TRIAGES == 0) {
+        // OLD METHOD: render each triangle in own kernel
+        // DISADVANTAGE: it is slow, if triangle take to much screen space
+        renderTrianglesOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+    } else {
+        // NEW METHOD: render all triangles in one kernel
+        // ADVANTAGE: it is fast, but requires triangles to be preprocessed
+        renderTrianglesOpenCL_TwoPass(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+    }
     
     float trianglesFPS = (gpuTimings->renderTrianglesTime > 0.001f) ? (1000.0f / gpuTimings->renderTrianglesTime) : 0.0f;
     snprintf(text, sizeof(text), "Triangles %.0f FPS", trianglesFPS);
@@ -3996,55 +4157,33 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
     float *velocities_result = ocl->host_velocities_result;
     float *normals_result = ocl->host_normals_result;
     
-    // FIX: Read blurred distances instead of original distances WITH PROFILING
-    err = clEnqueueReadBuffer(ocl->queue, final_blurred_distances_buf, CL_TRUE, 0, 
+    err = clEnqueueReadBuffer(ocl->queue, final_blurred_distances_buf, CL_FALSE, 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), distances_result, 0, NULL, &readback_events[0]);
-    if (err != CL_SUCCESS) {
-        printf("Error reading blurred distances buffer: %d\n", err);
-        return;
-    }
     
-    // FIX: Read blurred opacities instead of original opacities WITH PROFILING
-    err = clEnqueueReadBuffer(ocl->queue, final_blurred_opacities_buf, CL_TRUE, 0, 
+    err = clEnqueueReadBuffer(ocl->queue, final_blurred_opacities_buf, CL_FALSE, 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), opacities_result, 0, NULL, &readback_events[1]);
-    if (err != CL_SUCCESS) {
-        printf("Error reading blurred opacities buffer: %d\n", err);
-        return;
-    }
     
-    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_velocities_screen, CL_TRUE, 0, 
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_velocities_screen, CL_FALSE, 0, 
                              ScreenWidth * ScreenHeight * sizeof(float), velocities_result, 0, NULL, &readback_events[2]);
-    if (err != CL_SUCCESS) {
-        printf("Error reading velocities buffer: %d\n", err);
-        return;
-    }
     
-    // ADD NORMALS READBACK WITH PROFILING
-    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_normals, CL_TRUE, 0, 
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_normals, CL_FALSE, 0, 
                              ScreenWidth * ScreenHeight * 3 * sizeof(float), normals_result, 0, NULL, &readback_events[3]);
-    if (err != CL_SUCCESS) {
-        printf("Error reading normals buffer: %d\n", err);
-        return;
-    }
 
-    // READ BACK SCREEN COLORS WITH PROFILING
-    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_screen_colors, CL_TRUE, 0, 
+    err = clEnqueueReadBuffer(ocl->queue, ocl->buffer_screen_colors, CL_FALSE, 0, 
                              ScreenWidth * ScreenHeight * 3 * sizeof(float), ocl->host_screen_colors_result, 0, NULL, &readback_events[4]);
-    if (err != CL_SUCCESS) {
-        printf("Error reading screen colors buffer: %d\n", err);
-        return;
-    }
     
+    // Wait for ALL readbacks to complete at once
+    clWaitForEvents(5, readback_events);
+    
+     // Get timing from first and last events
     cl_ulong first_start, last_end;
-        
-    err = clGetEventProfilingInfo(readback_events[0], CL_PROFILING_COMMAND_START, sizeof(first_start), &first_start, NULL);
-    err |= clGetEventProfilingInfo(readback_events[4], CL_PROFILING_COMMAND_END, sizeof(last_end), &last_end, NULL);
-    
-    if (err == CL_SUCCESS) {
-        gpuTimings->readBackTime = (last_end - first_start) * 1e-6f; // convert ns to ms
-    } else {
-        printf("Error getting readback profiling info: %d\n", err);
-        gpuTimings->readBackTime = 0.0f;
+    clGetEventProfilingInfo(readback_events[0], CL_PROFILING_COMMAND_START, sizeof(first_start), &first_start, NULL);
+    clGetEventProfilingInfo(readback_events[4], CL_PROFILING_COMMAND_END, sizeof(last_end), &last_end, NULL);
+    gpuTimings->readBackTime = (last_end - first_start) * 1e-6f;
+
+    // Release events
+    for (int i = 0; i < 5; i++) {
+        clReleaseEvent(readback_events[i]);
     }
     
     printf("Readback completed in %f ms\n", gpuTimings->readBackTime);
@@ -4363,6 +4502,8 @@ void ReadBVH(struct BVHLinear *bvh, const char *filename) {
         fclose(file);
         return;
     }
+
+    bvh->NodesCount = NumberOfNodes;
     
     // Load second uint32 little-endian value as Number of Triangles
     if (fread(&NumberOfTriangles, sizeof(uint32_t), 1, file) != 1) {
@@ -4370,6 +4511,8 @@ void ReadBVH(struct BVHLinear *bvh, const char *filename) {
         fclose(file);
         return;
     }
+
+    bvh->TrianglesCount = NumberOfTriangles;
 
     printf("Reading BVH: %d nodes, %d triangles\n", NumberOfNodes, NumberOfTriangles);
 
@@ -4490,6 +4633,11 @@ void ReadBVH(struct BVHLinear *bvh, const char *filename) {
 }
 
 int main() {
+    // load BVH
+    struct BVHLinear bvh;
+    ReadBVH(&bvh, "parseObj/encoded.bvh");
+    printf("BVH loaded with %d nodes and %d triangles\n", bvh.NodesCount, bvh.TrianglesCount);
+
     // load font
     struct ImageFont font;
     loadFont(&font, "fonts/fonts.bin");
