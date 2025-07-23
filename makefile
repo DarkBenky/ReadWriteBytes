@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -O3 -march=native
-LDFLAGS = -lm -lOpenCL -ljpeg
+LDFLAGS = -lm -lOpenCL -ljpeg -g
 
 all: main
 

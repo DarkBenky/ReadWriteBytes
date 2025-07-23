@@ -35,7 +35,8 @@ void renderFont(
     const int screenWidth,
     const int screenHeight,
     const int posX,          // Screen position to render character
-    const int posY           // Screen position to render character
+    const int posY,          // Screen position to render character
+    const float3 color       // Color for the text
 ) {
     int ascii_code = (int)character;
     int idx = ascii_code - 32; // ASCII offset for printable characters
@@ -81,9 +82,9 @@ void renderFont(
                 int colorIndex = screenPixelIndex * 3;
 
                 // Set the color for this pixel
-                ScreenColors[colorIndex]     = 1.0f; // R
-                ScreenColors[colorIndex + 1] = 1.0f; // G  
-                ScreenColors[colorIndex + 2] = 1.0f; // B
+                ScreenColors[colorIndex]     = color.x; // R
+                ScreenColors[colorIndex + 1] = color.y; // G  
+                ScreenColors[colorIndex + 2] = color.z; // B
             }
         }
     }
@@ -101,6 +102,7 @@ __kernel void renderText(
     __global const int *posX,          // Screen position to render character
     __global const int *posY  ,         // Screen position to render character
     __global const char *character,
+    __global const uint *color, // Color for the text
     const int NumberOfCharacters
 ) {
     int globalId = get_global_id(0);
@@ -112,10 +114,17 @@ __kernel void renderText(
     // Calculate position for this character
     int posXValue = posX[globalId];
     int posYValue = posY[globalId];
+
+    // convert color from uint to float3
+    uint colorInt = color[globalId];
+    float3 colorFloat;
+    colorFloat.x = ((colorInt >> 16) & 0xFF) / 255.0f; // R
+    colorFloat.y = ((colorInt >> 8) & 0xFF) / 255.0f;  // G
+    colorFloat.z = (colorInt & 0xFF) / 255.0f;         // B
     
     // Render the character at the specified position
     renderFont(fontSizeX, fontSizeY, spriteSizeX, spriteSizeY, currentChar,
-               ScreenColors, FontData, screenWidth, screenHeight, posXValue, posYValue);
+               ScreenColors, FontData, screenWidth, screenHeight, posXValue, posYValue, colorFloat);
 }
 
 __kernel void gpuTimings(
@@ -133,6 +142,7 @@ __kernel void gpuTimings(
     const float applyBlurTime,
     const float readBackTime,
     const float renderTextTime, // New parameter for text rendering time
+    const float projectParticlesTime, // New parameter for particle projection time
     const float maxTime
 ) {
     int x = get_global_id(0);
@@ -154,7 +164,7 @@ __kernel void gpuTimings(
     }
     
     // Create horizontal bar chart
-    float barHeight = (float)SizeY / 6.0f;
+    float barHeight = (float)SizeY / 7.0f;
     int barIndex = y / (int)barHeight;
     float barProgress = (float)x / (float)SizeX;
     
@@ -210,6 +220,14 @@ __kernel void gpuTimings(
             normalizedTime = timeValue / maxTime;
             if (barProgress <= normalizedTime && timeValue > 0.001f) {
                 color = (float3)(0.2f, 0.8f, 0.8f);
+                shouldRender = true;
+            }
+            break;
+        case 6: // Project Particles time (Orange)
+            timeValue = projectParticlesTime;
+            normalizedTime = timeValue / maxTime;
+            if (barProgress <= normalizedTime && timeValue > 0.001f) {
+                color = (float3)(0.8f, 0.5f, 0.2f);
                 shouldRender = true;
             }
             break;

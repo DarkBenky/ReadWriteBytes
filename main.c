@@ -20,12 +20,17 @@
 
 void *SharedMem = NULL;
 
-#define MAX_TEXT_LENGTH 512
-int     posX[MAX_TEXT_LENGTH];
-int     posY[MAX_TEXT_LENGTH];
-char    text[MAX_TEXT_LENGTH];
-char    textBuffer[MAX_TEXT_LENGTH * 4];
-int     textBufferLen = 0;
+#define     chartPosY 480 // Y position on screen for timing chart
+#define     chartPosX 700 // X position on screen for timing chart
+#define     MAX_TEXT_LENGTH 512
+// temporary buffer for saving text
+char        text[MAX_TEXT_LENGTH];
+// Buffers for all text rendered on screen
+uint32_t    textColor[MAX_TEXT_LENGTH * 4];
+int         posX[MAX_TEXT_LENGTH * 4];
+int         posY[MAX_TEXT_LENGTH * 4];
+char        textBuffer[MAX_TEXT_LENGTH * 4];
+int         textBufferLen = 0;
 #define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
 #define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
@@ -217,7 +222,7 @@ struct OpenCLContext {
     cl_command_queue queue;
     cl_program program;
     // kernels
-    cl_kernel kernel;
+    cl_kernel kernel; // project particles kernel
     cl_kernel blur_kernel;
     cl_kernel normals_kernel;
     cl_kernel triangle_kernel;  // triangle kernel
@@ -859,13 +864,23 @@ struct GPUTimings {
     float applyBlurTime;
     float readBackTime;
     float renderTextTime;
+    float projectParticlesTime;
 };
 
-// Add this to your C code after GPU operations
+float totalTime(struct GPUTimings *gpuTimings) {
+    int numOfElements = sizeof(struct GPUTimings) / sizeof(float);
+    float total = 0.0f;
+    for (int i = 0; i < numOfElements; i++) {
+        float *timePtr = (float *)gpuTimings + i;
+        total += *timePtr;
+    }
+    return total;
+}
+
 void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) {
     // Timing chart parameters
-    int chartPosX = 700;           // X position on screen
-    int chartPosY = 510;           // Y position on screen  
+    int chartPosXLocal = chartPosX;
+    int chartPosYLocal = chartPosY;
     int chartWidth = 100;         // Width of timing chart
     int chartHeight = 100;        // Height of timing chart
     int paddingY = 5;             // Top padding
@@ -890,8 +905,8 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) 
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 2, sizeof(cl_int), &screen_height);
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 3, sizeof(cl_int), &chartWidth);
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 4, sizeof(cl_int), &chartHeight);
-    err |= clSetKernelArg(ocl->gpuTimings_kernel, 5, sizeof(cl_int), &chartPosX);
-    err |= clSetKernelArg(ocl->gpuTimings_kernel, 6, sizeof(cl_int), &chartPosY);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 5, sizeof(cl_int), &chartPosXLocal);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 6, sizeof(cl_int), &chartPosYLocal);
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 7, sizeof(cl_int), &paddingY);
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 8, sizeof(cl_float), &gpuTimings->renderSkyBoxTime);
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 9, sizeof(cl_float), &gpuTimings->renderTrianglesTime);
@@ -899,7 +914,8 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) 
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 11, sizeof(cl_float), &gpuTimings->applyBlurTime);
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 12, sizeof(cl_float), &gpuTimings->readBackTime);
     err |= clSetKernelArg(ocl->gpuTimings_kernel, 13, sizeof(cl_float), &gpuTimings->renderTextTime);
-    err |= clSetKernelArg(ocl->gpuTimings_kernel, 14, sizeof(cl_float), &maxTime);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 14, sizeof(cl_float), &gpuTimings->projectParticlesTime);
+    err |= clSetKernelArg(ocl->gpuTimings_kernel, 15, sizeof(cl_float), &maxTime);
     
     if (err != CL_SUCCESS) {
         printf("Error setting gpuTimings kernel arguments: %d\n", err);
@@ -3330,6 +3346,8 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
                                        textBufferLen * sizeof(int), posY, &err);
     cl_mem buffer_text = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                                        textBufferLen * sizeof(char), textBuffer, &err);
+    cl_mem buffer_color = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       textBufferLen * sizeof(uint32_t), textColor, &err);
     
     if (err != CL_SUCCESS) {
         printf("Error creating text rendering buffers: %d\n", err);
@@ -3357,7 +3375,9 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
     err |= clSetKernelArg(ocl->renderText_kernel, 8, sizeof(cl_mem), &buffer_posX);
     err |= clSetKernelArg(ocl->renderText_kernel, 9, sizeof(cl_mem), &buffer_posY);
     err |= clSetKernelArg(ocl->renderText_kernel, 10, sizeof(cl_mem), &buffer_text);
-    err |= clSetKernelArg(ocl->renderText_kernel, 11, sizeof(cl_int), &numChars);
+    err |= clSetKernelArg(ocl->renderText_kernel, 11, sizeof(cl_mem), &buffer_color);
+    err |= clSetKernelArg(ocl->renderText_kernel, 12, sizeof(cl_int), &numChars);
+
     
     if (err != CL_SUCCESS) {
         printf("Error setting RenderText kernel arguments: %d\n", err);
@@ -3407,7 +3427,11 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
     textBufferLen = 0;
 }
 
-void addTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, const char *text, int startX, int startY) {
+inline uint32_t colorToInt(uint8_t color[3]) {
+    return ((uint32_t)color[0] << 16) | ((uint32_t)color[1] << 8) | (uint32_t)color[2];
+}
+
+void addTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, const char *text, int startX, int startY, uint8_t color[3]) {
     if (!font->data || !text) return;
     
     int textLen = strlen(text);
@@ -3442,6 +3466,7 @@ void addTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, const char
             textBuffer[textBufferLen] = c;
             posX[textBufferLen] = currentX;
             posY[textBufferLen] = currentY;
+            textColor[textBufferLen] = colorToInt(color);  // Convert RGB to int
             textBufferLen++;
             
             // Move to next character position
@@ -3949,11 +3974,21 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
     // *** RENDER SKYBOX FIRST (fills background) ***
     renderSkyboxOpenCL(ocl, camera, skyBox, &gpuTimings->renderSkyBoxTime);
+
+    uint8_t white[3] = {255, 255, 255};
+    uint8_t yellow[3] = {255, 255, 0};
+
+    int chart_pos_Y = chartPosY;
+    float realFPS = totalTime(gpuTimings) > 0.001f ? (1000.0f / totalTime(gpuTimings)) : 0.0f;
+    snprintf(text, sizeof(text), "Real FPS %.0f", realFPS);
+    addTextOpenCL(ocl, font, text, 545 , chart_pos_Y - 15, yellow); // Move up for chart title
+
     
     // Convert GPU timings to FPS (1000ms / time_in_ms = operations_per_second)
     float skyboxFPS = (gpuTimings->renderSkyBoxTime > 0.001f) ? (1000.0f / gpuTimings->renderSkyBoxTime) : 0.0f;
     snprintf(text, sizeof(text), "Skybox %.0f FPS", skyboxFPS);
-    addTextOpenCL(ocl, font, text, 545, 515);
+    addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+    chart_pos_Y += 15; // Move down for next text
 
     // *** TRIANGLE RENDERING ***
     if (RENDER_TRIAGES == 0) {
@@ -3965,32 +4000,43 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         // ADVANTAGE: it is fast, but requires triangles to be preprocessed
         renderTrianglesOpenCL_TwoPass(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
     }
-    
+
     float trianglesFPS = (gpuTimings->renderTrianglesTime > 0.001f) ? (1000.0f / gpuTimings->renderTrianglesTime) : 0.0f;
     snprintf(text, sizeof(text), "Triangles %.0f FPS", trianglesFPS);
-    addTextOpenCL(ocl, font, text, 545, 530);
+    addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+    chart_pos_Y += 15; // Move down for next text
 
     // *** Screen Space Projection Kernel and sky box ***
     applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime);
     
     float reflectionsFPS = (gpuTimings->applyReflectionsTime > 0.001f) ? (1000.0f / gpuTimings->applyReflectionsTime) : 0.0f;
     snprintf(text, sizeof(text), "Reflections %.0f FPS", reflectionsFPS);
-    addTextOpenCL(ocl, font, text, 545, 545);
+    addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+    chart_pos_Y += 15; // Move down for next text
 
     float blurFPS = (gpuTimings->applyBlurTime > 0.001f) ? (1000.0f / gpuTimings->applyBlurTime) : 0.0f;
     snprintf(text, sizeof(text), "Blur %.0f FPS", blurFPS);
-    addTextOpenCL(ocl, font, text, 545, 560);
+    addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+    chart_pos_Y += 15; // Move down for next text
 
     float readbackFPS = (gpuTimings->readBackTime > 0.001f) ? (1000.0f / gpuTimings->readBackTime) : 0.0f;
     snprintf(text, sizeof(text), "Readback %.0f FPS", readbackFPS);
-    addTextOpenCL(ocl, font, text, 545, 575);
+    addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+    chart_pos_Y += 15; // Move down for next text
 
     // Multiline text example
     // addTextOpenCL(ocl, font, "Line 1\nLine 2\nLine 3", 300, 400);
 
     float textFPS = (gpuTimings->renderTextTime > 0.001f) ? (1000.0f / gpuTimings->renderTextTime) : 0.0f;
     snprintf(text, sizeof(text), "Text %.0f FPS", textFPS);
-    addTextOpenCL(ocl, font, text, 545, 590);
+    addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+    chart_pos_Y += 15; // Move down for next text
+
+    printf("gpuTimings->renderTextTime: %.2f ms\n", gpuTimings->renderTextTime);
+    float projectParticlesFPS = (gpuTimings->projectParticlesTime > 0.001f) ? (1000.0f / gpuTimings->projectParticlesTime) : 0.0f;
+    snprintf(text, sizeof(text), "Particles %.0f FPS", projectParticlesFPS);
+    addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+    chart_pos_Y += 15; // Move down for next text
     
     // render text on screen
     renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime);
@@ -4029,13 +4075,28 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
         return;
     }
     
+
     // Execute kernel
     size_t global_work_size = NUM_PARTICLES;
-    err = clEnqueueNDRangeKernel(ocl->queue, ocl->kernel, 1, NULL, &global_work_size, NULL, 0, NULL, NULL);
+    cl_event kernel_event;
+
+    err = clEnqueueNDRangeKernel(ocl->queue, ocl->kernel, 1, NULL, &global_work_size, NULL, 0, NULL, &kernel_event);
     if (err != CL_SUCCESS) {
         printf("Error executing kernel: %d\n", err);
         return;
     }
+
+    clFinish(ocl->queue); // Wait for kernel to finish
+
+    cl_ulong start_time, end_time;
+    err = clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
+    err |= clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END, sizeof(end_time), &end_time, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error getting kernel profiling info: %d\n", err);
+        return;
+    }
+    gpuTimings->projectParticlesTime = (end_time - start_time) * 1e-6f; // Convert from ns to ms
+
 
     // --- Multi-Pass Blur Section ---
     cl_mem s_dist_src, s_dist_dst, s_opac_src, s_opac_dst; // s_ for stage
