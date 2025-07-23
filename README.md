@@ -25,7 +25,6 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
-- [ ] Add Timing for rendering of particles
 - [ ] Add chart for gpu timing
 - [ ] convert timing to this format
 
@@ -67,6 +66,8 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] Add Timing for rendering of particles
+- [X] Add Text Color
 - [X] New Triangle Renderer ([link](https://chatgpt.com/c/6878486d-ee08-8004-b21e-31c714a8479f))
 - [X] Add text support
 - [X] GPU Timeing
