@@ -25,7 +25,6 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
-- [ ] Fix hole in in middle of screen space reflections ![example](hole.png)
 - [ ] convert timing to this format
 
   ```c
@@ -66,6 +65,7 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] Fix hole in in middle of screen space reflections ![example](hole.png)
 - [X] Add chart for gpu timing
 - [X] Add Timing for rendering of particles
 - [X] Add Text Color

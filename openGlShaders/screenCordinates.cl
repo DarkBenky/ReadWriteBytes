@@ -1,28 +1,280 @@
+#define FLT_MAX 3.402823466e+38F
+
+typedef struct {
+    float   BoundingBox[6]; // minX, minY, minZ, maxX, maxY, maxZ
+    int     LeftChild;        // Index of left child node -1 => no child
+    int     RightChild;       // Index of right child node -1 => no child
+    int     TriangleIndex;    // -1 => internal node
+} BVHNode;
+
+typedef struct{
+    float3  v1; // Vertex 1
+    float3  v2; // Vertex 2
+    float3  v3; // Vertex 3
+    float3  normal; // Normal vector
+    float3  color; // RGB color
+    float   Roughness; // Material roughness
+    float   Metallic; // Material metallic
+    float   Emission; // Material emission
+    int     TriangleIndex; // Index of the triangle
+} Triangle;
+
 typedef struct  {
-    struct BVHNode  *Nodes; // Array of BVH nodes
-    struct Triangle *Triangles; // Array of triangles
+    __global BVHNode  *Nodes; // Array of BVH nodes
+    __global Triangle *Triangles; // Array of triangles
     int NodesCount; // Number of nodes in the BVH
     int TrianglesCount; // Number of triangles in the BVH
 } BVHLinear;
 
 typedef struct {
-    float   BoundingBox[6]; // minX, minY, minZ, maxX, maxY, maxZ
-    int     LeftChild;        // Index of left child node
-    int     RightChild;       // Index of right child node
+    float3  PointOfIntersection;
+    float3  NormalAtIntersection;
+    float3  ColorAtIntersection;
+    float   Distance; 
     int     TriangleIndex;
-} BVHNode;
+    bool    Hit;
+} IntersectionTriangle;
 
 typedef struct {
-    float v1[3]; // Vertex 1
-    float v2[3]; // Vertex 2
-    float v3[3]; // Vertex 3
-    float normal[3]; // Normal vector
-    float color[3]; // RGB color
-    float Roughness; // Material roughness
-    float Metallic; // Material metallic
-    float Emission; // Material emission
-    int TriangleIndex; // Index of the triangle
-} Triangle;
+    int     TriangleIndex; // Index of the triangle if this is a leaf node, -1 otherwise
+    bool    IsLeaf; // True if this is a leaf node, false if it has children
+    bool    IsHit; // True if this bounding box was hit by the ray
+} IntersectionBoundingBox;
+
+typedef struct {
+    float3 Position;
+    float3 Direction;
+} Ray;
+
+float3 reflectVector(float3 incident, float3 normal) {
+    return incident - 2.0f * dot(incident, normal) * normal;
+}
+
+IntersectionBoundingBox intersectBoundingBox(
+    Ray ray, 
+    __global const BVHNode *bvhNodes, 
+    int nodeIndex
+) {
+    IntersectionBoundingBox result;
+    result.IsHit = false;
+    result.IsLeaf = false;
+    result.TriangleIndex = -1;
+
+    const BVHNode node = bvhNodes[nodeIndex];
+
+    // FIX: Add safety checks for division by zero
+    float tMin, tMax;
+    if (fabs(ray.Direction.x) > 1e-6f) {
+        tMin = (node.BoundingBox[0] - ray.Position.x) / ray.Direction.x;
+        tMax = (node.BoundingBox[3] - ray.Position.x) / ray.Direction.x;
+        if (tMin > tMax) {
+            float temp = tMin; tMin = tMax; tMax = temp;
+        }
+    } else {
+        // Ray is parallel to X planes
+        if (ray.Position.x < node.BoundingBox[0] || ray.Position.x > node.BoundingBox[3]) {
+            return result;
+        }
+        tMin = -FLT_MAX;
+        tMax = FLT_MAX;
+    }
+
+    // Similar fixes for Y and Z axes
+    float tyMin, tyMax;
+    if (fabs(ray.Direction.y) > 1e-6f) {
+        tyMin = (node.BoundingBox[1] - ray.Position.y) / ray.Direction.y;
+        tyMax = (node.BoundingBox[4] - ray.Position.y) / ray.Direction.y;
+        if (tyMin > tyMax) {
+            float temp = tyMin; tyMin = tyMax; tyMax = temp;
+        }
+    } else {
+        if (ray.Position.y < node.BoundingBox[1] || ray.Position.y > node.BoundingBox[4]) {
+            return result;
+        }
+        tyMin = -FLT_MAX;
+        tyMax = FLT_MAX;
+    }
+
+    if ((tMin > tyMax) || (tyMin > tMax)) return result;
+    if (tyMin > tMin) tMin = tyMin;
+    if (tyMax < tMax) tMax = tyMax;
+
+    float tzMin, tzMax;
+    if (fabs(ray.Direction.z) > 1e-6f) {
+        tzMin = (node.BoundingBox[2] - ray.Position.z) / ray.Direction.z;
+        tzMax = (node.BoundingBox[5] - ray.Position.z) / ray.Direction.z;
+        if (tzMin > tzMax) {
+            float temp = tzMin; tzMin = tzMax; tzMax = temp;
+        }
+    } else {
+        if (ray.Position.z < node.BoundingBox[2] || ray.Position.z > node.BoundingBox[5]) {
+            return result;
+        }
+        tzMin = -FLT_MAX;
+        tzMax = FLT_MAX;
+    }
+
+    if ((tMin > tzMax) || (tzMin > tMax)) return result;
+    if (tzMin > tMin) tMin = tzMin;
+    if (tzMax < tMax) tMax = tzMax;
+
+    result.IsHit = true;
+    if (node.TriangleIndex != -1) {
+        result.IsLeaf = true;
+        result.TriangleIndex = node.TriangleIndex;
+    }
+
+    return result;
+}
+
+IntersectionTriangle intersectTriangle(
+    Ray ray, 
+    __global const Triangle *triangles, 
+    int triangleIndex
+) {
+    IntersectionTriangle result;
+    result.Hit = false;
+    result.TriangleIndex = -1;
+
+    const Triangle triangle = triangles[triangleIndex];
+
+    // Möller–Trumbore intersection algorithm
+    float3 edge1 = triangle.v2 - triangle.v1;
+    float3 edge2 = triangle.v3 - triangle.v1;
+    float3 h = cross(ray.Direction, edge2);
+    float a = dot(edge1, h);
+
+    if (fabs(a) < 1e-6f) {
+        return result; // Ray is parallel to the triangle
+    }
+
+    float f = 1.0f / a;
+    float3 s = ray.Position - triangle.v1;
+    float u = f * dot(s, h);
+
+    if (u < 0.0f || u > 1.0f) {
+        return result; // Not hit
+    }
+
+    float3 q = cross(s, edge1);
+    float v = f * dot(ray.Direction, q);
+
+    if (v < 0.0f || u + v > 1.0f) {
+        return result; // Not hit
+    }
+
+    // Calculate t to find the intersection point
+    float t = f * dot(edge2, q);
+    
+    if (t < 0.0f) {
+        return result; // Not hit
+    }
+
+    // Hit detected
+    result.Hit = true;
+    result.TriangleIndex = triangleIndex;
+    result.PointOfIntersection = ray.Position + ray.Direction * t;
+    
+    // Calculate normal at intersection
+    result.NormalAtIntersection = triangle.normal;
+    
+    // Set color at intersection
+    result.ColorAtIntersection = triangle.color;
+    
+    // Set distance from ray origin to intersection point
+    result.Distance = t;
+
+    return result;
+}
+
+
+float3 Trace(Ray ray, __global const BVHLinear *bvh, int maxDepth) {
+    float3 incomingLight = (float3)(0.0f, 0.0f, 0.0f);
+    float3 rayColor = (float3)(1.0f, 1.0f, 1.0f);
+    
+    for (int depth = 0; depth < maxDepth; depth++) {
+        IntersectionTriangle hit;
+        hit.Hit = false;
+        hit.Distance = FLT_MAX;
+        hit.TriangleIndex = -1;
+        
+        // Traverse BVH to find closest intersection
+        int stack[64]; // Stack for BVH traversal
+        int stackPtr = 0;
+        stack[stackPtr++] = 0; // Start with root node
+        
+        while (stackPtr > 0 && stackPtr < 64) {
+            int nodeIndex = stack[--stackPtr];
+            
+            if (nodeIndex >= bvh->NodesCount) continue;
+            
+            // Test intersection with bounding box
+            IntersectionBoundingBox boxHit = intersectBoundingBox(ray, bvh->Nodes, nodeIndex);
+            
+            if (!boxHit.IsHit) continue;
+            
+            if (boxHit.IsLeaf) {
+                // Leaf node - test triangle intersection
+                if (boxHit.TriangleIndex >= 0 && boxHit.TriangleIndex < bvh->TrianglesCount) {
+                    IntersectionTriangle triHit = intersectTriangle(ray, bvh->Triangles, boxHit.TriangleIndex);
+                    
+                    if (triHit.Hit && triHit.Distance < hit.Distance && triHit.Distance > 0.001f) {
+                        hit = triHit;
+                    }
+                }
+            } else {
+                // Internal node - add children to stack
+                const BVHNode node = bvh->Nodes[nodeIndex];
+                if (node.LeftChild >= 0 && stackPtr < 63) {
+                    stack[stackPtr++] = node.LeftChild;
+                }
+                if (node.RightChild >= 0 && stackPtr < 63) {
+                    stack[stackPtr++] = node.RightChild;
+                }
+            }
+        }
+        
+        // Process intersection result
+        if (!hit.Hit) {
+            // No intersection - return accumulated light
+            break;
+        }
+        
+        // Add emission from hit surface
+        if (hit.TriangleIndex >= 0 && hit.TriangleIndex < bvh->TrianglesCount) {
+            const Triangle hitTriangle = bvh->Triangles[hit.TriangleIndex];
+            float3 emission = hitTriangle.color * hitTriangle.Emission;
+            incomingLight += rayColor * emission;
+            
+            // Simple diffuse reflection for next bounce
+            float3 randomDir = normalize((float3)(
+                sin((float)depth * 12.9898f) * 0.5f + 0.5f,
+                cos((float)depth * 78.233f) * 0.5f + 0.5f,
+                sin((float)depth * 37.719f) * 0.5f + 0.5f
+            ));
+            
+            // Ensure reflection is in correct hemisphere
+            if (dot(randomDir, hit.NormalAtIntersection) < 0.0f) {
+                randomDir = -randomDir;
+            }
+            
+            // Update ray for next bounce
+            ray.Position = hit.PointOfIntersection + hit.NormalAtIntersection * 0.001f;
+            ray.Direction = normalize(randomDir);
+            
+            // Attenuate ray color
+            rayColor *= hit.ColorAtIntersection * (1.0f - hitTriangle.Metallic);
+            
+            // Russian roulette termination
+            float maxComponent = max(max(rayColor.x, rayColor.y), rayColor.z);
+            if (maxComponent < 0.1f) break;
+        } else {
+            break;
+        }
+    }
+    
+    return incomingLight;
+}
 
 void renderFont(
     const int fontSizeX,     // Total font texture width
@@ -485,6 +737,9 @@ float3 sampleScreenSpaceReflectionFiltered(
     float3 currentPos = rayOrigin;
     float distanceTraveled = 0.0f;
     
+    // FIX 1: Start with a small offset to avoid self-intersection
+    currentPos += rayDirection * stepSize * 0.5f;
+    
     for (int step = 0; step < maxSteps; step++) {
         currentPos += rayDirection * stepSize;
         distanceTraveled += stepSize;
@@ -496,7 +751,8 @@ float3 sampleScreenSpaceReflectionFiltered(
         float3 relativePos = currentPos - camPos;
         float depth = dot(relativePos, forward);
         
-        if (depth <= 0.001f) {
+        // FIX 2: Better depth bounds checking
+        if (depth <= 0.01f || depth > maxDistance) {
             continue;
         }
         
@@ -510,7 +766,9 @@ float3 sampleScreenSpaceReflectionFiltered(
         float screenX = screenRight * halfWidth + halfWidth;
         float screenY = -screenUpward * halfHeight + halfHeight;
         
-        if (screenX < 0 || screenX >= screenWidth || screenY < 0 || screenY >= screenHeight) {
+        // FIX 3: Add margin to screen bounds to avoid edge artifacts
+        if (screenX < 1.0f || screenX >= (screenWidth - 1.0f) || 
+            screenY < 1.0f || screenY >= (screenHeight - 1.0f)) {
             continue;
         }
         
@@ -518,15 +776,25 @@ float3 sampleScreenSpaceReflectionFiltered(
         int pixelX = (int)screenX;
         int pixelY = (int)screenY;
         int pixelIndex = pixelY * screenWidth + pixelX;
+        
+        // FIX 4: Bounds check for pixelIndex
+        if (pixelIndex < 0 || pixelIndex >= screenWidth * screenHeight) {
+            continue;
+        }
+        
         float sceneDepth = ScreenDistances[pixelIndex];
         
-        float depthDifference = fabs(depth - sceneDepth);
-        if (sceneDepth > 0.001f && depthDifference < stepSize * 2.0f) {
-            // Bilinear filtering for smoother color sampling
+        // FIX 5: Better depth comparison with adaptive threshold
+        float depthThreshold = stepSize * 1.5f + depth * 0.001f; // Adaptive threshold
+        float depthDifference = depth - sceneDepth;
+        
+        // FIX 6: Check if we've hit something and it's in front of our ray
+        if (sceneDepth > 0.01f && depthDifference > 0.0f && depthDifference < depthThreshold) {
+            // FIX 7: Improved bilinear filtering with bounds checking
             float fx = screenX - pixelX;
             float fy = screenY - pixelY;
             
-            // Sample 4 neighboring pixels
+            // Sample 4 neighboring pixels with bounds checking
             int x0 = clamp(pixelX, 0, screenWidth - 1);
             int x1 = clamp(pixelX + 1, 0, screenWidth - 1);
             int y0 = clamp(pixelY, 0, screenHeight - 1);
@@ -537,34 +805,35 @@ float3 sampleScreenSpaceReflectionFiltered(
             int idx01 = (y1 * screenWidth + x0) * 3;
             int idx11 = (y1 * screenWidth + x1) * 3;
             
-            // Interpolate colors
-            float3 color00 = (float3)(ScreenColors[idx00], ScreenColors[idx00+1], ScreenColors[idx00+2]);
-            float3 color10 = (float3)(ScreenColors[idx10], ScreenColors[idx10+1], ScreenColors[idx10+2]);
-            float3 color01 = (float3)(ScreenColors[idx01], ScreenColors[idx01+1], ScreenColors[idx01+2]);
-            float3 color11 = (float3)(ScreenColors[idx11], ScreenColors[idx11+1], ScreenColors[idx11+2]);
-            
-            float3 colorTop = mix(color00, color10, fx);
-            float3 colorBottom = mix(color01, color11, fx);
-            float3 finalColor = mix(colorTop, colorBottom, fy);
-            
-            return finalColor;
+            // FIX 8: Check all sample indices are valid
+            if (idx00 >= 0 && idx11 < screenWidth * screenHeight * 3) {
+                // Interpolate colors
+                float3 color00 = (float3)(ScreenColors[idx00], ScreenColors[idx00+1], ScreenColors[idx00+2]);
+                float3 color10 = (float3)(ScreenColors[idx10], ScreenColors[idx10+1], ScreenColors[idx10+2]);
+                float3 color01 = (float3)(ScreenColors[idx01], ScreenColors[idx01+1], ScreenColors[idx01+2]);
+                float3 color11 = (float3)(ScreenColors[idx11], ScreenColors[idx11+1], ScreenColors[idx11+2]);
+                
+                float3 colorTop = mix(color00, color10, fx);
+                float3 colorBottom = mix(color01, color11, fx);
+                float3 finalColor = mix(colorTop, colorBottom, fy);
+                
+                // FIX 9: Ensure we return a valid color (not black)
+                if (length(finalColor) > 0.01f) {
+                    return finalColor;
+                }
+            }
         }
     }
     
     return fallbackColor;
 }
 
-float3 reflect(const float3 I, const float3 N) {
-    float3 n = normalize(N);
-    float3 i = normalize(I);
-    return i - 2.0f * dot(i, n) * n;
-}
-
+// FIX 10: Also update the reflection usage in applyReflections
 __kernel void applyReflections(
     __global float *ScreenColors,
     __global const float *ScreenDistances,
     __global const float *ScreenNormals,
-    __global const float *ScreenMaterialRoughness,  // Per-pixel material data
+    __global const float *ScreenMaterialRoughness,
     __global const float *ScreenMaterialMetallic,
     __global const float *ScreenMaterialEmission,
     const float3 camPos,
@@ -572,7 +841,6 @@ __kernel void applyReflections(
     const float fov,
     const int screenWidth,
     const int screenHeight,
-    // Skybox parameters
     __global const float *SkyBoxTop,
     __global const float *SkyBoxBottom,
     __global const float *SkyBoxLeft,
@@ -590,15 +858,13 @@ __kernel void applyReflections(
     int pixelIndex = y * screenWidth + x;
     float depth = ScreenDistances[pixelIndex];
     
-    if (depth <= 0.001f) return; // Skip empty pixels
+    if (depth <= 0.001f) return;
     
-    // Get pixel normal and material properties
     int normalIndex = pixelIndex * 3;
     float3 normal = (float3)(ScreenNormals[normalIndex], 
                              ScreenNormals[normalIndex + 1], 
                              ScreenNormals[normalIndex + 2]);
     
-    // Reconstruct world position
     float3 forward = normalize(camDir);
     float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
     float3 right = normalize(cross(forward, camUp));
@@ -610,43 +876,41 @@ __kernel void applyReflections(
     float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
     float3 worldPos = camPos + rayDir * depth;
     
-    // Calculate reflection
     float3 viewDir = normalize(camPos - worldPos);
-    float3 reflectedDir = reflect(-viewDir, normalize(normal));
+    float3 reflectedDir = reflectVector(-viewDir, normalize(normal));
     
-    // Sample screen space reflection
+    // FIX 11: Better parameters for screen space reflection
     float3 screenSpaceReflection = sampleScreenSpaceReflectionFiltered(
         ScreenColors, ScreenDistances, worldPos, reflectedDir, camPos, camDir, fov,
-        screenWidth, screenHeight, 1000.0f, 1000, 1.5f
+        screenWidth, screenHeight, 
+        min(500.0f, depth * 50.0f),  // Adaptive max distance
+        512,                           // Reduced steps for better performance
+        max(0.5f, depth * 0.1f)      // Adaptive step size
     );
     
-    // Fallback to skybox
     float3 skyboxReflection = sampleSkybox(reflectedDir, SkyBoxTop, SkyBoxBottom,
                                            SkyBoxLeft, SkyBoxRight,
                                            SkyBoxFront, SkyBoxBack,
                                            skyBoxWidth, skyBoxHeight);
     
-    float3 small3 = {0.001f, 0.001f, 0.001f};
-
-    // Choose reflection source
-    float3 environmentReflection = (length(screenSpaceReflection) > small3) ? 
+    // FIX 12: Better fallback logic
+    float screenReflectionStrength = length(screenSpaceReflection);
+    float3 environmentReflection = (screenReflectionStrength > 0.01f) ? 
                                      screenSpaceReflection : skyboxReflection;
     
-    // float3 environmentReflection = screenSpaceReflection; // Use screen space reflection directly
-
-    // Retrieve material properties
     float roughness = ScreenMaterialRoughness[pixelIndex]; 
     float metallic  = ScreenMaterialMetallic[pixelIndex];
-    float emission  = ScreenMaterialEmission[pixelIndex]; // New material property
+    float emission  = ScreenMaterialEmission[pixelIndex];
     
-    // Compute Fresnel factor and adjust using metallic factor
     float fresnel = 0.04f + (1.0f - 0.04f) * pow(1.0f - max(0.0f, dot(normal, viewDir)), 5.0f);
     fresnel = mix(fresnel, 1.0f, metallic);
     
-    // Adjust the reflection blend factor by reducing it with higher emission
-    float reflectionFactor = fresnel * (1.0f - roughness) * (1.0f - emission);
+    // // FIX 13: Limit reflection strength to avoid too strong reflections
+    // float reflectionFactor = clamp(fresnel * (1.0f - roughness) * (1.0f - emission), 0.0f, 0.8f);
+
+    float metallicBoost = mix(1.0f, 2.0f, metallic); // Metals get 2x reflection strength
+    float reflectionFactor = clamp(fresnel * (1.0f - roughness) * (1.0f - emission) * metallicBoost, 0.0f, 1.0f);
     
-    // Blend reflection with existing base color
     int colorIndex = pixelIndex * 3;
     float3 baseColor = (float3)(ScreenColors[colorIndex], 
                                 ScreenColors[colorIndex + 1], 
@@ -934,7 +1198,6 @@ float3 calculateVertexNormal(
     // Search through all triangles to find ones that share this vertex
     for (int triId = 0; triId < numTriangles; triId++) {
         int vertexIndex = triId * 3;
-        
         float3 tri_v1 = (float3)(v1[vertexIndex], v1[vertexIndex + 1], v1[vertexIndex + 2]);
         float3 tri_v2 = (float3)(v2[vertexIndex], v2[vertexIndex + 1], v2[vertexIndex + 2]);
         float3 tri_v3 = (float3)(v3[vertexIndex], v3[vertexIndex + 1], v3[vertexIndex + 2]);
@@ -1206,156 +1469,6 @@ __kernel void ShadePixels(
         ScreenMaterialEmission[pixelIndex] = emissionValue;
     }
 }
-
-// __kernel void ShadePixels(
-//     __global const float* projectedVerts,
-//     __global const float* bboxes,
-//     __global const int* validTriangles,
-//     __global float* ScreenColors,
-//     __global float* ScreenDistances,
-//     __global float* ScreenNormals,
-//     const int screenWidth,
-//     const int screenHeight,
-//     const int numTriangles,
-//     __global const float* TriangleColors,
-//     __global const float* roughness,
-//     __global const float* metallic,
-//     __global const float* emission,
-//     __global float* ScreenMaterialRoughness,
-//     __global float* ScreenMaterialMetallic,
-//     __global float* ScreenMaterialEmission,
-//     __global const float* normals
-// ) {
-//     int pixelX = get_global_id(0);
-//     int pixelY = get_global_id(1);
-//     if (pixelX >= screenWidth || pixelY >= screenHeight) return;
-    
-//     int pixelIndex = pixelY * screenWidth + pixelX;
-//     float2 pixelPos = (float2)(pixelX + 0.5f, pixelY + 0.5f);
-    
-//     float closestDepth = FLT_MAX;
-//     int closestTriangle = -1;
-    
-//     // **OPTIMIZATION 1: Process triangles in chunks for better cache locality**
-//     const int CHUNK_SIZE = 64; // Process triangles in groups
-    
-//     for (int chunkStart = 0; chunkStart < numTriangles; chunkStart += CHUNK_SIZE) {
-//         int chunkEnd = min(chunkStart + CHUNK_SIZE, numTriangles);
-        
-//         // **OPTIMIZATION 2: Pre-filter valid triangles in this chunk**
-//         int validCount = 0;
-//         int validIds[CHUNK_SIZE];
-        
-//         for (int i = chunkStart; i < chunkEnd; i++) {
-//             if (validTriangles[i] != 0) {
-//                 // **OPTIMIZATION 3: Quick bounding box pre-filter**
-//                 float minX = bboxes[i * 4 + 0];
-//                 float maxX = bboxes[i * 4 + 1];
-//                 float minY = bboxes[i * 4 + 2];
-//                 float maxY = bboxes[i * 4 + 3];
-                
-//                 if (pixelPos.x >= minX && pixelPos.x <= maxX && 
-//                     pixelPos.y >= minY && pixelPos.y <= maxY) {
-//                     validIds[validCount++] = i;
-//                 }
-//             }
-//         }
-        
-//         // **OPTIMIZATION 4: Only process triangles that passed bbox test**
-//         for (int vi = 0; vi < validCount; vi++) {
-//             int triangleId = validIds[vi];
-            
-//             // **OPTIMIZATION 5: Load vertices once and reuse**
-//             int vertBase = triangleId * 9;
-//             float3 v1_proj = (float3)(projectedVerts[vertBase + 0], 
-//                                       projectedVerts[vertBase + 1], 
-//                                       projectedVerts[vertBase + 2]);
-//             float3 v2_proj = (float3)(projectedVerts[vertBase + 3], 
-//                                       projectedVerts[vertBase + 4], 
-//                                       projectedVerts[vertBase + 5]);
-//             float3 v3_proj = (float3)(projectedVerts[vertBase + 6], 
-//                                       projectedVerts[vertBase + 7], 
-//                                       projectedVerts[vertBase + 8]);
-            
-//             // **OPTIMIZATION 6: Fast barycentric using cross product method**
-//             float2 v0 = v2_proj.xy - v1_proj.xy;
-//             float2 v1 = v3_proj.xy - v1_proj.xy;
-//             float2 v2 = pixelPos - v1_proj.xy;
-            
-//             float dot00 = dot(v0, v0);
-//             float dot01 = dot(v0, v1);
-//             float dot02 = dot(v0, v2);
-//             float dot11 = dot(v1, v1);
-//             float dot12 = dot(v1, v2);
-            
-//             float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
-            
-//             // **OPTIMIZATION 7: Early exit on degenerate triangles**
-//             if (isinf(invDenom) || isnan(invDenom)) continue;
-            
-//             float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
-//             float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
-            
-//             // **OPTIMIZATION 8: Single bounds check**
-//             if (u >= 0.0f && v >= 0.0f && (u + v) <= 1.0f) {
-//                 float w = 1.0f - u - v;
-//                 float depth = w * v1_proj.z + u * v2_proj.z + v * v3_proj.z;
-                
-//                 // **OPTIMIZATION 9: Early depth rejection**
-//                 if (depth < closestDepth) {
-//                     closestDepth = depth;
-//                     closestTriangle = triangleId;
-//                 }
-//             }
-//         }
-        
-//         // **OPTIMIZATION 10: Early termination if we found a very close triangle**
-//         if (closestDepth < 0.1f) break; // Stop searching if very close
-//     }
-    
-//     // **OPTIMIZATION 11: Single write pass at the end**
-//     if (closestTriangle >= 0 && (ScreenDistances[pixelIndex] == 0.0f || closestDepth < ScreenDistances[pixelIndex])) {
-//         ScreenDistances[pixelIndex] = closestDepth;
-        
-//         // **OPTIMIZATION 12: Minimize memory loads**
-//         int normalBase = closestTriangle * 3;
-//         int colorBase = closestTriangle * 3;
-        
-//         float3 faceNormal = (float3)(normals[normalBase], normals[normalBase + 1], normals[normalBase + 2]);
-//         float3 triangleColor = (float3)(TriangleColors[colorBase], TriangleColors[colorBase + 1], TriangleColors[colorBase + 2]);
-        
-//         float3 interpolatedNormal = normalize(faceNormal);
-        
-//         // **OPTIMIZATION 13: Vectorized operations**
-//         float3 simpleLight = (float3)(0.3f, 0.7f, 0.5f);
-//         float lightIntensity = max(0.65f, dot(interpolatedNormal, simpleLight));
-//         float3 finalColor = triangleColor * lightIntensity;
-        
-//         float emissionValue = emission[closestTriangle];
-//         finalColor += triangleColor * emissionValue;
-//         finalColor = clamp(finalColor, 0.0f, 1.0f);
-        
-//         // **OPTIMIZATION 14: Coalesced memory writes**
-//         int normalIndex = pixelIndex * 3;
-//         int colorIndex = pixelIndex * 3;
-        
-//         // Write normals
-//         ScreenNormals[normalIndex] = interpolatedNormal.x;
-//         ScreenNormals[normalIndex + 1] = interpolatedNormal.y;
-//         ScreenNormals[normalIndex + 2] = interpolatedNormal.z;
-        
-//         // Write colors
-//         ScreenColors[colorIndex] = finalColor.x;
-//         ScreenColors[colorIndex + 1] = finalColor.y;
-//         ScreenColors[colorIndex + 2] = finalColor.z;
-        
-//         // Write material properties
-//         ScreenMaterialRoughness[pixelIndex] = roughness[closestTriangle];
-//         ScreenMaterialMetallic[pixelIndex] = metallic[closestTriangle];
-//         ScreenMaterialEmission[pixelIndex] = emissionValue;
-//     }
-// }
-
 
 // // Updated renderTriangles kernel with improved vertex normal calculation
 __kernel void renderTriangles(

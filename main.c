@@ -3148,11 +3148,11 @@ void saveScreenNormal(struct Screen *screen) {
 	memcpy((uint8_t *)SharedMem + offset, buffer, ScreenWidth * ScreenHeight * 4);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct Screen *lightScreen, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ThreadsData *threadsData, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	// printf("\n--- Starting render ---\n");
 	int start = clock();
 	clearScreen(screen);
-	clearScreen(lightScreen);
+	// clearScreen(lightScreen);
 	int clearScreenTime = clock();
 
 	float dt = (float)(clearScreenTime - start) / (float)CLOCKS_PER_SEC;
@@ -4177,8 +4177,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 		if (err == CL_SUCCESS) {
 			gpuTimings->applyBlurTime = (last_end - first_start) * 1e-6f; // ns to ms
-			// printf("Blur completed in %.3f ms\n", gpuTimings->applyBlurTime);
-			// snprintf(text, sizeof(text), "Blur %f ms", gpuTimings->applyBlurTime);
+																		  // printf("Blur completed in %.3f ms\n", gpuTimings->applyBlurTime);
+																		  // snprintf(text, sizeof(text), "Blur %f ms", gpuTimings->applyBlurTime);
 		} else {
 			printf("Error getting blur profiling info: %d\n", err);
 			gpuTimings->applyBlurTime = 0.0f;
@@ -4961,7 +4961,7 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, lightScreen, &ocl, triangles, &skyBox, &gpuTimings, &font);
+		render(screen, particles, &camera, cursor, timePartition, threadsData, particleIndexes, &lightCamera, &ocl, triangles, &skyBox, &gpuTimings, &font);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
