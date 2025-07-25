@@ -25,6 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
+  - [ ] Finish raytracing kernel
 - [ ] convert timing to this format
 
   ```c

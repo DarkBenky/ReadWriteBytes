@@ -188,6 +188,66 @@ IntersectionTriangle intersectTriangle(
 }
 
 
+float fract(float x) {
+    return x - floor(x);
+}
+
+// Add this helper function for better random number generation
+float hash(float seed) {
+    return fract(sin(seed * 12.9898f) * 43758.5453f);
+}
+
+float3 generateRoughnessBiasedDirection(
+    float3 normal, 
+    float3 perfectReflection, 
+    float roughness, 
+    float randomSeed
+) {
+    // Generate random numbers for spherical coordinates
+    float r1 = hash(randomSeed * 73.156f);
+    float r2 = hash(randomSeed * 47.832f);
+    
+    // Convert roughness to cone angle (more roughness = wider cone)
+    float maxAngle = roughness * 1.57079632679f; // roughness * PI/2 (max 90 degrees)
+    
+    // Generate random direction within cone around perfect reflection
+    float cosTheta = cos(r1 * maxAngle);
+    float sinTheta = sin(r1 * maxAngle);
+    float phi = r2 * 6.28318530718f; // 2 * PI
+    
+    // Create local coordinate system around perfect reflection
+    float3 up = (fabs(perfectReflection.z) < 0.999f) ? 
+                (float3)(0.0f, 0.0f, 1.0f) : (float3)(1.0f, 0.0f, 0.0f);
+    float3 tangent = normalize(cross(up, perfectReflection));
+    float3 bitangent = cross(perfectReflection, tangent);
+    
+    // Generate direction in cone
+    float3 randomDir = sinTheta * cos(phi) * tangent + 
+                       sinTheta * sin(phi) * bitangent + 
+                       cosTheta * perfectReflection;
+    
+    // For very rough surfaces, blend with diffuse (Lambertian) reflection
+    if (roughness > 0.5f) {
+        // Generate diffuse direction
+        float3 diffuseDir = normalize(normal + (float3)(
+            hash(randomSeed * 91.234f) * 2.0f - 1.0f,
+            hash(randomSeed * 67.891f) * 2.0f - 1.0f,
+            hash(randomSeed * 123.456f) * 2.0f - 1.0f
+        ));
+        
+        // Ensure diffuse direction is in correct hemisphere
+        if (dot(diffuseDir, normal) < 0.0f) {
+            diffuseDir = -diffuseDir;
+        }
+        
+        // Blend between specular and diffuse based on roughness
+        float blendFactor = (roughness - 0.5f) * 2.0f; // 0 to 1 for roughness 0.5 to 1.0
+        randomDir = normalize(mix(randomDir, diffuseDir, blendFactor));
+    }
+    
+    return normalize(randomDir);
+}
+
 float3 Trace(Ray ray, __global const BVHLinear *bvh, int maxDepth) {
     float3 incomingLight = (float3)(0.0f, 0.0f, 0.0f);
     float3 rayColor = (float3)(1.0f, 1.0f, 1.0f);
@@ -199,22 +259,20 @@ float3 Trace(Ray ray, __global const BVHLinear *bvh, int maxDepth) {
         hit.TriangleIndex = -1;
         
         // Traverse BVH to find closest intersection
-        int stack[64]; // Stack for BVH traversal
+        int stack[32]; // Reduced stack size
         int stackPtr = 0;
-        stack[stackPtr++] = 0; // Start with root node
+        stack[stackPtr++] = 0;
         
-        while (stackPtr > 0 && stackPtr < 64) {
+        while (stackPtr > 0 && stackPtr < 32) {
             int nodeIndex = stack[--stackPtr];
             
-            if (nodeIndex >= bvh->NodesCount) continue;
+            if (nodeIndex >= bvh->NodesCount || nodeIndex < 0) continue;
             
-            // Test intersection with bounding box
             IntersectionBoundingBox boxHit = intersectBoundingBox(ray, bvh->Nodes, nodeIndex);
             
             if (!boxHit.IsHit) continue;
             
             if (boxHit.IsLeaf) {
-                // Leaf node - test triangle intersection
                 if (boxHit.TriangleIndex >= 0 && boxHit.TriangleIndex < bvh->TrianglesCount) {
                     IntersectionTriangle triHit = intersectTriangle(ray, bvh->Triangles, boxHit.TriangleIndex);
                     
@@ -223,57 +281,159 @@ float3 Trace(Ray ray, __global const BVHLinear *bvh, int maxDepth) {
                     }
                 }
             } else {
-                // Internal node - add children to stack
                 const BVHNode node = bvh->Nodes[nodeIndex];
-                if (node.LeftChild >= 0 && stackPtr < 63) {
+                if (node.LeftChild >= 0 && stackPtr < 31) {
                     stack[stackPtr++] = node.LeftChild;
                 }
-                if (node.RightChild >= 0 && stackPtr < 63) {
+                if (node.RightChild >= 0 && stackPtr < 31) {
                     stack[stackPtr++] = node.RightChild;
                 }
             }
         }
         
-        // Process intersection result
-        if (!hit.Hit) {
-            // No intersection - return accumulated light
-            break;
-        }
+        if (!hit.Hit) break;
         
-        // Add emission from hit surface
         if (hit.TriangleIndex >= 0 && hit.TriangleIndex < bvh->TrianglesCount) {
             const Triangle hitTriangle = bvh->Triangles[hit.TriangleIndex];
             float3 emission = hitTriangle.color * hitTriangle.Emission;
+            float roughness = hitTriangle.Roughness;
+            float metallic = hitTriangle.Metallic;
+            
             incomingLight += rayColor * emission;
             
-            // Simple diffuse reflection for next bounce
-            float3 randomDir = normalize((float3)(
-                sin((float)depth * 12.9898f) * 0.5f + 0.5f,
-                cos((float)depth * 78.233f) * 0.5f + 0.5f,
-                sin((float)depth * 37.719f) * 0.5f + 0.5f
-            ));
+            // Calculate perfect reflection direction
+            float3 incidentDir = normalize(ray.Direction);
+            float3 normal = normalize(hit.NormalAtIntersection);
+            float3 perfectReflection = reflectVector(incidentDir, normal);
             
-            // Ensure reflection is in correct hemisphere
-            if (dot(randomDir, hit.NormalAtIntersection) < 0.0f) {
-                randomDir = -randomDir;
+            // Generate roughness-based random seed
+            float randomSeed = (float)depth + dot(hit.PointOfIntersection, (float3)(12.9898f, 78.233f, 37.719f));
+            
+            // Generate direction based on roughness
+            float3 newDirection;
+            if (metallic > 0.5f) {
+                // For metals: use roughness-biased reflection
+                newDirection = generateRoughnessBiasedDirection(normal, perfectReflection, roughness, randomSeed);
+            } else {
+                // For dielectrics: mix between diffuse and specular based on roughness
+                if (roughness > 0.8f) {
+                    // Very rough surface - mostly diffuse
+                    float3 diffuseDir = normalize(normal + (float3)(
+                        hash(randomSeed * 91.234f) * 2.0f - 1.0f,
+                        hash(randomSeed * 67.891f) * 2.0f - 1.0f,
+                        hash(randomSeed * 123.456f) * 2.0f - 1.0f
+                    ));
+                    
+                    if (dot(diffuseDir, normal) < 0.0f) {
+                        diffuseDir = -diffuseDir;
+                    }
+                    newDirection = diffuseDir;
+                } else {
+                    // Smooth to moderately rough - use roughness-biased reflection
+                    newDirection = generateRoughnessBiasedDirection(normal, perfectReflection, roughness, randomSeed);
+                }
             }
             
             // Update ray for next bounce
-            ray.Position = hit.PointOfIntersection + hit.NormalAtIntersection * 0.001f;
-            ray.Direction = normalize(randomDir);
+            ray.Position = hit.PointOfIntersection + normal * 0.001f;
+            ray.Direction = normalize(newDirection);
             
-            // Attenuate ray color
-            rayColor *= hit.ColorAtIntersection * (1.0f - hitTriangle.Metallic);
+            // Attenuate ray color based on material properties
+            float3 baseReflectance = mix(hit.ColorAtIntersection, (float3)(0.04f, 0.04f, 0.04f), metallic);
             
-            // Russian roulette termination
+            // Fresnel calculation
+            float cosTheta = max(0.0f, dot(-incidentDir, normal));
+            float3 F0 = mix((float3)(0.04f, 0.04f, 0.04f), hit.ColorAtIntersection, metallic);
+            float3 fresnel = F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
+            
+            // Energy conservation: less diffuse for rough metals
+            float diffuseWeight = (1.0f - metallic) * (1.0f - roughness * 0.5f);
+            float3 diffuseColor = hit.ColorAtIntersection * diffuseWeight;
+            float3 specularColor = fresnel;
+            
+            rayColor *= (diffuseColor + specularColor) * (1.0f + roughness * 0.2f); // Slight energy boost for rough surfaces
+            
+            // Russian roulette termination with roughness consideration
             float maxComponent = max(max(rayColor.x, rayColor.y), rayColor.z);
-            if (maxComponent < 0.1f) break;
+            float survivalProbability = min(0.95f, maxComponent * (1.0f + roughness * 0.3f));
+            
+            if (hash(randomSeed * 151.847f) > survivalProbability) break;
+            
+            rayColor /= survivalProbability; // Unbiased estimator
         } else {
             break;
         }
     }
     
     return incomingLight;
+}
+
+__kernel void applyRayTracedReflections(
+    __global float *ScreenColors,
+    __global const float *ScreenDistances,
+    __global const float *ScreenNormals,
+    __global const float *ScreenMaterialRoughness,
+    __global const float *ScreenMaterialMetallic,
+    __global const float *ScreenMaterialEmission,
+    const float3 camPos,
+    const float3 camDir,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight,
+    __global const float *SkyBoxTop,
+    __global const float *SkyBoxBottom,
+    __global const float *SkyBoxLeft,
+    __global const float *SkyBoxRight,
+    __global const float *SkyBoxFront,
+    __global const float *SkyBoxBack,
+    const int skyBoxWidth,
+    const int skyBoxHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int pixelIndex = y * screenWidth + x;
+    float depth = ScreenDistances[pixelIndex];
+    
+    if (depth <= 0.001f) return;
+    
+    int normalIndex = pixelIndex * 3;
+    float3 normal = (float3)(ScreenNormals[normalIndex], 
+                             ScreenNormals[normalIndex + 1], 
+                             ScreenNormals[normalIndex + 2]);
+    
+    float3 forward = normalize(camDir);
+    float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
+    float3 right = normalize(cross(forward, camUp));
+    float3 up = cross(right, forward);
+    
+    float ndcX = (x + 0.5f) / screenWidth * 2.0f - 1.0f;
+    float ndcY = -((y + 0.5f) / screenHeight * 2.0f - 1.0f);
+    
+    float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
+    float3 worldPos = camPos + rayDir * depth;
+    
+    float3 viewDir = normalize(camPos - worldPos);
+    float3 reflectedDir = reflectVector(-viewDir, normalize(normal));
+
+    float3 rayTracedColor = Trace(
+        (Ray){worldPos, rayDir}, 
+        (__global const BVHLinear *)ScreenColors, // Assuming ScreenColors contains BVH data
+        3 // Max depth for ray tracing
+    );
+
+    // Mix ScreenColors with ray-traced reflections
+    int colorIndex = pixelIndex * 3;
+    float3 currentColor = (float3)(ScreenColors[colorIndex], 
+                                   ScreenColors[colorIndex + 1], 
+                                   ScreenColors[colorIndex + 2]);
+    float3 finalColor = mix(currentColor, rayTracedColor, 0.5f); // 50% reflection mix
+    
+    ScreenColors[colorIndex]     = clamp(finalColor.x, 0.0f, 1.0f);
+    ScreenColors[colorIndex + 1] = clamp(finalColor.y, 0.0f, 1.0f);
+    ScreenColors[colorIndex + 2] = clamp(finalColor.z, 0.0f, 1.0f);
 }
 
 void renderFont(

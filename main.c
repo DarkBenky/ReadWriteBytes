@@ -226,6 +226,7 @@ struct OpenCLContext {
 	cl_kernel triangle_kernel; // triangle kernel
 	cl_kernel skybox_kernel;
 	cl_kernel applyReflections_kernel;
+	cl_kernel applyRayTracedReflections_kernel; // Apply ray-traced reflections
 	cl_kernel gpuTimings_kernel;	  // kernel for GPU timings
 	cl_kernel renderText_kernel;	  // kernel for rendering text
 	cl_kernel calculateVertex_kernel; // Vertex calculation kernel
