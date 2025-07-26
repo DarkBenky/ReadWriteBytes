@@ -24,8 +24,11 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
+- [ ] Fix BVH Lineation
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] Finish raytracing kernel
+    - [ ] Initialize kernel
+      - [ ] BVH buffer ...
 - [ ] convert timing to this format
 
   ```c

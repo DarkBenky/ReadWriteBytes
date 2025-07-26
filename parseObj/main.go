@@ -1109,6 +1109,15 @@ func main() {
 	bvhLinear.BuildLinearBVH(obj.Triangles)
 	fmt.Printf("Built BVH with %d nodes\n", len(bvhLinear.Nodes))
 
+	for i, node := range bvhLinear.Nodes {
+		fmt.Println("Node", i)
+		fmt.Println("Left Index:", node.LeftIndex)
+		fmt.Println("Right Index:", node.RightIndex)
+		if i == 3 {
+			break
+		}
+	}
+
 	// Write BVH to binary file
 	err = bvhLinear.WriteBVHToFile("encoded.bvh")
 	if err != nil {
