@@ -775,125 +775,179 @@ type BVHBuildNode struct {
 	BoundingBox   [6]float32
 	Triangles     []Triangle
 	TriangleIndex int32 // Only used for leaf nodes
+	NodeIndex     int32 // Index in the linearized BVH array
 	IsLeaf        bool
 }
 
-func BuildBVHRecursive(triangles []Triangle) *BVHBuildNode {
-	if len(triangles) == 0 {
-		return nil
-	}
+func BuildBVHRecursive(triangles []Triangle, nodeIndexPtr *int32) *BVHBuildNode {
+    if len(triangles) == 0 {
+        return nil
+    }
 
-	node := &BVHBuildNode{
-		BoundingBox: CalculateBoundingBox(triangles),
-		Triangles:   triangles,
-	}
+    // Assign current index and increment
+    currentIndex := *nodeIndexPtr
+    *nodeIndexPtr++
 
-	// Leaf case - single triangle
-	if len(triangles) == 1 {
-		node.IsLeaf = true
-		node.TriangleIndex = triangles[0].index
+    node := &BVHBuildNode{
+        BoundingBox: CalculateBoundingBox(triangles),
+        Triangles:   triangles,
+        NodeIndex:   currentIndex,
+    }
 
-		// Ensure normal is calculated if it isn't already
-		if triangles[0].Normal.X == 0 && triangles[0].Normal.Y == 0 && triangles[0].Normal.Z == 0 {
-			v1, v2, v3 := triangles[0].Vertex1, triangles[0].Vertex2, triangles[0].Vertex3
+    // Leaf case - single triangle
+    if len(triangles) == 1 {
+        node.IsLeaf = true
+        node.TriangleIndex = triangles[0].index
 
-			// Calculate two edges
-			edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
-			edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
+        // Ensure normal is calculated if it isn't already
+        if triangles[0].Normal.X == 0 && triangles[0].Normal.Y == 0 && triangles[0].Normal.Z == 0 {
+            v1, v2, v3 := triangles[0].Vertex1, triangles[0].Vertex2, triangles[0].Vertex3
 
-			// Cross product to get normal
-			normal := Vertex{
-				edge1.Y*edge2.Z - edge1.Z*edge2.Y,
-				edge1.Z*edge2.X - edge1.X*edge2.Z,
-				edge1.X*edge2.Y - edge1.Y*edge2.X,
-			}
+            // Calculate two edges
+            edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
+            edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
 
-			triangles[0].Normal = Normalize(normal)
-		}
+            // Cross product to get normal
+            normal := Vertex{
+                edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+                edge1.Z*edge2.X - edge1.X*edge2.Z,
+                edge1.X*edge2.Y - edge1.Y*edge2.X,
+            }
 
-		return node
-	}
+            triangles[0].Normal = Normalize(normal)
+        }
 
-	// Find the longest axis to split along
-	bbox := node.BoundingBox
-	extentX := bbox[3] - bbox[0]
-	extentY := bbox[4] - bbox[1]
-	extentZ := bbox[5] - bbox[2]
+        return node
+    }
 
-	axis := 0 // X-axis by default
-	if extentY > extentX && extentY > extentZ {
-		axis = 1 // Y-axis
-	} else if extentZ > extentX && extentZ > extentY {
-		axis = 2 // Z-axis
-	}
+    // Find the longest axis to split along
+    bbox := node.BoundingBox
+    extentX := bbox[3] - bbox[0]
+    extentY := bbox[4] - bbox[1]
+    extentZ := bbox[5] - bbox[2]
 
-	// Sort triangles based on their centroids along the chosen axis
-	sortedTriangles := make([]Triangle, len(triangles))
-	copy(sortedTriangles, triangles)
+    axis := 0 // X-axis by default
+    if extentY > extentX && extentY > extentZ {
+        axis = 1 // Y-axis
+    } else if extentZ > extentX && extentZ > extentY {
+        axis = 2 // Z-axis
+    }
 
-	sort.Slice(sortedTriangles, func(i, j int) bool {
-		var centroidI, centroidJ float32
+    // Sort triangles based on their centroids along the chosen axis
+    sortedTriangles := make([]Triangle, len(triangles))
+    copy(sortedTriangles, triangles)
 
-		if axis == 0 { // X-axis
-			centroidI = (sortedTriangles[i].Vertex1.X + sortedTriangles[i].Vertex2.X + sortedTriangles[i].Vertex3.X) / 3.0
-			centroidJ = (sortedTriangles[j].Vertex1.X + sortedTriangles[j].Vertex2.X + sortedTriangles[j].Vertex3.X) / 3.0
-		} else if axis == 1 { // Y-axis
-			centroidI = (sortedTriangles[i].Vertex1.Y + sortedTriangles[i].Vertex2.Y + sortedTriangles[i].Vertex3.Y) / 3.0
-			centroidJ = (sortedTriangles[j].Vertex1.Y + sortedTriangles[j].Vertex2.Y + sortedTriangles[j].Vertex3.Y) / 3.0
-		} else { // Z-axis
-			centroidI = (sortedTriangles[i].Vertex1.Z + sortedTriangles[i].Vertex2.Z + sortedTriangles[i].Vertex3.Z) / 3.0
-			centroidJ = (sortedTriangles[j].Vertex1.Z + sortedTriangles[j].Vertex2.Z + sortedTriangles[j].Vertex3.Z) / 3.0
-		}
+    sort.Slice(sortedTriangles, func(i, j int) bool {
+        var centroidI, centroidJ float32
 
-		return centroidI < centroidJ
-	})
+        if axis == 0 { // X-axis
+            centroidI = (sortedTriangles[i].Vertex1.X + sortedTriangles[i].Vertex2.X + sortedTriangles[i].Vertex3.X) / 3.0
+            centroidJ = (sortedTriangles[j].Vertex1.X + sortedTriangles[j].Vertex2.X + sortedTriangles[j].Vertex3.X) / 3.0
+        } else if axis == 1 { // Y-axis
+            centroidI = (sortedTriangles[i].Vertex1.Y + sortedTriangles[i].Vertex2.Y + sortedTriangles[i].Vertex3.Y) / 3.0
+            centroidJ = (sortedTriangles[j].Vertex1.Y + sortedTriangles[j].Vertex2.Y + sortedTriangles[j].Vertex3.Y) / 3.0
+        } else { // Z-axis
+            centroidI = (sortedTriangles[i].Vertex1.Z + sortedTriangles[i].Vertex2.Z + sortedTriangles[i].Vertex3.Z) / 3.0
+            centroidJ = (sortedTriangles[j].Vertex1.Z + sortedTriangles[j].Vertex2.Z + sortedTriangles[j].Vertex3.Z) / 3.0
+        }
 
-	// Find best split using SAH
-	bestCost := float32(math.MaxFloat32)
-	bestSplit := len(sortedTriangles) / 2 // Default mid-point split
+        return centroidI < centroidJ
+    })
 
-	// Try different splits and find the one with lowest SAH cost
-	for i := 1; i < len(sortedTriangles); i++ {
-		leftTris := sortedTriangles[:i]
-		rightTris := sortedTriangles[i:]
+    // Find best split using SAH
+    bestCost := float32(math.MaxFloat32)
+    bestSplit := len(sortedTriangles) / 2 // Default mid-point split
 
-		leftBox := CalculateBoundingBox(leftTris)
-		rightBox := CalculateBoundingBox(rightTris)
+    // Try different splits and find the one with lowest SAH cost
+    for i := 1; i < len(sortedTriangles); i++ {
+        leftTris := sortedTriangles[:i]
+        rightTris := sortedTriangles[i:]
 
-		leftSAH := CalculateSAH(leftTris, leftBox)
-		rightSAH := CalculateSAH(rightTris, rightBox)
+        leftBox := CalculateBoundingBox(leftTris)
+        rightBox := CalculateBoundingBox(rightTris)
 
-		totalCost := leftSAH + rightSAH
+        leftSAH := CalculateSAH(leftTris, leftBox)
+        rightSAH := CalculateSAH(rightTris, rightBox)
 
-		if totalCost < bestCost {
-			bestCost = totalCost
-			bestSplit = i
-		}
-	}
+        totalCost := leftSAH + rightSAH
 
-	// Create children using the best split
-	leftTris := sortedTriangles[:bestSplit]
-	rightTris := sortedTriangles[bestSplit:]
+        if totalCost < bestCost {
+            bestCost = totalCost
+            bestSplit = i
+        }
+    }
 
-	if len(leftTris) == 0 || len(rightTris) == 0 {
-		// SAH failed to find a good split, fall back to median
-		mid := len(sortedTriangles) / 2
-		leftTris = sortedTriangles[:mid]
-		rightTris = sortedTriangles[mid:]
-	}
+    // Create children using the best split
+    leftTris := sortedTriangles[:bestSplit]
+    rightTris := sortedTriangles[bestSplit:]
 
-	node.Left = BuildBVHRecursive(leftTris)
-	node.Right = BuildBVHRecursive(rightTris)
-	node.IsLeaf = false
-	node.TriangleIndex = -1 // Mark as non-leaf
+    if len(leftTris) == 0 || len(rightTris) == 0 {
+        // SAH failed to find a good split, fall back to median
+        mid := len(sortedTriangles) / 2
+        leftTris = sortedTriangles[:mid]
+        rightTris = sortedTriangles[mid:]
+    }
 
-	return node
+    node.Left = BuildBVHRecursive(leftTris, nodeIndexPtr)
+    node.Right = BuildBVHRecursive(rightTris, nodeIndexPtr)
+    node.IsLeaf = false
+    node.TriangleIndex = -1 // Mark as non-leaf
+
+    return node
 }
 
 type BVHLinear struct {
 	Nodes     []BVHNode
 	Triangles []Triangle
 }
+
+func linearizeBVH(node *BVHBuildNode, bvh *BVHLinear) error {
+    if node == nil {
+        return nil
+    }
+
+    // get node index
+    nodeIndex := node.NodeIndex
+
+    triangleIndex := int32(-1)
+    leftIndex := int32(-1)
+    rightIndex := int32(-1)
+    if node.IsLeaf {
+        triangleIndex = node.TriangleIndex
+    } else {
+        // get left index
+        if node.Left != nil {
+            leftIndex = node.Left.NodeIndex
+        }
+        if node.Right != nil {
+            rightIndex = node.Right.NodeIndex
+        }
+    }
+
+    // Check bounds before accessing array
+    if int(nodeIndex) >= len(bvh.Nodes) {
+        return fmt.Errorf("node index %d out of bounds (array size: %d)", nodeIndex, len(bvh.Nodes))
+    }
+
+    bvh.Nodes[nodeIndex] = BVHNode{
+        BoundingBox:   node.BoundingBox,
+        LeftIndex:     leftIndex,
+        RightIndex:    rightIndex,
+        TriangleIndex: triangleIndex,
+    }
+
+    // Recursively process children with proper error handling
+    if err := linearizeBVH(node.Left, bvh); err != nil {
+        return err
+    }
+    if err := linearizeBVH(node.Right, bvh); err != nil {
+        return err
+    }
+
+    return nil
+}
+
+
 
 // Linearize the BVH tree into a flat array
 func (bvh *BVHLinear) BuildLinearBVH(triangles []Triangle) {
@@ -902,52 +956,34 @@ func (bvh *BVHLinear) BuildLinearBVH(triangles []Triangle) {
 	}
 
 	// Build the BVH tree recursively
-	root := BuildBVHRecursive(triangles)
+	root := BuildBVHRecursive(triangles, 1)
 	if root == nil {
 		return
 	}
 
+	fmt.Println("root IDx:", root.NodeIndex)
+	fmt.Println("Left IDx:", root.Left.NodeIndex)
+	fmt.Println("Right IDx:", root.Right.NodeIndex)
+	fmt.Println("Left Left:", root.Left.Left.NodeIndex)
+	fmt.Println("Left Right:", root.Left.Right.NodeIndex)
+	fmt.Println("Right Left:", root.Right.Left.NodeIndex)
+	fmt.Println("Right Right:", root.Right.Right.NodeIndex)
+
+	numberOfNodes := 2*len(triangles) - 1 // Maximum nodes in a binary tree with n leaves
+
 	// Linearize the tree
-	bvh.Nodes = make([]BVHNode, 0)
+	bvh.Nodes = make([]BVHNode, numberOfNodes)
 	bvh.Triangles = make([]Triangle, len(triangles))
 	copy(bvh.Triangles, triangles)
 
-	// Recursive function to flatten tree
-	var flattenTree func(*BVHBuildNode) int32
-	flattenTree = func(node *BVHBuildNode) int32 {
-		if node == nil {
-			return -1
-		}
-
-		// Current index in nodes array
-		nodeIndex := int32(len(bvh.Nodes))
-
-		// Create linear node
-		linearNode := BVHNode{
-			BoundingBox:   node.BoundingBox,
-			LeftIndex:     -1,
-			RightIndex:    -1,
-			TriangleIndex: -1, // Default to internal node
-		}
-
-		if node.IsLeaf {
-			linearNode.TriangleIndex = node.TriangleIndex
-		}
-
-		// Add node to array
-		bvh.Nodes = append(bvh.Nodes, linearNode)
-
-		// Process children and update indices
-		if !node.IsLeaf {
-			linearNode.LeftIndex = flattenTree(node.Left)
-			linearNode.RightIndex = flattenTree(node.Right)
-			bvh.Nodes[nodeIndex] = linearNode // Update with correct child indices
-		}
-
-		return nodeIndex
+	if err := linearizeBVH(root, bvh); err != nil {
+		fmt.Printf("Error linearizing BVH: %v\n", err)
+		return
 	}
 
-	flattenTree(root)
+	fmt.Println("Head Node IDx:", 0)
+	fmt.Println("Left Child IDx:", bvh.Nodes[0].LeftIndex)
+	fmt.Println("Right Child IDx:", bvh.Nodes[0].RightIndex)
 }
 
 // WriteBVHToFile writes the linearized BVH to a binary file
@@ -1102,7 +1138,6 @@ func main() {
 
 	// add triangles from obj1 to obj
 	// obj.Triangles = append(obj.Triangles, obj1.Triangles...)
-
 
 	// Build BVH
 	bvhLinear := &BVHLinear{}

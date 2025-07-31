@@ -50,6 +50,7 @@ int textBufferLen = 0;
 #define NUMBER_OF_TRIANGLES 100000
 #define NUMBER_OF_CUBES 100
 pthread_t threads[NUM_THREADS];
+
 struct RawImage {
 	unsigned char *data; // RGB pixel data
 	int width, height, components;
@@ -227,10 +228,10 @@ struct OpenCLContext {
 	cl_kernel skybox_kernel;
 	cl_kernel applyReflections_kernel;
 	cl_kernel applyRayTracedReflections_kernel; // Apply ray-traced reflections
-	cl_kernel gpuTimings_kernel;	  // kernel for GPU timings
-	cl_kernel renderText_kernel;	  // kernel for rendering text
-	cl_kernel calculateVertex_kernel; // Vertex calculation kernel
-	cl_kernel shadePixels_kernel;	  // Pixel shading kernel
+	cl_kernel gpuTimings_kernel;				// kernel for GPU timings
+	cl_kernel renderText_kernel;				// kernel for rendering text
+	cl_kernel calculateVertex_kernel;			// Vertex calculation kernel
+	cl_kernel shadePixels_kernel;				// Pixel shading kernel
 	// buffers
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
@@ -244,6 +245,10 @@ struct OpenCLContext {
 	cl_mem buffer_projected_verts; // Pre-calculated vertex coordinates
 	cl_mem buffer_triangle_bboxes; // Pre-calculated bounding boxes
 	cl_mem buffer_valid_triangles; // Pre-calculated validity flags
+
+	// rayTracing buffers
+	cl_mem buffer_bvh_nodes;
+	cl_mem buffer_bvh_triangles;
 
 	// buffer for rendering text
 	cl_mem buffer_font_data; // buffer for font data
@@ -3533,7 +3538,7 @@ int setupStaticKernelArguments(struct OpenCLContext *ocl, struct Triangles *tria
 	return 1;
 }
 
-int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox, struct ImageFont *imageFont) {
+int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox, struct ImageFont *imageFont, struct BVHLinear *bvh) {
 	cl_int err;
 
 	// Get platform
@@ -3614,6 +3619,13 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
 		return 0;
 	}
 
+	// kernel for ray-tracing
+	ocl->applyRayTracedReflections_kernel = clCreateKernel(ocl->program, "applyRayTracedReflections", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating rayTrace kernel: %d\n", err);
+		return 0;
+	}
+
 	// kernel for rendering particles
 	ocl->shadePixels_kernel = clCreateKernel(ocl->program, "ShadePixels", &err);
 	if (err != CL_SUCCESS) {
@@ -3682,6 +3694,47 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
 		printf("Error creating points buffer: %d\n", err);
 		return 0;
 	}
+
+	// create buffer for BVH nodes
+	ocl->buffer_bvh_nodes = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+										   bvh->NodesCount * sizeof(struct BVHNode), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating BVH nodes buffer: %d\n", err);
+		return 0;
+	}
+
+	// create buffer for BVH triangles
+	ocl->buffer_bvh_triangles = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											   bvh->TrianglesCount * sizeof(struct Triangle), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating BVH triangles buffer: %d\n", err);
+		return 0;
+	}
+
+	// upload BVH data
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_bvh_nodes, CL_TRUE, 0,
+							   bvh->NodesCount * sizeof(struct BVHNode), bvh->Nodes, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing BVH nodes buffer: %d\n", err);
+		return 0;
+	}
+
+	// buffer for triangle vertices
+	ocl->buffer_triangle_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											 triangles->count * 3 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating triangle v1 buffer: %d\n", err);
+		return 0;
+	}
+
+	// upload triangle data for bvh
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_bvh_triangles, CL_TRUE, 0,
+							   bvh->TrianglesCount * sizeof(struct Triangle), bvh->Triangles, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing BVH triangles buffer: %d\n", err);
+		return 0;
+	}
+	
 
 	// buffer for projected vertices of triangles to screen
 	ocl->buffer_projected_verts = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
