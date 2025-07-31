@@ -596,11 +596,27 @@ func uint32ToBytes(value uint32) []byte {
 	}
 }
 
+func int32ToBytes(value int32) []byte {
+	return []byte{
+		byte(value & 0xFF),
+		byte((value >> 8) & 0xFF),
+		byte((value >> 16) & 0xFF),
+		byte((value >> 24) & 0xFF),
+	}
+}
+
 func bytesToUint32(b []byte) uint32 {
 	if len(b) < 4 {
 		return 0
 	}
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+func bytesToInt32(b []byte) int32 {
+	if len(b) < 4 {
+		return 0
+	}
+	return int32(b[0]) | int32(b[1])<<8 | int32(b[2])<<16 | int32(b[3])<<24
 }
 
 func float32ToBytes(value float32) []byte {
@@ -611,6 +627,14 @@ func float32ToBytes(value float32) []byte {
 		byte((bits >> 16) & 0xFF),
 		byte((bits >> 24) & 0xFF),
 	}
+}
+
+func bytesToFloat32(b []byte) float32 {
+	if len(b) < 4 {
+		return 0.0
+	}
+	bits := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+	return *(*float32)(unsafe.Pointer(&bits))
 }
 
 func writeFile(filename string, obj *FileObject) error {
@@ -733,6 +757,161 @@ type BVHNode struct {
 	TriangleIndex int32      // -1 if not a leaf node, otherwise the index of the triangle
 }
 
+// Validate that the linearized BVH matches the original tree structure
+func validateBVH(root *BVHBuildNode, bvh *BVHLinear) bool {
+	if root == nil {
+		fmt.Println("Validation passed: Root is nil")
+		return true
+	}
+
+	// Check if root index is valid
+	if root.NodeIndex >= int32(len(bvh.Nodes)) {
+		fmt.Printf("Validation failed: Root index %d out of bounds\n", root.NodeIndex)
+		return false
+	}
+
+	// Start recursive validation from root
+	return validateNodeRecursive(root, bvh, "root")
+}
+
+func validateNodeRecursive(treeNode *BVHBuildNode, bvh *BVHLinear, nodeName string) bool {
+	if treeNode == nil {
+		return true
+	}
+
+	// Get corresponding linearized node
+	if treeNode.NodeIndex >= int32(len(bvh.Nodes)) {
+		fmt.Printf("Validation failed at %s: Index %d out of bounds\n", nodeName, treeNode.NodeIndex)
+		return false
+	}
+
+	linearNode := bvh.Nodes[treeNode.NodeIndex]
+
+	// Compare bounding boxes
+	if !compareBoundingBoxes(treeNode.BoundingBox, linearNode.BoundingBox) {
+		fmt.Printf("Validation failed at %s: Bounding box mismatch\n", nodeName)
+		fmt.Printf("  Tree: %v\n", treeNode.BoundingBox)
+		fmt.Printf("  Linear: %v\n", linearNode.BoundingBox)
+		return false
+	}
+
+	// Compare leaf status and triangle index
+	if treeNode.IsLeaf {
+		if linearNode.TriangleIndex != treeNode.TriangleIndex {
+			fmt.Printf("Validation failed at %s: Triangle index mismatch (tree: %d, linear: %d)\n",
+				nodeName, treeNode.TriangleIndex, linearNode.TriangleIndex)
+			return false
+		}
+		if linearNode.LeftIndex != -1 || linearNode.RightIndex != -1 {
+			fmt.Printf("Validation failed at %s: Leaf node has children in linear BVH\n", nodeName)
+			return false
+		}
+	} else {
+		if linearNode.TriangleIndex != -1 {
+			fmt.Printf("Validation failed at %s: Non-leaf node has triangle index in linear BVH\n", nodeName)
+			return false
+		}
+
+		// Compare child indices
+		expectedLeftIndex := int32(-1)
+		expectedRightIndex := int32(-1)
+
+		if treeNode.Left != nil {
+			expectedLeftIndex = treeNode.Left.NodeIndex
+		}
+		if treeNode.Right != nil {
+			expectedRightIndex = treeNode.Right.NodeIndex
+		}
+
+		if linearNode.LeftIndex != expectedLeftIndex {
+			fmt.Printf("Validation failed at %s: Left child index mismatch (expected: %d, got: %d)\n",
+				nodeName, expectedLeftIndex, linearNode.LeftIndex)
+			return false
+		}
+		if linearNode.RightIndex != expectedRightIndex {
+			fmt.Printf("Validation failed at %s: Right child index mismatch (expected: %d, got: %d)\n",
+				nodeName, expectedRightIndex, linearNode.RightIndex)
+			return false
+		}
+	}
+
+	// Recursively validate children
+	leftNodeIndex := int32(-1)
+	if treeNode.Left != nil {
+		leftNodeIndex = treeNode.Left.NodeIndex
+	}
+	rightNodeIndex := int32(-1)
+	if treeNode.Right != nil {
+		rightNodeIndex = treeNode.Right.NodeIndex
+	}
+
+	if !validateNodeRecursive(treeNode.Left, bvh, fmt.Sprintf("%s.left(%d)", nodeName, leftNodeIndex)) {
+		return false
+	}
+	if !validateNodeRecursive(treeNode.Right, bvh, fmt.Sprintf("%s.right(%d)", nodeName, rightNodeIndex)) {
+		return false
+	}
+
+	return true
+}
+
+func compareBoundingBoxes(a, b [6]float32) bool {
+	const epsilon = 1e-6
+	for i := 0; i < 6; i++ {
+		if abs(a[i]-b[i]) > epsilon {
+			return false
+		}
+	}
+	return true
+}
+
+func abs(x float32) float32 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// Additional validation function to check BVH integrity
+func validateBVHIntegrity(bvh *BVHLinear) bool {
+	if len(bvh.Nodes) == 0 {
+		fmt.Println("BVH integrity check: Empty BVH")
+		return true
+	}
+
+	// Check that all referenced indices are valid
+	for i, node := range bvh.Nodes {
+		if node.LeftIndex != -1 {
+			if node.LeftIndex < 0 || node.LeftIndex >= int32(len(bvh.Nodes)) {
+				fmt.Printf("BVH integrity failed: Node %d has invalid left index %d\n", i, node.LeftIndex)
+				return false
+			}
+		}
+		if node.RightIndex != -1 {
+			if node.RightIndex < 0 || node.RightIndex >= int32(len(bvh.Nodes)) {
+				fmt.Printf("BVH integrity failed: Node %d has invalid right index %d\n", i, node.RightIndex)
+				return false
+			}
+		}
+
+		// Check that leaf nodes don't have children and vice versa
+		isLeaf := (node.TriangleIndex >= 0)
+		hasChildren := (node.LeftIndex != -1 || node.RightIndex != -1)
+
+		if isLeaf && hasChildren {
+			fmt.Printf("BVH integrity failed: Node %d is leaf but has children\n", i)
+			return false
+		}
+		if !isLeaf && !hasChildren {
+			fmt.Printf("BVH integrity failed: Node %d is not leaf but has no children\n", i)
+			return false
+		}
+	}
+
+	fmt.Println("BVH integrity check passed")
+	return true
+}
+
 func CalculateBoundingBox(triangles []Triangle) [6]float32 {
 	if len(triangles) == 0 {
 		return [6]float32{0, 0, 0, 0, 0, 0}
@@ -780,120 +959,120 @@ type BVHBuildNode struct {
 }
 
 func BuildBVHRecursive(triangles []Triangle, nodeIndexPtr *int32) *BVHBuildNode {
-    if len(triangles) == 0 {
-        return nil
-    }
+	if len(triangles) == 0 {
+		return nil
+	}
 
-    // Assign current index and increment
-    currentIndex := *nodeIndexPtr
-    *nodeIndexPtr++
+	// Assign current index and increment
+	currentIndex := *nodeIndexPtr
+	*nodeIndexPtr++
 
-    node := &BVHBuildNode{
-        BoundingBox: CalculateBoundingBox(triangles),
-        Triangles:   triangles,
-        NodeIndex:   currentIndex,
-    }
+	node := &BVHBuildNode{
+		BoundingBox: CalculateBoundingBox(triangles),
+		Triangles:   triangles,
+		NodeIndex:   currentIndex,
+	}
 
-    // Leaf case - single triangle
-    if len(triangles) == 1 {
-        node.IsLeaf = true
-        node.TriangleIndex = triangles[0].index
+	// Leaf case - single triangle
+	if len(triangles) == 1 {
+		node.IsLeaf = true
+		node.TriangleIndex = triangles[0].index
 
-        // Ensure normal is calculated if it isn't already
-        if triangles[0].Normal.X == 0 && triangles[0].Normal.Y == 0 && triangles[0].Normal.Z == 0 {
-            v1, v2, v3 := triangles[0].Vertex1, triangles[0].Vertex2, triangles[0].Vertex3
+		// Ensure normal is calculated if it isn't already
+		if triangles[0].Normal.X == 0 && triangles[0].Normal.Y == 0 && triangles[0].Normal.Z == 0 {
+			v1, v2, v3 := triangles[0].Vertex1, triangles[0].Vertex2, triangles[0].Vertex3
 
-            // Calculate two edges
-            edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
-            edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
+			// Calculate two edges
+			edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
+			edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
 
-            // Cross product to get normal
-            normal := Vertex{
-                edge1.Y*edge2.Z - edge1.Z*edge2.Y,
-                edge1.Z*edge2.X - edge1.X*edge2.Z,
-                edge1.X*edge2.Y - edge1.Y*edge2.X,
-            }
+			// Cross product to get normal
+			normal := Vertex{
+				edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+				edge1.Z*edge2.X - edge1.X*edge2.Z,
+				edge1.X*edge2.Y - edge1.Y*edge2.X,
+			}
 
-            triangles[0].Normal = Normalize(normal)
-        }
+			triangles[0].Normal = Normalize(normal)
+		}
 
-        return node
-    }
+		return node
+	}
 
-    // Find the longest axis to split along
-    bbox := node.BoundingBox
-    extentX := bbox[3] - bbox[0]
-    extentY := bbox[4] - bbox[1]
-    extentZ := bbox[5] - bbox[2]
+	// Find the longest axis to split along
+	bbox := node.BoundingBox
+	extentX := bbox[3] - bbox[0]
+	extentY := bbox[4] - bbox[1]
+	extentZ := bbox[5] - bbox[2]
 
-    axis := 0 // X-axis by default
-    if extentY > extentX && extentY > extentZ {
-        axis = 1 // Y-axis
-    } else if extentZ > extentX && extentZ > extentY {
-        axis = 2 // Z-axis
-    }
+	axis := 0 // X-axis by default
+	if extentY > extentX && extentY > extentZ {
+		axis = 1 // Y-axis
+	} else if extentZ > extentX && extentZ > extentY {
+		axis = 2 // Z-axis
+	}
 
-    // Sort triangles based on their centroids along the chosen axis
-    sortedTriangles := make([]Triangle, len(triangles))
-    copy(sortedTriangles, triangles)
+	// Sort triangles based on their centroids along the chosen axis
+	sortedTriangles := make([]Triangle, len(triangles))
+	copy(sortedTriangles, triangles)
 
-    sort.Slice(sortedTriangles, func(i, j int) bool {
-        var centroidI, centroidJ float32
+	sort.Slice(sortedTriangles, func(i, j int) bool {
+		var centroidI, centroidJ float32
 
-        if axis == 0 { // X-axis
-            centroidI = (sortedTriangles[i].Vertex1.X + sortedTriangles[i].Vertex2.X + sortedTriangles[i].Vertex3.X) / 3.0
-            centroidJ = (sortedTriangles[j].Vertex1.X + sortedTriangles[j].Vertex2.X + sortedTriangles[j].Vertex3.X) / 3.0
-        } else if axis == 1 { // Y-axis
-            centroidI = (sortedTriangles[i].Vertex1.Y + sortedTriangles[i].Vertex2.Y + sortedTriangles[i].Vertex3.Y) / 3.0
-            centroidJ = (sortedTriangles[j].Vertex1.Y + sortedTriangles[j].Vertex2.Y + sortedTriangles[j].Vertex3.Y) / 3.0
-        } else { // Z-axis
-            centroidI = (sortedTriangles[i].Vertex1.Z + sortedTriangles[i].Vertex2.Z + sortedTriangles[i].Vertex3.Z) / 3.0
-            centroidJ = (sortedTriangles[j].Vertex1.Z + sortedTriangles[j].Vertex2.Z + sortedTriangles[j].Vertex3.Z) / 3.0
-        }
+		if axis == 0 { // X-axis
+			centroidI = (sortedTriangles[i].Vertex1.X + sortedTriangles[i].Vertex2.X + sortedTriangles[i].Vertex3.X) / 3.0
+			centroidJ = (sortedTriangles[j].Vertex1.X + sortedTriangles[j].Vertex2.X + sortedTriangles[j].Vertex3.X) / 3.0
+		} else if axis == 1 { // Y-axis
+			centroidI = (sortedTriangles[i].Vertex1.Y + sortedTriangles[i].Vertex2.Y + sortedTriangles[i].Vertex3.Y) / 3.0
+			centroidJ = (sortedTriangles[j].Vertex1.Y + sortedTriangles[j].Vertex2.Y + sortedTriangles[j].Vertex3.Y) / 3.0
+		} else { // Z-axis
+			centroidI = (sortedTriangles[i].Vertex1.Z + sortedTriangles[i].Vertex2.Z + sortedTriangles[i].Vertex3.Z) / 3.0
+			centroidJ = (sortedTriangles[j].Vertex1.Z + sortedTriangles[j].Vertex2.Z + sortedTriangles[j].Vertex3.Z) / 3.0
+		}
 
-        return centroidI < centroidJ
-    })
+		return centroidI < centroidJ
+	})
 
-    // Find best split using SAH
-    bestCost := float32(math.MaxFloat32)
-    bestSplit := len(sortedTriangles) / 2 // Default mid-point split
+	// Find best split using SAH
+	bestCost := float32(math.MaxFloat32)
+	bestSplit := len(sortedTriangles) / 2 // Default mid-point split
 
-    // Try different splits and find the one with lowest SAH cost
-    for i := 1; i < len(sortedTriangles); i++ {
-        leftTris := sortedTriangles[:i]
-        rightTris := sortedTriangles[i:]
+	// Try different splits and find the one with lowest SAH cost
+	for i := 1; i < len(sortedTriangles); i++ {
+		leftTris := sortedTriangles[:i]
+		rightTris := sortedTriangles[i:]
 
-        leftBox := CalculateBoundingBox(leftTris)
-        rightBox := CalculateBoundingBox(rightTris)
+		leftBox := CalculateBoundingBox(leftTris)
+		rightBox := CalculateBoundingBox(rightTris)
 
-        leftSAH := CalculateSAH(leftTris, leftBox)
-        rightSAH := CalculateSAH(rightTris, rightBox)
+		leftSAH := CalculateSAH(leftTris, leftBox)
+		rightSAH := CalculateSAH(rightTris, rightBox)
 
-        totalCost := leftSAH + rightSAH
+		totalCost := leftSAH + rightSAH
 
-        if totalCost < bestCost {
-            bestCost = totalCost
-            bestSplit = i
-        }
-    }
+		if totalCost < bestCost {
+			bestCost = totalCost
+			bestSplit = i
+		}
+	}
 
-    // Create children using the best split
-    leftTris := sortedTriangles[:bestSplit]
-    rightTris := sortedTriangles[bestSplit:]
+	// Create children using the best split
+	leftTris := sortedTriangles[:bestSplit]
+	rightTris := sortedTriangles[bestSplit:]
 
-    if len(leftTris) == 0 || len(rightTris) == 0 {
-        // SAH failed to find a good split, fall back to median
-        mid := len(sortedTriangles) / 2
-        leftTris = sortedTriangles[:mid]
-        rightTris = sortedTriangles[mid:]
-    }
+	if len(leftTris) == 0 || len(rightTris) == 0 {
+		// SAH failed to find a good split, fall back to median
+		mid := len(sortedTriangles) / 2
+		leftTris = sortedTriangles[:mid]
+		rightTris = sortedTriangles[mid:]
+	}
 
-    node.Left = BuildBVHRecursive(leftTris, nodeIndexPtr)
-    node.Right = BuildBVHRecursive(rightTris, nodeIndexPtr)
-    node.IsLeaf = false
-    node.TriangleIndex = -1 // Mark as non-leaf
+	node.Left = BuildBVHRecursive(leftTris, nodeIndexPtr)
+	node.Right = BuildBVHRecursive(rightTris, nodeIndexPtr)
+	node.IsLeaf = false
+	node.TriangleIndex = -1 // Mark as non-leaf
 
-    return node
+	return node
 }
 
 type BVHLinear struct {
@@ -902,52 +1081,50 @@ type BVHLinear struct {
 }
 
 func linearizeBVH(node *BVHBuildNode, bvh *BVHLinear) error {
-    if node == nil {
-        return nil
-    }
+	if node == nil {
+		return nil
+	}
 
-    // get node index
-    nodeIndex := node.NodeIndex
+	// get node index
+	nodeIndex := node.NodeIndex
 
-    triangleIndex := int32(-1)
-    leftIndex := int32(-1)
-    rightIndex := int32(-1)
-    if node.IsLeaf {
-        triangleIndex = node.TriangleIndex
-    } else {
-        // get left index
-        if node.Left != nil {
-            leftIndex = node.Left.NodeIndex
-        }
-        if node.Right != nil {
-            rightIndex = node.Right.NodeIndex
-        }
-    }
+	triangleIndex := int32(-1)
+	leftIndex := int32(-1)
+	rightIndex := int32(-1)
+	if node.IsLeaf {
+		triangleIndex = node.TriangleIndex
+	} else {
+		// get left index
+		if node.Left != nil {
+			leftIndex = node.Left.NodeIndex
+		}
+		if node.Right != nil {
+			rightIndex = node.Right.NodeIndex
+		}
+	}
 
-    // Check bounds before accessing array
-    if int(nodeIndex) >= len(bvh.Nodes) {
-        return fmt.Errorf("node index %d out of bounds (array size: %d)", nodeIndex, len(bvh.Nodes))
-    }
+	// Check bounds before accessing array
+	if int(nodeIndex) >= len(bvh.Nodes) {
+		return fmt.Errorf("node index %d out of bounds (array size: %d)", nodeIndex, len(bvh.Nodes))
+	}
 
-    bvh.Nodes[nodeIndex] = BVHNode{
-        BoundingBox:   node.BoundingBox,
-        LeftIndex:     leftIndex,
-        RightIndex:    rightIndex,
-        TriangleIndex: triangleIndex,
-    }
+	bvh.Nodes[nodeIndex] = BVHNode{
+		BoundingBox:   node.BoundingBox,
+		LeftIndex:     leftIndex,
+		RightIndex:    rightIndex,
+		TriangleIndex: triangleIndex,
+	}
 
-    // Recursively process children with proper error handling
-    if err := linearizeBVH(node.Left, bvh); err != nil {
-        return err
-    }
-    if err := linearizeBVH(node.Right, bvh); err != nil {
-        return err
-    }
+	// Recursively process children with proper error handling
+	if err := linearizeBVH(node.Left, bvh); err != nil {
+		return err
+	}
+	if err := linearizeBVH(node.Right, bvh); err != nil {
+		return err
+	}
 
-    return nil
+	return nil
 }
-
-
 
 // Linearize the BVH tree into a flat array
 func (bvh *BVHLinear) BuildLinearBVH(triangles []Triangle) {
@@ -955,21 +1132,23 @@ func (bvh *BVHLinear) BuildLinearBVH(triangles []Triangle) {
 		return
 	}
 
-	// Build the BVH tree recursively
-	root := BuildBVHRecursive(triangles, 1)
+	// Build the BVH tree recursively with sequential indexing
+	nodeIndex := int32(0)
+	root := BuildBVHRecursive(triangles, &nodeIndex)
 	if root == nil {
 		return
 	}
 
 	fmt.Println("root IDx:", root.NodeIndex)
-	fmt.Println("Left IDx:", root.Left.NodeIndex)
-	fmt.Println("Right IDx:", root.Right.NodeIndex)
-	fmt.Println("Left Left:", root.Left.Left.NodeIndex)
-	fmt.Println("Left Right:", root.Left.Right.NodeIndex)
-	fmt.Println("Right Left:", root.Right.Left.NodeIndex)
-	fmt.Println("Right Right:", root.Right.Right.NodeIndex)
+	if root.Left != nil {
+		fmt.Println("Left IDx:", root.Left.NodeIndex)
+	}
+	if root.Right != nil {
+		fmt.Println("Right IDx:", root.Right.NodeIndex)
+	}
 
-	numberOfNodes := 2*len(triangles) - 1 // Maximum nodes in a binary tree with n leaves
+	// Use the actual number of nodes created
+	numberOfNodes := int(nodeIndex)
 
 	// Linearize the tree
 	bvh.Nodes = make([]BVHNode, numberOfNodes)
@@ -981,9 +1160,28 @@ func (bvh *BVHLinear) BuildLinearBVH(triangles []Triangle) {
 		return
 	}
 
-	fmt.Println("Head Node IDx:", 0)
-	fmt.Println("Left Child IDx:", bvh.Nodes[0].LeftIndex)
-	fmt.Println("Right Child IDx:", bvh.Nodes[0].RightIndex)
+	// Validate BVH structure
+	fmt.Println("Validating BVH structure...")
+	if validateBVH(root, bvh) {
+		fmt.Println("BVH validation passed: Linearized structure matches tree structure")
+	} else {
+		fmt.Println("BVH validation failed: Structures do not match")
+		return
+	}
+
+	// Validate BVH integrity
+	fmt.Println("Validating BVH integrity...")
+	if validateBVHIntegrity(bvh) {
+		fmt.Println("BVH integrity check passed")
+	} else {
+		fmt.Println("BVH integrity check failed")
+	}
+
+	fmt.Println("Head Node IDx:", root.NodeIndex)
+	if root.NodeIndex < int32(len(bvh.Nodes)) {
+		fmt.Println("Left Child IDx:", bvh.Nodes[root.NodeIndex].LeftIndex)
+		fmt.Println("Right Child IDx:", bvh.Nodes[root.NodeIndex].RightIndex)
+	}
 }
 
 // WriteBVHToFile writes the linearized BVH to a binary file
@@ -1004,20 +1202,26 @@ func (bvh *BVHLinear) WriteBVHToFile(filename string) error {
 
 	// 3. Root node index (4 bytes) - always 0 for our implementation
 	w.Write(uint32ToBytes(0))
+	// 4. Node size (4 bytes) - size of each BVHNode in bytes
+	nodeSize := uint32(unsafe.Sizeof(BVHNode{}))
+	w.Write(uint32ToBytes(nodeSize))
+	// 5. Write Triangle size (4 bytes) - size of each Triangle in bytes
+	triangleSize := uint32(unsafe.Sizeof(Triangle{}))
+	w.Write(uint32ToBytes(triangleSize))
 
 	// Write all nodes
 	for _, node := range bvh.Nodes {
 		// Bounding box (24 bytes: 6 float32s)
-		for i := 0; i < 6; i++ {
+		for i := range 6 {
 			w.Write(float32ToBytes(node.BoundingBox[i]))
 		}
 
 		// Child indices (8 bytes: 2 int32s)
-		w.Write(uint32ToBytes(uint32(node.LeftIndex)))
-		w.Write(uint32ToBytes(uint32(node.RightIndex)))
+		w.Write(int32ToBytes(node.LeftIndex))
+		w.Write(int32ToBytes(node.RightIndex))
 
 		// Triangle index (4 bytes) - negative if not a leaf
-		w.Write(uint32ToBytes(uint32(node.TriangleIndex)))
+		w.Write(int32ToBytes(node.TriangleIndex))
 	}
 
 	// Write triangle indices
@@ -1044,7 +1248,7 @@ func (bvh *BVHLinear) WriteBVHToFile(filename string) error {
 		w.Write(float32ToBytes(tri.Color[1]))
 		w.Write(float32ToBytes(tri.Color[2]))
 		// Triangle index
-		w.Write(uint32ToBytes(uint32(tri.index)))
+		w.Write(int32ToBytes(tri.index))
 	}
 
 	return w.Flush()
@@ -1059,27 +1263,29 @@ func ReadBVHFromFile(filename string) (*BVHLinear, error) {
 	defer file.Close()
 
 	// Read header
-	header := make([]byte, 16) // 4 bytes magic + 4 bytes node count + 4 bytes triangle count + 4 bytes root index
+	header := make([]byte, 20) // 4 bytes node count + 4 bytes triangle count + 4 bytes root index + 4 bytes node size + 4 bytes triangle size
 	if _, err := file.Read(header); err != nil {
 		return nil, err
 	}
 
-	// Check magic number
-	if string(header[0:4]) != "BVH1" {
-		return nil, fmt.Errorf("invalid BVH file format")
+	nodeCount := bytesToUint32(header[:4])
+	triangleCount := bytesToUint32(header[4:8])
+	rootIndex := bytesToUint32(header[8:12])     // Should always be 0 in our case
+	nodeSize := bytesToUint32(header[12:16])     // Size of each BVHNode in bytes
+	triangleSize := bytesToUint32(header[16:20]) // Size of each Triangle in bytes
+
+	if rootIndex != 0 {
+		return nil, fmt.Errorf("expected root index to be 0, got %d", rootIndex)
 	}
 
-	nodeCount := bytesToUint32(header[4:8])
-	triangleCount := bytesToUint32(header[8:12])
-	// root index at header[12:16] is not used here since we always use index 0
+	if nodeSize != uint32(unsafe.Sizeof(BVHNode{})) {
+		return nil, fmt.Errorf("expected node size to be %d, got %d", unsafe.Sizeof(BVHNode{}), nodeSize)
+	}
 
 	bvh := &BVHLinear{
 		Nodes:     make([]BVHNode, nodeCount),
 		Triangles: make([]Triangle, triangleCount),
 	}
-
-	// Node size: 24 bytes for bounding box + 8 bytes for child indices + 4 bytes for triangle index = 36 bytes
-	nodeSize := 36
 
 	// Read all nodes
 	for i := range nodeCount {
@@ -1104,25 +1310,36 @@ func ReadBVHFromFile(filename string) (*BVHLinear, error) {
 		node.TriangleIndex = int32(bytesToUint32(nodeData[32:36]))
 	}
 
-	// Read triangle indices
-	// Note: We only read the indices here, not the actual triangles
-	// The actual triangles would need to be loaded separately
-	triIndices := make([]byte, triangleCount*4)
-	if _, err := file.Read(triIndices); err != nil {
-		return nil, err
-	}
-
+	// Read triangles
 	for i := range triangleCount {
-		index := bytesToUint32(triIndices[i*4 : i*4+4])
-		bvh.Triangles[i].index = int32(index)
+		triangleData := make([]byte, triangleSize)
+		if _, err := file.Read(triangleData); err != nil {
+			return nil, err
+		}
+
+		tri := &bvh.Triangles[i]
+		tri.Vertex1.X = bytesToFloat32(triangleData[0:4])
+		tri.Vertex1.Y = bytesToFloat32(triangleData[4:8])
+		tri.Vertex1.Z = bytesToFloat32(triangleData[8:12])
+		tri.Vertex2.X = bytesToFloat32(triangleData[12:16])
+		tri.Vertex2.Y = bytesToFloat32(triangleData[16:20])
+		tri.Vertex2.Z = bytesToFloat32(triangleData[20:24])
+		tri.Vertex3.X = bytesToFloat32(triangleData[24:28])
+		tri.Vertex3.Y = bytesToFloat32(triangleData[28:32])
+		tri.Vertex3.Z = bytesToFloat32(triangleData[32:36])
+		tri.Normal.X = bytesToFloat32(triangleData[36:40])
+		tri.Normal.Y = bytesToFloat32(triangleData[40:44])
+		tri.Normal.Z = bytesToFloat32(triangleData[44:48])
+		tri.Roughness = bytesToFloat32(triangleData[48:52])
+		tri.Metallic = bytesToFloat32(triangleData[52:56])
+		tri.Emission = bytesToFloat32(triangleData[56:60])
+		tri.Color[0] = bytesToFloat32(triangleData[60:64])
+		tri.Color[1] = bytesToFloat32(triangleData[64:68])
+		tri.Color[2] = bytesToFloat32(triangleData[68:72])
+		tri.index = int32(bytesToUint32(triangleData[72:76]))
 	}
 
 	return bvh, nil
-}
-
-// Helper function to check if a node is a leaf
-func isLeafNode(node BVHNode) bool {
-	return node.TriangleIndex >= 0
 }
 
 func main() {
