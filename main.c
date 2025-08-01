@@ -3734,7 +3734,6 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
 		printf("Error writing BVH triangles buffer: %d\n", err);
 		return 0;
 	}
-	
 
 	// buffer for projected vertices of triangles to screen
 	ocl->buffer_projected_verts = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,

@@ -24,7 +24,8 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] Fix BVH Lineation
+- [ ] Fix C reading and writing of BVH / open CL code
+- [ ] Wire Frame
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] Finish raytracing kernel
     - [ ] Initialize kernel
@@ -38,10 +39,6 @@ The results show that writing frames is faster than reading them, with write ope
   clock_gettime(CLOCK_MONOTONIC, &end);
   double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
   ```
-  
-- [ ] (Not For Now) Render in C code do not save to file
-  - [ ] (To Do) Write to shared memory - share image as shared memory
-- [ ] Wire Frame
 - [ ] Better screen space reflections (Ray Tracing)
   - [ ] add shadows (with ray tracing)
 - [ ] (Look Into) Fix .obj file parsing
@@ -69,6 +66,9 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] (Not For Now) Render in C code do not save to file
+  - [X] (To Do) Write to shared memory - share image as shared memory
+- [X] Fix BVH Lineation
 - [X] Fix hole in in middle of screen space reflections ![example](hole.png)
 - [X] Add chart for gpu timing
 - [X] Add Timing for rendering of particles
