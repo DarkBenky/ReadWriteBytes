@@ -25,6 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Fix C reading and writing of BVH / open CL code
+  - [ ] Read BVH in C
 - [ ] Wire Frame
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] Finish raytracing kernel
