@@ -1500,6 +1500,102 @@ __kernel void calculateVertexCoordinate(
     validTriangles[triangleId] = 1;
 }
 
+void drawLineWireframe(
+    const float2 start,
+    const float2 end,
+    const float startDepth,
+    const float endDepth,
+    __global float* ScreenColors,
+    __global float* ScreenDistances,
+    const int screenWidth,
+    const int screenHeight,
+    const float3 wireColor
+) {
+    // Bresenham's line algorithm
+    int x0 = (int)start.x;
+    int y0 = (int)start.y;
+    int x1 = (int)end.x;
+    int y1 = (int)end.y;
+    
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+    int x_inc = (x0 < x1) ? 1 : -1;
+    int y_inc = (y0 < y1) ? 1 : -1;
+    int error = dx - dy;
+    
+    int x = x0;
+    int y = y0;
+    
+    float totalDistance = distance(start, end);
+    
+    while (true) {
+        // Bounds check
+        if (x >= 0 && x < screenWidth && y >= 0 && y < screenHeight) {
+            int pixelIndex = y * screenWidth + x;
+            
+            // Interpolate depth along the line
+            float t = (totalDistance > 0.0f) ? 
+                     distance((float2)(x, y), start) / totalDistance : 0.0f;
+            float depth = mix(startDepth, endDepth, t);
+            
+            // Depth test
+            if (ScreenDistances[pixelIndex] == 0.0f || depth < ScreenDistances[pixelIndex]) {
+                ScreenDistances[pixelIndex] = depth;
+                
+                int colorIndex = pixelIndex * 3;
+                ScreenColors[colorIndex] = wireColor.x;
+                ScreenColors[colorIndex + 1] = wireColor.y;
+                ScreenColors[colorIndex + 2] = wireColor.z;
+            }
+        }
+        
+        // Check if we've reached the end
+        if (x == x1 && y == y1) break;
+        
+        // Bresenham step
+        int error2 = error * 2;
+        if (error2 > -dy) {
+            error -= dy;
+            x += x_inc;
+        }
+        if (error2 < dx) {
+            error += dx;
+            y += y_inc;
+        }
+    }
+}
+
+__kernel void renderWireFrame(
+    __global const float* projectedVerts,
+    __global const int* validTriangles,
+    __global float* ScreenColors,
+    __global float* ScreenDistances,
+    const int screenWidth,
+    const int screenHeight,
+    const int numTriangles,
+    const float3 wireColor
+) {
+    int triangleId = get_global_id(0);
+    if (triangleId >= numTriangles) return;
+    
+    // Check if triangle is valid
+    if (validTriangles[triangleId] == 0) return;
+    
+    // Load projected vertices
+    int vertBase = triangleId * 9;
+    float3 v1 = vload3(0, &projectedVerts[vertBase]);
+    float3 v2 = vload3(0, &projectedVerts[vertBase + 3]);
+    float3 v3 = vload3(0, &projectedVerts[vertBase + 6]);
+    
+    // Draw three edges of the triangle
+    drawLineWireframe(v1.xy, v2.xy, v1.z, v2.z, ScreenColors, ScreenDistances, 
+                      screenWidth, screenHeight, wireColor);
+    drawLineWireframe(v2.xy, v3.xy, v2.z, v3.z, ScreenColors, ScreenDistances, 
+                      screenWidth, screenHeight, wireColor);
+    drawLineWireframe(v3.xy, v1.xy, v3.z, v1.z, ScreenColors, ScreenDistances, 
+                      screenWidth, screenHeight, wireColor);
+}
+
 __kernel void ShadePixels(
     __global const float* projectedVerts,
     __global const float* bboxes,
