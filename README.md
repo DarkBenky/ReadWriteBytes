@@ -27,6 +27,8 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] Wire Frame
   - [ ] initialize it buffers
   - [X] write kernel code
+- [ ] Init Open Gl
+  - [ ] Render Image as Texture
 - [ ] Fix C reading and writing of BVH / open CL code
   - [ ] Read BVH in C
 - [ ] Wire Frame
