@@ -31,6 +31,7 @@ int posX[MAX_TEXT_LENGTH * 4];
 int posY[MAX_TEXT_LENGTH * 4];
 char textBuffer[MAX_TEXT_LENGTH * 4];
 int textBufferLen = 0;
+#define RENDER_WIREFRAME 1
 #define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
 #define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
@@ -232,6 +233,7 @@ struct OpenCLContext {
 	cl_kernel renderText_kernel;				// kernel for rendering text
 	cl_kernel calculateVertex_kernel;			// Vertex calculation kernel
 	cl_kernel shadePixels_kernel;				// Pixel shading kernel
+	cl_kernel wireframe_kernel;					// Wireframe rendering kernel
 	// buffers
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
@@ -3538,6 +3540,55 @@ int setupStaticKernelArguments(struct OpenCLContext *ocl, struct Triangles *tria
 	return 1;
 }
 
+void renderWireframeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct Camera *camera, float *gpuTimeMs) {
+	if (triangles->count == 0) return;
+
+	cl_int err;
+	cl_event kernel_event;
+
+	// Set camera parameters that change each frame
+	cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+	cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+	cl_float fov = camera->fov;
+	cl_int screen_width = ScreenWidth;
+	cl_int screen_height = ScreenHeight;
+	cl_int num_triangles = triangles->count;
+	cl_float3 wire_color = {1.0f, 1.0f, 1.0f}; // Red wireframe
+
+	// Set wireframe kernel arguments
+	err = clSetKernelArg(ocl->wireframe_kernel, 0, sizeof(cl_mem), &ocl->buffer_projected_verts);
+	err |= clSetKernelArg(ocl->wireframe_kernel, 1, sizeof(cl_mem), &ocl->buffer_valid_triangles);
+	err |= clSetKernelArg(ocl->wireframe_kernel, 2, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	err |= clSetKernelArg(ocl->wireframe_kernel, 3, sizeof(cl_mem), &ocl->buffer_distances);
+	err |= clSetKernelArg(ocl->wireframe_kernel, 4, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->wireframe_kernel, 5, sizeof(cl_int), &screen_height);
+	err |= clSetKernelArg(ocl->wireframe_kernel, 6, sizeof(cl_int), &num_triangles);
+	err |= clSetKernelArg(ocl->wireframe_kernel, 7, sizeof(cl_float3), &wire_color);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting wireframe kernel arguments: %d\n", err);
+		return;
+	}
+
+	// Execute wireframe kernel
+	size_t global_work_size = triangles->count;
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->wireframe_kernel, 1, NULL, &global_work_size, NULL, 0, NULL, &kernel_event);
+	if (err != CL_SUCCESS) {
+		printf("Error executing wireframe kernel: %d\n", err);
+		return;
+	}
+	clFinish(ocl->queue);
+
+	if (gpuTimeMs != NULL) {
+		cl_ulong start_time, end_time;
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END, sizeof(end_time), &end_time, NULL);
+		*gpuTimeMs = (end_time - start_time) * 1e-6; // convert ns to ms
+	}
+
+	clReleaseEvent(kernel_event);
+}
+
 int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox, struct ImageFont *imageFont, struct BVHLinear *bvh) {
 	cl_int err;
 
@@ -3609,6 +3660,12 @@ int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, str
 		clGetProgramBuildInfo(ocl->program, ocl->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
 		printf("Build log: %s\n", log);
 		free(log);
+		return 0;
+	}
+
+	ocl->wireframe_kernel = clCreateKernel(ocl->program, "renderWireFrame", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating wireframe kernel: %d\n", err);
 		return 0;
 	}
 
@@ -4054,13 +4111,49 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	// *** TRIANGLE RENDERING ***
 	if (RENDER_TRIAGES == 0) {
-		// OLD METHOD: render each triangle in own kernel
-		// DISADVANTAGE: it is slow, if triangle take to much screen space
-		renderTrianglesOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+		if (RENDER_WIREFRAME == 0) {
+			// This condition prevents wireframe when RENDER_WIREFRAME is 1
+			// OLD METHOD: render each triangle in own kernel
+			// DISADVANTAGE: it is slow, if triangle take to much screen space
+			renderTrianglesOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+		}
 	} else {
 		// NEW METHOD: render all triangles in one kernel
 		// ADVANTAGE: it is fast, but requires triangles to be preprocessed
-		renderTrianglesOpenCL_TwoPass(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+		if (RENDER_WIREFRAME == 1) {
+			// Run vertex calculation
+			cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+			cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+			cl_float fov = camera->fov;
+			cl_int screen_width = ScreenWidth;
+			cl_int screen_height = ScreenHeight;
+			cl_int num_triangles = triangles->count;
+
+			// Set vertex calculation arguments
+			err = clSetKernelArg(ocl->calculateVertex_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 3, sizeof(cl_mem), &ocl->buffer_triangle_normals);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 4, sizeof(cl_float3), &cam_pos);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 5, sizeof(cl_float3), &cam_dir);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 6, sizeof(cl_float), &fov);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 7, sizeof(cl_int), &screen_width);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 8, sizeof(cl_int), &screen_height);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 9, sizeof(cl_int), &num_triangles);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 10, sizeof(cl_mem), &ocl->buffer_projected_verts);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 11, sizeof(cl_mem), &ocl->buffer_triangle_bboxes);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 12, sizeof(cl_mem), &ocl->buffer_valid_triangles);
+
+			// Execute vertex calculation
+			size_t vertex_global_size = triangles->count;
+			err = clEnqueueNDRangeKernel(ocl->queue, ocl->calculateVertex_kernel, 1, NULL, &vertex_global_size, NULL, 0, NULL, NULL);
+			clFinish(ocl->queue);
+
+			renderWireframeOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+		} else {
+			// RENDER TRIANGLES
+			renderTrianglesOpenCL_TwoPass(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+		}
 	}
 
 	float trianglesFPS = (gpuTimings->renderTrianglesTime > 0.001f) ? (1000.0f / gpuTimings->renderTrianglesTime) : 0.0f;
@@ -4964,7 +5057,7 @@ int main() {
 	CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
 	struct OpenCLContext ocl;
-	int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox, &font);
+	int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox, &font, &bvh);
 	if (!useOpenCL) {
 		printf("Failed to initialize OpenCL, falling back to CPU\n");
 	}

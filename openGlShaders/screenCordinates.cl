@@ -1500,6 +1500,81 @@ __kernel void calculateVertexCoordinate(
     validTriangles[triangleId] = 1;
 }
 
+// void drawLineWireframe(
+//     const float2 start,
+//     const float2 end,
+//     const float startDepth,
+//     const float endDepth,
+//     __global float* ScreenColors,
+//     __global float* ScreenDistances,
+//     const int screenWidth,
+//     const int screenHeight,
+//     const float3 wireColor,
+//     const int lineWidth  // NEW: Add line width parameter
+// ) {
+//     // Bresenham's line algorithm for the center line
+//     int x0 = (int)start.x;
+//     int y0 = (int)start.y;
+//     int x1 = (int)end.x;
+//     int y1 = (int)end.y;
+    
+//     int dx = abs(x1 - x0);
+//     int dy = abs(y1 - y0);
+//     int x_inc = (x0 < x1) ? 1 : -1;
+//     int y_inc = (y0 < y1) ? 1 : -1;
+//     int error = dx - dy;
+    
+//     int x = x0;
+//     int y = y0;
+    
+//     float totalDistance = distance(start, end);
+//     int halfWidth = lineWidth / 2;
+    
+//     while (true) {
+//         // For each point on the line, draw a square of lineWidth x lineWidth
+//         for (int dy_offset = -halfWidth; dy_offset <= halfWidth; dy_offset++) {
+//             for (int dx_offset = -halfWidth; dx_offset <= halfWidth; dx_offset++) {
+//                 int pixelX = x + dx_offset;
+//                 int pixelY = y + dy_offset;
+                
+//                 // Bounds check
+//                 if (pixelX >= 0 && pixelX < screenWidth && pixelY >= 0 && pixelY < screenHeight) {
+//                     int pixelIndex = pixelY * screenWidth + pixelX;
+                    
+//                     // Interpolate depth along the line
+//                     float t = (totalDistance > 0.0f) ? 
+//                              distance((float2)(x, y), start) / totalDistance : 0.0f;
+//                     float depth = mix(startDepth, endDepth, t);
+                    
+//                     // Depth test
+//                     if (ScreenDistances[pixelIndex] == 0.0f || depth < ScreenDistances[pixelIndex]) {
+//                         ScreenDistances[pixelIndex] = depth;
+                        
+//                         int colorIndex = pixelIndex * 3;
+//                         ScreenColors[colorIndex] = wireColor.x;
+//                         ScreenColors[colorIndex + 1] = wireColor.y;
+//                         ScreenColors[colorIndex + 2] = wireColor.z;
+//                     }
+//                 }
+//             }
+//         }
+        
+//         // Check if we've reached the end
+//         if (x == x1 && y == y1) break;
+        
+//         // Bresenham step
+//         int error2 = error * 2;
+//         if (error2 > -dy) {
+//             error -= dy;
+//             x += x_inc;
+//         }
+//         if (error2 < dx) {
+//             error += dx;
+//             y += y_inc;
+//         }
+//     }
+// }
+
 void drawLineWireframe(
     const float2 start,
     const float2 end,
@@ -1509,9 +1584,22 @@ void drawLineWireframe(
     __global float* ScreenDistances,
     const int screenWidth,
     const int screenHeight,
-    const float3 wireColor
+    const float3 wireColor,
+    const int lineWidth
 ) {
-    // Bresenham's line algorithm
+    // OPTIMIZATION 1: Early exit for zero-length lines
+    if (distance(start, end) < 0.5f) return;
+    
+    // OPTIMIZATION 2: Pre-calculate bounds to avoid repeated bounds checking
+    int minX = max(0, (int)(min(start.x, end.x) - lineWidth));
+    int maxX = min(screenWidth - 1, (int)(max(start.x, end.x) + lineWidth));
+    int minY = max(0, (int)(min(start.y, end.y) - lineWidth));
+    int maxY = min(screenHeight - 1, (int)(max(start.y, end.y) + lineWidth));
+    
+    // Early exit if line is completely outside screen
+    if (minX > maxX || minY > maxY) return;
+    
+    // Bresenham's line algorithm for the center line
     int x0 = (int)start.x;
     int y0 = (int)start.y;
     int x1 = (int)end.x;
@@ -1526,34 +1614,73 @@ void drawLineWireframe(
     int x = x0;
     int y = y0;
     
+    // OPTIMIZATION 3: Pre-calculate values that don't change in the loop
     float totalDistance = distance(start, end);
+    float invTotalDistance = (totalDistance > 0.0f) ? (1.0f / totalDistance) : 0.0f;
+    int halfWidth = lineWidth / 2;
+    int halfWidthSquared = halfWidth * halfWidth;
+    
+    // OPTIMIZATION 4: Cache color values to avoid repeated memory access
+    float colorR = wireColor.x;
+    float colorG = wireColor.y;
+    float colorB = wireColor.z;
     
     while (true) {
-        // Bounds check
-        if (x >= 0 && x < screenWidth && y >= 0 && y < screenHeight) {
-            int pixelIndex = y * screenWidth + x;
+        // OPTIMIZATION 5: Early bounds check for current position
+        if (x < minX || x > maxX || y < minY || y > maxY) {
+            goto next_step; // Skip pixel drawing but continue line
+        }
+        
+        // OPTIMIZATION 6: Pre-calculate depth interpolation for this point
+        float t = distance((float2)(x, y), start) * invTotalDistance;
+        t = clamp(t, 0.0f, 1.0f); // Ensure t is in valid range
+        float depth = mix(startDepth, endDepth, t);
+        
+        // OPTIMIZATION 7: Optimized square drawing with early bounds checking
+        int startY = max(minY, y - halfWidth);
+        int endY = min(maxY, y + halfWidth);
+        int startX = max(minX, x - halfWidth);
+        int endX = min(maxX, x + halfWidth);
+        
+        // OPTIMIZATION 8: Use linear indexing and minimize array accesses
+        for (int py = startY; py <= endY; py++) {
+            int rowBase = py * screenWidth; // Pre-calculate row offset
+            int dy_offset = py - y;
+            int dy2 = dy_offset * dy_offset;
             
-            // Interpolate depth along the line
-            float t = (totalDistance > 0.0f) ? 
-                     distance((float2)(x, y), start) / totalDistance : 0.0f;
-            float depth = mix(startDepth, endDepth, t);
+            // OPTIMIZATION 9: Early exit if outside circle (for circular brush)
+            if (dy2 > halfWidthSquared) continue;
             
-            // Depth test
-            if (ScreenDistances[pixelIndex] == 0.0f || depth < ScreenDistances[pixelIndex]) {
+            for (int px = startX; px <= endX; px++) {
+                int dx_offset = px - x;
+                int dx2 = dx_offset * dx_offset;
+                
+                // OPTIMIZATION 10: Circle check (optional - remove if you want square brush)
+                if (dx2 + dy2 > halfWidthSquared) continue;
+                
+                int pixelIndex = rowBase + px; // Use pre-calculated row offset
+                
+                // OPTIMIZATION 11: Single depth test with early exit
+                if (ScreenDistances[pixelIndex] != 0.0f && depth >= ScreenDistances[pixelIndex]) {
+                    continue;
+                }
+                
+                // OPTIMIZATION 12: Update depth and color in single pass
                 ScreenDistances[pixelIndex] = depth;
                 
                 int colorIndex = pixelIndex * 3;
-                ScreenColors[colorIndex] = wireColor.x;
-                ScreenColors[colorIndex + 1] = wireColor.y;
-                ScreenColors[colorIndex + 2] = wireColor.z;
+                ScreenColors[colorIndex] = colorR;
+                ScreenColors[colorIndex + 1] = colorG;
+                ScreenColors[colorIndex + 2] = colorB;
             }
         }
         
+        next_step:
         // Check if we've reached the end
         if (x == x1 && y == y1) break;
         
-        // Bresenham step
-        int error2 = error * 2;
+        // OPTIMIZATION 13: Optimized Bresenham step
+        int error2 = error << 1; // Bit shift instead of multiplication
         if (error2 > -dy) {
             error -= dy;
             x += x_inc;
@@ -1589,11 +1716,11 @@ __kernel void renderWireFrame(
     
     // Draw three edges of the triangle
     drawLineWireframe(v1.xy, v2.xy, v1.z, v2.z, ScreenColors, ScreenDistances, 
-                      screenWidth, screenHeight, wireColor);
+                      screenWidth, screenHeight, wireColor, 1);
     drawLineWireframe(v2.xy, v3.xy, v2.z, v3.z, ScreenColors, ScreenDistances, 
-                      screenWidth, screenHeight, wireColor);
+                      screenWidth, screenHeight, wireColor, 1);
     drawLineWireframe(v3.xy, v1.xy, v3.z, v1.z, ScreenColors, ScreenDistances, 
-                      screenWidth, screenHeight, wireColor);
+                      screenWidth, screenHeight, wireColor, 1);
 }
 
 __kernel void ShadePixels(
