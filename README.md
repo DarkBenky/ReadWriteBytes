@@ -25,7 +25,8 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Wire Frame
-  - [ ] initialize it buffers
+  - [ ] add option to change the mode
+  - [X] initialize it buffers
   - [X] write kernel code
 - [ ] Init Open Gl
   - [ ] Render Image as Texture
