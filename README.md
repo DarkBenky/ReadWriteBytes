@@ -31,39 +31,78 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] Init Open Gl
   - [ ] Example Code
   ```c
-    #include <GLFW/glfw3.h>
+  #include <GLFW/glfw3.h>
   #include <stdio.h>
 
-  int main(void) {
-      // Initialize GLFW
+  // Size of your image
+  #define WIDTH 800
+  #define HEIGHT 400
+
+  // Dummy image data
+  float imageData[WIDTH * HEIGHT * 4];
+
+  void fillTestData() {
+      for (int y = 0; y < HEIGHT; y++) {
+          for (int x = 0; x < WIDTH; x++) {
+              int idx = (y * WIDTH + x) * 4;
+              imageData[idx + 0] = (float)x / WIDTH;   // R
+              imageData[idx + 1] = (float)y / HEIGHT;  // G
+              imageData[idx + 2] = 0.2f;               // B
+              imageData[idx + 3] = 1.0f;               // A
+          }
+      }
+  }
+
+  int main() {
       if (!glfwInit()) {
-          fprintf(stderr, "Failed to initialize GLFW\n");
+          fprintf(stderr, "Failed to init GLFW\n");
           return -1;
       }
 
-      // Create a windowed mode window and its OpenGL context
-      GLFWwindow* window = glfwCreateWindow(800, 600, "OpenGL Window", NULL, NULL);
+      GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "Texture Viewer", NULL, NULL);
       if (!window) {
           fprintf(stderr, "Failed to create window\n");
           glfwTerminate();
           return -1;
       }
 
-      // Make the window's context current
       glfwMakeContextCurrent(window);
+
+      // Fill with dummy gradient data
+      fillTestData();
+
+      // Generate and upload texture
+      GLuint texID;
+      glGenTextures(1, &texID);
+      glBindTexture(GL_TEXTURE_2D, texID);
+
+      // Important: using GL_RGBA32F because data is float32
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, WIDTH, HEIGHT, 0, GL_RGBA, GL_FLOAT, imageData);
+
+      // Simple nearest-neighbor filtering
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
       // Main loop
       while (!glfwWindowShouldClose(window)) {
-          // Render here
           glClear(GL_COLOR_BUFFER_BIT);
 
-          // Swap front and back buffers
-          glfwSwapBuffers(window);
+          // Draw fullscreen quad with immediate mode (for simplicity)
+          glEnable(GL_TEXTURE_2D);
+          glBindTexture(GL_TEXTURE_2D, texID);
 
-          // Poll for and process events
+          glBegin(GL_QUADS);
+              glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f, -1.0f);
+              glTexCoord2f(1.0f, 0.0f); glVertex2f( 1.0f, -1.0f);
+              glTexCoord2f(1.0f, 1.0f); glVertex2f( 1.0f,  1.0f);
+              glTexCoord2f(0.0f, 1.0f); glVertex2f(-1.0f,  1.0f);
+          glEnd();
+
+          glfwSwapBuffers(window);
           glfwPollEvents();
       }
 
+      glDeleteTextures(1, &texID);
       glfwDestroyWindow(window);
       glfwTerminate();
       return 0;
