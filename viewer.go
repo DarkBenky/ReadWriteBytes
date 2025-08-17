@@ -53,6 +53,7 @@ const (
 	renderNormal
 	renderFluid
 	renderColor
+	renderWireframe
 )
 
 type Game struct {
@@ -363,7 +364,7 @@ type CameraImageData struct {
 
 func (g *Game) UpdatePixels() error {
 	// Handle color rendering from shared memory
-	if g.renderMode == renderColor {
+	if g.renderMode == renderColor || g.renderMode == renderWireframe {
 		// Read color data from shared memory instead of file
 		sharedData, err := openSharedMemory()
 		if err != nil {
@@ -504,6 +505,8 @@ func (g *Game) writeCameraData() error {
 	binary.Write(file, binary.LittleEndian, g.camera.DirY)
 	binary.Write(file, binary.LittleEndian, g.camera.DirZ)
 	binary.Write(file, binary.LittleEndian, g.camera.FOV)
+	// write render mode to file
+	binary.Write(file, binary.LittleEndian, g.renderMode)
 
 	return nil
 }
@@ -814,7 +817,7 @@ func (g *Game) handleCameraMovement() {
 func (g *Game) Update() error {
 	// Toggle render mode between distance, velocity and opacity
 	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-		g.renderMode = (g.renderMode + 1) % 6
+		g.renderMode = (g.renderMode + 1) % 7
 		fmt.Println("Render mode changed to", g.renderMode)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
@@ -1071,6 +1074,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 				return "Fluid"
 			case renderColor:
 				return "Color"
+			case renderWireframe:
+				return "Wireframe"
 			}
 			return ""
 		}()))
@@ -1094,6 +1099,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Fluid (Press R to cycle)", 0, 110)
 	} else if g.renderMode == renderColor {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Color (Press R to cycle)", 0, 110)
+	} else if g.renderMode == renderWireframe {
+		ebitenutil.DebugPrintAt(screen, "Render Mode: Wireframe (Press R to cycle)", 0, 110)
 	} else {
 		ebitenutil.DebugPrintAt(screen, "Render Mode: Unknown", 0, 110)
 	}

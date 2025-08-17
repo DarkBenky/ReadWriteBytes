@@ -31,7 +31,6 @@ int posX[MAX_TEXT_LENGTH * 4];
 int posY[MAX_TEXT_LENGTH * 4];
 char textBuffer[MAX_TEXT_LENGTH * 4];
 int textBufferLen = 0;
-#define RENDER_WIREFRAME 1
 #define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
 #define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
@@ -291,6 +290,7 @@ struct OpenCLContext {
 struct Camera {
 	struct Ray ray;
 	float fov;
+	uint8_t renderMode;
 };
 
 struct Triangles {
@@ -2499,7 +2499,8 @@ int readCameraData(struct Camera *camera) {
 		fread(&camera->ray.direction[0], sizeof(float), 1, file) != 1 ||
 		fread(&camera->ray.direction[1], sizeof(float), 1, file) != 1 ||
 		fread(&camera->ray.direction[2], sizeof(float), 1, file) != 1 ||
-		fread(&camera->fov, sizeof(float), 1, file) != 1) {
+		fread(&camera->fov, sizeof(float), 1, file) != 1 ||
+		fread(&camera->renderMode, sizeof(uint8_t), 1, file) != 1) {
 
 		fclose(file);
 		// printf("Error reading camera data, using default camera\n");
@@ -4111,16 +4112,11 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	// *** TRIANGLE RENDERING ***
 	if (RENDER_TRIAGES == 0) {
-		if (RENDER_WIREFRAME == 0) {
-			// This condition prevents wireframe when RENDER_WIREFRAME is 1
-			// OLD METHOD: render each triangle in own kernel
-			// DISADVANTAGE: it is slow, if triangle take to much screen space
-			renderTrianglesOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
-		}
+		renderTrianglesOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
 	} else {
 		// NEW METHOD: render all triangles in one kernel
 		// ADVANTAGE: it is fast, but requires triangles to be preprocessed
-		if (RENDER_WIREFRAME == 1) {
+		if (camera->renderMode == 6) {
 			// Run vertex calculation
 			cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
 			cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
@@ -4852,6 +4848,24 @@ void ReadBVH(struct BVHLinear *bvh, const char *filename) {
 
 	fclose(file);
 	printf("BVH loaded successfully: %d nodes, %d triangles\n", NumberOfNodes, NumberOfTriangles);
+}
+
+uint8_t readRenderMode(const char *filename) {
+	FILE *file = fopen(filename, "rb");
+	if (!file) {
+		printf("Error: Could not open render mode file %s\n", filename);
+		return 0; // Default to 0 if file cannot be read
+	}
+
+	uint8_t renderMode;
+	if (fread(&renderMode, sizeof(uint8_t), 1, file) != 1) {
+		printf("Error: Could not read render mode from file %s\n", filename);
+		fclose(file);
+		return 0; // Default to 0 if read fails
+	}
+
+	fclose(file);
+	return renderMode;
 }
 
 int main() {

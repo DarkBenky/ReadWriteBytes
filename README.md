@@ -111,9 +111,6 @@ The results show that writing frames is faster than reading them, with write ope
   - [ ] Render Image as Texture
 - [ ] Fix C reading and writing of BVH / open CL code
   - [ ] Read BVH in C
-- [ ] Wire Frame
-  - [ ] initialize it buffers
-  - [X] write kernel code
 - [ ] Fix C reading and writing of BVH / open CL code
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] Finish raytracing kernel
