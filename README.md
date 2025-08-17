@@ -24,10 +24,6 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
-- [ ] Wire Frame
-  - [ ] add option to change the mode
-  - [X] initialize it buffers
-  - [X] write kernel code
 - [ ] Init Open Gl
   - [ ] Example Code
   ```c
@@ -152,6 +148,10 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] Wire Frame
+  - [X] add option to change the mode
+  - [X] initialize it buffers
+  - [X] write kernel code
 - [X] (Not For Now) Render in C code do not save to file
   - [X] (To Do) Write to shared memory - share image as shared memory
 - [X] Fix BVH Lineation
