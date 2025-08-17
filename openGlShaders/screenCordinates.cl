@@ -2045,3 +2045,21 @@ __kernel void renderTriangles(
         }
     }
 }
+
+__kernel void copyToGLTexture(
+    __global float* screen_colors,
+    __write_only image2d_t gl_texture,
+    int screen_width,
+    int screen_height
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screen_width || y >= screen_height) return;
+    
+    int idx = (y * screen_width + x) * 3; // Index for a float array
+    float3 color = (float3)(screen_colors[idx], screen_colors[idx+1], screen_colors[idx+2]);
+    
+    // Write directly to OpenGL texture
+    write_imagef(gl_texture, (int2)(x, y), (float4)(color.x, color.y, color.z, 1.0f));
+}
