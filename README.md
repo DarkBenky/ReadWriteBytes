@@ -29,6 +29,46 @@ The results show that writing frames is faster than reading them, with write ope
   - [X] initialize it buffers
   - [X] write kernel code
 - [ ] Init Open Gl
+  - [ ] Example Code
+  ```c
+    #include <GLFW/glfw3.h>
+  #include <stdio.h>
+
+  int main(void) {
+      // Initialize GLFW
+      if (!glfwInit()) {
+          fprintf(stderr, "Failed to initialize GLFW\n");
+          return -1;
+      }
+
+      // Create a windowed mode window and its OpenGL context
+      GLFWwindow* window = glfwCreateWindow(800, 600, "OpenGL Window", NULL, NULL);
+      if (!window) {
+          fprintf(stderr, "Failed to create window\n");
+          glfwTerminate();
+          return -1;
+      }
+
+      // Make the window's context current
+      glfwMakeContextCurrent(window);
+
+      // Main loop
+      while (!glfwWindowShouldClose(window)) {
+          // Render here
+          glClear(GL_COLOR_BUFFER_BIT);
+
+          // Swap front and back buffers
+          glfwSwapBuffers(window);
+
+          // Poll for and process events
+          glfwPollEvents();
+      }
+
+      glfwDestroyWindow(window);
+      glfwTerminate();
+      return 0;
+  }
+  ```
   - [ ] Render Image as Texture
 - [ ] Fix C reading and writing of BVH / open CL code
   - [ ] Read BVH in C
