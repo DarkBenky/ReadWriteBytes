@@ -27,6 +27,63 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] Move iteractions to c
   - [ ] movment
   - [ ] render mode
+  ```c
+  #include <GLFW/glfw3.h>
+  #include <stdio.h>
+  
+  void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+      if (action == GLFW_PRESS) {   // when key is pressed
+          switch (key) {
+              case GLFW_KEY_ESCAPE:
+                  printf("ESC pressed, closing window\n");
+                  glfwSetWindowShouldClose(window, 1);
+                  break;
+              case GLFW_KEY_W:
+                  printf("W pressed\n");
+                  break;
+              case GLFW_KEY_A:
+                  printf("A pressed\n");
+                  break;
+              case GLFW_KEY_S:
+                  printf("S pressed\n");
+                  break;
+              case GLFW_KEY_D:
+                  printf("D pressed\n");
+                  break;
+          }
+      }
+      else if (action == GLFW_RELEASE) {
+          // optional: handle key release
+      }
+  }
+  
+  int main() {
+      if (!glfwInit()) return -1;
+  
+      GLFWwindow* window = glfwCreateWindow(800, 600, "OpenGL Window", NULL, NULL);
+      if (!window) {
+          glfwTerminate();
+          return -1;
+      }
+  
+      glfwMakeContextCurrent(window);
+  
+      // set callback
+      glfwSetKeyCallback(window, key_callback);
+  
+      while (!glfwWindowShouldClose(window)) {
+          glClear(GL_COLOR_BUFFER_BIT);
+  
+          // rendering here...
+  
+          glfwSwapBuffers(window);
+          glfwPollEvents();  // process input
+      }
+  
+      glfwDestroyWindow(window);
+      glfwTerminate();
+      return 0;
+  }```
 - [ ] Init Open Gl
   - [ ] Example Code
   ```c
