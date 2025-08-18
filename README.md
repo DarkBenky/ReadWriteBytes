@@ -24,6 +24,9 @@ The results show that writing frames is faster than reading them, with write ope
 
 ## TODO
 
+- [ ] Move iteractions to c
+  - [ ] movment
+  - [ ] render mode
 - [ ] Init Open Gl
   - [ ] Example Code
   ```c
