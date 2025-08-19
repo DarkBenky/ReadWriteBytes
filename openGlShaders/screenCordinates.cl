@@ -1744,116 +1744,85 @@ __kernel void ShadePixels(
     __global float* ScreenMaterialMetallic,
     __global float* ScreenMaterialEmission,
     
-    // Original triangle data for normals
     __global const float* normals
 ) {
-    int pixelX = get_global_id(0);
-    int pixelY = get_global_id(1);
-    if (pixelX >= screenWidth || pixelY >= screenHeight) return;
-    
-    int pixelIndex = pixelY * screenWidth + pixelX;
-    float2 pixelPos = (float2)(pixelX + 0.5f, pixelY + 0.5f);
-    
-    float closestDepth = FLT_MAX;
-    int closestTriangle = -1;
-    
-    // **OPTIMIZATION 1: Process triangles in chunks for better cache locality**
-    const int CHUNK_SIZE = 64;
-    
-    for (int chunkStart = 0; chunkStart < numTriangles; chunkStart += CHUNK_SIZE) {
-        int chunkEnd = min(chunkStart + CHUNK_SIZE, numTriangles);
-        
-        // **OPTIMIZATION 2: Pre-filter valid triangles in this chunk**
-        int validCount = 0;
-        int validIds[64]; // Fixed size array
-        
-        for (int i = chunkStart; i < chunkEnd; i++) {
-            if (validTriangles[i] != 0) {
-                // **OPTIMIZATION 3: Quick bounding box pre-filter**
-                float4 bbox = (float4)(bboxes[i * 4 + 0], bboxes[i * 4 + 1], 
-                                      bboxes[i * 4 + 2], bboxes[i * 4 + 3]);
-                
-                if (pixelPos.x >= bbox.x && pixelPos.x <= bbox.y && 
-                    pixelPos.y >= bbox.z && pixelPos.y <= bbox.w) {
-                    validIds[validCount++] = i;
-                    if (validCount >= 64) break; // Prevent overflow
-                }
-            }
-        }
-        
-        // **OPTIMIZATION 4: Only process triangles that passed bbox test**
-        for (int vi = 0; vi < validCount; vi++) {
-            int triangleId = validIds[vi];
-            
-            // **OPTIMIZATION 5: Load vertices as float3 directly**
-            int vertBase = triangleId * 9;
-            float3 v1_proj = vload3(0, &projectedVerts[vertBase]);
-            float3 v2_proj = vload3(0, &projectedVerts[vertBase + 3]);
-            float3 v3_proj = vload3(0, &projectedVerts[vertBase + 6]);
-            
-            // **OPTIMIZATION 6: Optimized barycentric using edge function**
-            float2 v0 = v2_proj.xy - v1_proj.xy;
-            float2 v1 = v3_proj.xy - v1_proj.xy;
-            float2 v2 = pixelPos - v1_proj.xy;
-            
-            float denom = v0.x * v1.y - v1.x * v0.y;
-            
-            // **OPTIMIZATION 7: Early exit on degenerate triangles**
+    int px = get_global_id(0);
+    int py = get_global_id(1);
+    if (px >= screenWidth || py >= screenHeight) return;
+
+    const float cx = (float)px + 0.5f;
+    const float cy = (float)py + 0.5f;
+    const int idx = py * screenWidth + px;
+
+    // start with existing depth (or FLT_MAX if zero)
+    float bestDepth = ScreenDistances[idx] > 0.0f
+        ? ScreenDistances[idx] : FLT_MAX;
+    int   bestTri   = -1;
+
+    const int CHUNK = 64;
+    for (int s = 0; s < numTriangles; s += CHUNK) {
+        int e = min(s + CHUNK, numTriangles);
+        for (int t = s; t < e; ++t) {
+            if (validTriangles[t] == 0) continue;
+
+            // bbox test
+            int bi = t * 4;
+            float minX = bboxes[bi  ], maxX = bboxes[bi+1];
+            float minY = bboxes[bi+2], maxY = bboxes[bi+3];
+            if (cx < minX || cx > maxX || cy < minY || cy > maxY)
+                continue;
+
+            // load projected verts
+            int ov = t * 9;
+            float2 p0 = (float2)(projectedVerts[ov], projectedVerts[ov+1]);
+            float2 p1 = (float2)(projectedVerts[ov+3], projectedVerts[ov+4]);
+            float2 p2 = (float2)(projectedVerts[ov+6], projectedVerts[ov+7]);
+            float   z0 = projectedVerts[ov+2];
+            float   z1 = projectedVerts[ov+5];
+            float   z2 = projectedVerts[ov+8];
+
+            // edge‐function / barycentric
+            float2 v0 = p1 - p0;
+            float2 v1 = p2 - p0;
+            float2 v2 = (float2)(cx, cy) - p0;
+            float  denom = v0.x * v1.y - v1.x * v0.y;
             if (fabs(denom) < 1e-6f) continue;
-            
-            float invDenom = 1.0f / denom;
-            float u = (v2.x * v1.y - v1.x * v2.y) * invDenom;
-            float v = (v0.x * v2.y - v2.x * v0.y) * invDenom;
-            
-            // **OPTIMIZATION 8: Single bounds check with early exit**
-            if (u >= 0.0f && v >= 0.0f && (u + v) <= 1.0f) {
-                float w = 1.0f - u - v;
-                float depth = w * v1_proj.z + u * v2_proj.z + v * v3_proj.z;
-                
-                // **OPTIMIZATION 9: Early depth rejection**
-                if (depth < closestDepth) {
-                    closestDepth = depth;
-                    closestTriangle = triangleId;
-                }
+            float invDen = 1.0f / denom;
+            float u = (v2.x * v1.y - v1.x * v2.y) * invDen;
+            float v = (v0.x * v2.y - v2.x * v0.y) * invDen;
+            if (u < 0.0f || v < 0.0f || u + v > 1.0f) continue;
+
+            // interpolate depth
+            float w = 1.0f - u - v;
+            float d = w*z0 + u*z1 + v*z2;
+            if (d < bestDepth) {
+                bestDepth = d;
+                bestTri   = t;
             }
         }
-        
-        // **OPTIMIZATION 10: Early termination for very close triangles**
-        if (closestDepth < 0.1f) break;
+        if (bestDepth < 0.1f) break;
     }
-    
-    // **OPTIMIZATION 11: Single write pass at the end**
-    if (closestTriangle >= 0 && (ScreenDistances[pixelIndex] == 0.0f || closestDepth < ScreenDistances[pixelIndex])) {
-        ScreenDistances[pixelIndex] = closestDepth;
-        
-        // **OPTIMIZATION 12: Vectorized memory loads**
-        int materialBase = closestTriangle * 3;
-        float3 faceNormal = vload3(0, &normals[materialBase]);
-        float3 triangleColor = vload3(0, &TriangleColors[materialBase]);
-        
-        float3 interpolatedNormal = normalize(faceNormal);
-        
-        // **OPTIMIZATION 13: Vectorized lighting calculation**
-        float3 simpleLight = (float3)(0.3f, 0.7f, 0.5f);
-        float lightIntensity = max(0.65f, dot(interpolatedNormal, simpleLight));
-        float3 finalColor = triangleColor * lightIntensity;
-        
-        float emissionValue = emission[closestTriangle];
-        finalColor = mad(triangleColor, emissionValue, finalColor); // Use mad for efficiency
-        finalColor = clamp(finalColor, 0.0f, 1.0f);
-        
-        // **OPTIMIZATION 14: Coalesced memory writes**
-        vstore3(interpolatedNormal, pixelIndex, ScreenNormals);
-        vstore3(finalColor, pixelIndex, ScreenColors);
-        
-        // Store material properties
-        ScreenMaterialRoughness[pixelIndex] = roughness[closestTriangle];
-        ScreenMaterialMetallic[pixelIndex] = metallic[closestTriangle];
-        ScreenMaterialEmission[pixelIndex] = emissionValue;
+
+    // commit result
+    if (bestTri >= 0 && (ScreenDistances[idx] == 0.0f || bestDepth < ScreenDistances[idx])) {
+        ScreenDistances[idx] = bestDepth;
+
+        // normal + color load
+        int mb = bestTri * 3;
+        float3 N = normalize(vload3(0, normals + mb));
+        vstore3(N, idx, ScreenNormals);
+
+        float3 C = vload3(0, TriangleColors + mb);
+        float  L = max(0.65f, dot(N, (float3)(0.3f,0.7f,0.5f)));
+        float3 col = clamp(C * L + C * emission[bestTri], 0.0f, 1.0f);
+        vstore3(col, idx, ScreenColors);
+
+        ScreenMaterialRoughness[idx] = roughness[bestTri];
+        ScreenMaterialMetallic [idx] = metallic [bestTri];
+        ScreenMaterialEmission [idx] = emission[bestTri];
     }
 }
 
-// // Updated renderTriangles kernel with improved vertex normal calculation
 __kernel void renderTriangles(
     __global const float* v1,
     __global const float* v2,
@@ -1879,168 +1848,92 @@ __kernel void renderTriangles(
     int triangleId = get_global_id(0);
     if (triangleId >= numTriangles) return;
 
-    // Get material properties for this triangle
-    float Roughness = roughness[triangleId];
-    float Metallic = metallic[triangleId];
-    float Emission = emission[triangleId];
+    // Precompute indices and load data once
+    int b3 = triangleId * 3;
+    float3 p0 = vload3(0, v1 + b3);
+    float3 p1 = vload3(0, v2 + b3);
+    float3 p2 = vload3(0, v3 + b3);
+    float3 fn = vload3(0, normals + b3);
+    float3 tc = vload3(0, TriangleColors + b3);
+    float Rg = roughness[triangleId];
+    float Mt = metallic[triangleId];
+    float Em = emission[triangleId];
 
-    // Add bounds checking for array access
-    int vertexIndex = triangleId * 3;
-    if (vertexIndex + 2 >= numTriangles * 3) return;
+    // Back-face culling
+    float3 center = (p0 + p1 + p2) * (1.0f/3.0f);
+    if (dot(fn, normalize(camPos - center)) <= 0.0f) return;
 
-    // Get triangle vertices
-    float3 vertex1 = (float3)(v1[vertexIndex], v1[vertexIndex + 1], v1[vertexIndex + 2]);
-    float3 vertex2 = (float3)(v2[triangleId * 3], v2[triangleId * 3 + 1], v2[triangleId * 3 + 2]);
-    float3 vertex3 = (float3)(v3[triangleId * 3], v3[triangleId * 3 + 1], v3[triangleId * 3 + 2]);
-    
-    // Get triangle face normal
-    float3 faceNormal = (float3)(normals[triangleId * 3], normals[triangleId * 3 + 1], normals[triangleId * 3 + 2]);
-    float3 triangleColor = (float3)(TriangleColors[triangleId * 3], 
-                                   TriangleColors[triangleId * 3 + 1], 
-                                   TriangleColors[triangleId * 3 + 2]);
+    // Camera basis
+    float3 F = normalize(camDir);
+    float3 U = (float3)(0,1,0);
+    float3 R = normalize(cross(F,U));
+    U = cross(R,F);
 
-    float3 vertexNormal1 = normalize(faceNormal);
-    float3 vertexNormal2 = normalize(faceNormal);
-    float3 vertexNormal3 = normalize(faceNormal);
+    // Constants
+    float invF = 1.0f / fov;
+    float halfW = screenWidth * 0.5f, halfH = screenHeight * 0.5f;
 
-    // === OPTIMIZATION 1: BACK-FACE CULLING ===
-    float3 triangleCenter = (vertex1 + vertex2 + vertex3) / 3.0f;
-    float3 viewDirection = normalize(camPos - triangleCenter);
-    
-    // Fixed: For back-face culling, cull when normal points away from viewer
-    if (dot(faceNormal, viewDirection) <= 0.0f) {
-        return; // Back-face culling
-    }
+    // Compute depths and screen projections
+    float3 r0 = p0 - camPos, r1 = p1 - camPos, r2 = p2 - camPos;
+    float d0 = dot(r0,F), d1 = dot(r1,F), d2 = dot(r2,F);
+    float minD = fmin(fmin(d0,d1),d2);
+    if (minD <= 0.001f) return;
+    float s0 = invF/d0, s1 = invF/d1, s2 = invF/d2;
+    float3 sp0 = (float3)(dot(r0,R)*halfW*s0 + halfW, -dot(r0,U)*halfH*s0 + halfH, d0);
+    float3 sp1 = (float3)(dot(r1,R)*halfW*s1 + halfW, -dot(r1,U)*halfH*s1 + halfH, d1);
+    float3 sp2 = (float3)(dot(r2,R)*halfW*s2 + halfW, -dot(r2,U)*halfH*s2 + halfH, d2);
 
-    // Compute camera basis
-    float3 forward = normalize(camDir);
-    float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
-    float3 right = normalize(cross(forward, camUp));
-    float3 up = cross(right, forward);
+    // Frustum culling & bounding box
+    float minXf = fmin(fmin(sp0.x,sp1.x),sp2.x),
+          maxXf = fmax(fmax(sp0.x,sp1.x),sp2.x),
+          minYf = fmin(fmin(sp0.y,sp1.y),sp2.y),
+          maxYf = fmax(fmax(sp0.y,sp1.y),sp2.y);
+    if (maxXf < 0 || minXf >= screenWidth || maxYf < 0 || minYf >= screenHeight) return;
+    int x0 = max(0,(int)minXf), x1 = min(screenWidth-1,(int)maxXf);
+    int y0 = max(0,(int)minYf), y1 = min(screenHeight-1,(int)maxYf);
 
-    // === OPTIMIZATION 2: EARLY DEPTH REJECTION ===
-    float3 rel1 = vertex1 - camPos;
-    float3 rel2 = vertex2 - camPos;
-    float3 rel3 = vertex3 - camPos;
-    
-    float depth1 = dot(rel1, forward);
-    float depth2 = dot(rel2, forward);
-    float depth3 = dot(rel3, forward);
-    
-    if (depth1 <= 0.001f && depth2 <= 0.001f && depth3 <= 0.001f) return;
-    if (depth1 <= 0.001f || depth2 <= 0.001f || depth3 <= 0.001f) return;
+    // Small triangle culling
+    float area = fabs((sp1.x-sp0.x)*(sp2.y-sp0.y) - (sp2.x-sp0.x)*(sp1.y-sp0.y)) * 0.5f;
+    if (area < 0.5f) return;
 
-    // Project vertices to screen space
-    float3 screenPos1, screenPos2, screenPos3;
-    
-    float fovScale1 = 1.0f / (depth1 * fov);
-    screenPos1.x = dot(rel1, right) * fovScale1 * screenWidth * 0.5f + screenWidth * 0.5f;
-    screenPos1.y = -dot(rel1, up) * fovScale1 * screenHeight * 0.5f + screenHeight * 0.5f;
-    screenPos1.z = depth1;
+    // Precompute barycentric constants
+    float2 e1 = sp2.xy - sp0.xy, e2 = sp1.xy - sp0.xy;
+    float d00 = dot(e1,e1), d01 = dot(e1,e2), d11 = dot(e2,e2);
+    float invDen = 1.0f / (d00*d11 - d01*d01);
 
-    float fovScale2 = 1.0f / (depth2 * fov);
-    screenPos2.x = dot(rel2, right) * fovScale2 * screenWidth * 0.5f + screenWidth * 0.5f;
-    screenPos2.y = -dot(rel2, up) * fovScale2 * screenHeight * 0.5f + screenHeight * 0.5f;
-    screenPos2.z = depth2;
-
-    float fovScale3 = 1.0f / (depth3 * fov);
-    screenPos3.x = dot(rel3, right) * fovScale3 * screenWidth * 0.5f + screenWidth * 0.5f;
-    screenPos3.y = -dot(rel3, up) * fovScale3 * screenHeight * 0.5f + screenHeight * 0.5f;
-    screenPos3.z = depth3;
-
-    // === OPTIMIZATION 3: FRUSTUM CULLING ===
-    float minX_f = min(min(screenPos1.x, screenPos2.x), screenPos3.x);
-    float maxX_f = max(max(screenPos1.x, screenPos2.x), screenPos3.x);
-    float minY_f = min(min(screenPos1.y, screenPos2.y), screenPos3.y);
-    float maxY_f = max(max(screenPos1.y, screenPos2.y), screenPos3.y);
-    
-    if (maxX_f < 0 || minX_f >= screenWidth || maxY_f < 0 || minY_f >= screenHeight) {
-        return;
-    }
-
-    int minX = max(0, (int)minX_f);
-    int maxX = min(screenWidth - 1, (int)maxX_f);
-    int minY = max(0, (int)minY_f);
-    int maxY = min(screenHeight - 1, (int)maxY_f);
-
-    // === OPTIMIZATION 4: SMALL TRIANGLE CULLING ===
-    float triangleArea = fabs((screenPos2.x - screenPos1.x) * (screenPos3.y - screenPos1.y) - 
-                            (screenPos3.x - screenPos1.x) * (screenPos2.y - screenPos1.y)) * 0.5f;
-    if (triangleArea < 0.5f) {
-        return;
-    }
-
-    // === OPTIMIZATION 5: PRECOMPUTE BARYCENTRIC CONSTANTS ===
-    float2 edge1 = screenPos3.xy - screenPos1.xy;
-    float2 edge2 = screenPos2.xy - screenPos1.xy;
-    
-    float dot00 = dot(edge1, edge1);
-    float dot01 = dot(edge1, edge2);
-    float dot11 = dot(edge2, edge2);
-    
-    float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
-    
-    if (isinf(invDenom) || isnan(invDenom)) {
-        return;
-    }
-
-    // Rasterize triangle
-    for (int y = minY; y <= maxY; y++) {
-        for (int x = minX; x <= maxX; x++) {
-            float2 pixelPos = (float2)(x + 0.5f, y + 0.5f) - screenPos1.xy;
-            
-            float dot02 = dot(edge1, pixelPos);
-            float dot12 = dot(edge2, pixelPos);
-
-            float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
-            float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
-
-            if (u >= 0 && v >= 0 && u + v <= 1) {
+    // Rasterize
+    for (int y = y0; y <= y1; ++y) {
+        float cy = (y + 0.5f) - sp0.y;
+        int row = y * screenWidth;
+        for (int x = x0; x <= x1; ++x) {
+            float cx = (x + 0.5f) - sp0.x;
+            float l0 = e1.x*cx + e1.y*cy;
+            float l1 = e2.x*cx + e2.y*cy;
+            float u = (d11*l0 - d01*l1) * invDen;
+            float v = (d00*l1 - d01*l0) * invDen;
+            if (u >= 0.0f && v >= 0.0f && u + v <= 1.0f) {
+                int idx = row + x;
                 float w = 1.0f - u - v;
-                
-                float depth = w * screenPos1.z + u * screenPos2.z + v * screenPos3.z;
-                
-                int pixelIndex = y * screenWidth + x;
-                
-                if (ScreenDistances[pixelIndex] != 0.0f && depth >= ScreenDistances[pixelIndex]) {
-                    continue;
-                }
-                
-                ScreenDistances[pixelIndex] = depth;
-                
-                // IMPROVED: Interpolate the calculated vertex normals using barycentric coordinates
-                float3 interpolatedNormal = normalize(w * vertexNormal1 + u * vertexNormal2 + v * vertexNormal3);
-                
-                // Store interpolated normal
-                int normalIndex = pixelIndex * 3;
-                ScreenNormals[normalIndex] = interpolatedNormal.x;
-                ScreenNormals[normalIndex + 1] = interpolatedNormal.y;
-                ScreenNormals[normalIndex + 2] = interpolatedNormal.z;
-                
-                // === SIMPLE SHADING ===
-                // Just use a simple normal-based shading for depth perception
-                float3 simpleLight = normalize((float3)(0.3f, 0.7f, 0.5f)); // Soft light direction
-                float lightIntensity = max(0.65f, dot(interpolatedNormal, simpleLight)); // Clamp to avoid too dark areas
-                
-                float3 finalColor = triangleColor * lightIntensity;
-                
-                // Add emission if present
-                float3 emissionColor = triangleColor * Emission;
-                finalColor += emissionColor;
-                
-                // Clamp color values
-                finalColor = clamp(finalColor, 0.0f, 1.0f);
-                
-                // Store color
-                int colorIndex = pixelIndex * 3;
-                ScreenColors[colorIndex] = finalColor.x;
-                ScreenColors[colorIndex + 1] = finalColor.y;
-                ScreenColors[colorIndex + 2] = finalColor.z;
+                float depth = w*sp0.z + u*sp1.z + v*sp2.z;
+                float prev = ScreenDistances[idx];
+                if (prev != 0.0f && depth >= prev) continue;
+                ScreenDistances[idx] = depth;
 
-                // Store material properties
-                ScreenMaterialRoughness[pixelIndex] = Roughness;
-                ScreenMaterialMetallic[pixelIndex] = Metallic;
-                ScreenMaterialEmission[pixelIndex] = Emission;
+                int i3 = idx * 3;
+                float3 nrm = normalize(fn);
+                ScreenNormals[i3  ] = nrm.x;
+                ScreenNormals[i3+1] = nrm.y;
+                ScreenNormals[i3+2] = nrm.z;
+
+                float intensity = max(0.65f, dot(nrm, (float3)(0.3f,0.7f,0.5f)));
+                float3 finalCol = clamp(tc * intensity + tc * Em, 0.0f, 1.0f);
+                ScreenColors[i3  ] = finalCol.x;
+                ScreenColors[i3+1] = finalCol.y;
+                ScreenColors[i3+2] = finalCol.z;
+
+                ScreenMaterialRoughness[idx] = Rg;
+                ScreenMaterialMetallic[idx]  = Mt;
+                ScreenMaterialEmission[idx]  = Em;
             }
         }
     }

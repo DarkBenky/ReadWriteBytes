@@ -65,6 +65,35 @@ pthread_t threads[NUM_THREADS];
 #include <GLFW/glfw3native.h>
 #include <CL/cl_gl.h>
 
+struct KeyState {
+	bool keys[GLFW_KEY_LAST + 1];	  // Array to store state of all keys
+	bool prevKeys[GLFW_KEY_LAST + 1]; // Previous frame state for detecting press/release
+};
+
+struct MouseState {
+    double x, y;           // Current mouse position
+    double prevX, prevY;   // Previous frame mouse position
+    double deltaX, deltaY; // Change in position this frame
+    bool leftButton;       // Left mouse button state
+    bool rightButton;      // Right mouse button state
+    bool prevLeftButton;   // Previous left button state
+    bool prevRightButton;  // Previous right button state
+    bool firstMouse;       // Flag to handle first mouse movement
+};
+
+struct KeyState keyState = {0};
+struct MouseState mouseState = {0};
+
+enum RenderMode {
+	renderDistance,
+	renderVelocity,
+	renderOpacity,
+	renderNormal,
+	renderFluid,
+	renderColor,
+	renderWireframe,
+};
+
 struct RawImage {
 	unsigned char *data; // RGB pixel data
 	int width, height, components;
@@ -311,6 +340,7 @@ struct Camera {
 	struct Ray ray;
 	float fov;
 	uint8_t renderMode;
+	enum RenderMode mode;
 };
 
 struct Triangles {
@@ -4074,28 +4104,28 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glBindTexture(GL_TEXTURE_2D, 0);
 
-	// Create OpenCL context with OpenGL sharing
-	#ifdef _WIN32
-		cl_context_properties properties[] = {
-			CL_GL_CONTEXT_KHR, (cl_context_properties)wglGetCurrentContext(),
-			CL_WGL_HDC_KHR, (cl_context_properties)wglGetCurrentDC(),
-			CL_CONTEXT_PLATFORM, (cl_context_properties)ocl->platform,
-			0};
-	#elif defined(__APPLE__)
-		CGLContextObj gl_context = CGLGetCurrentContext();
-		CGLShareGroupObj share_group = CGLGetShareGroup(gl_context);
-		cl_context_properties properties[] = {
-			CL_CONTEXT_PROPERTY_USE_CGL_SHAREGROUP_APPLE,
-			(cl_context_properties)share_group,
-			CL_CONTEXT_PLATFORM, (cl_context_properties)ocl->platform,
-			0};
-	#else // Linux/X11
-		cl_context_properties properties[] = {
-			CL_GL_CONTEXT_KHR, (cl_context_properties)glXGetCurrentContext(),
-			CL_GLX_DISPLAY_KHR, (cl_context_properties)glXGetCurrentDisplay(),
-			CL_CONTEXT_PLATFORM, (cl_context_properties)ocl->platform,
-			0};
-	#endif
+// Create OpenCL context with OpenGL sharing
+#ifdef _WIN32
+	cl_context_properties properties[] = {
+		CL_GL_CONTEXT_KHR, (cl_context_properties)wglGetCurrentContext(),
+		CL_WGL_HDC_KHR, (cl_context_properties)wglGetCurrentDC(),
+		CL_CONTEXT_PLATFORM, (cl_context_properties)ocl->platform,
+		0};
+#elif defined(__APPLE__)
+	CGLContextObj gl_context = CGLGetCurrentContext();
+	CGLShareGroupObj share_group = CGLGetShareGroup(gl_context);
+	cl_context_properties properties[] = {
+		CL_CONTEXT_PROPERTY_USE_CGL_SHAREGROUP_APPLE,
+		(cl_context_properties)share_group,
+		CL_CONTEXT_PLATFORM, (cl_context_properties)ocl->platform,
+		0};
+#else // Linux/X11
+	cl_context_properties properties[] = {
+		CL_GL_CONTEXT_KHR, (cl_context_properties)glXGetCurrentContext(),
+		CL_GLX_DISPLAY_KHR, (cl_context_properties)glXGetCurrentDisplay(),
+		CL_CONTEXT_PLATFORM, (cl_context_properties)ocl->platform,
+		0};
+#endif
 
 	ocl->context = clCreateContext(properties, 1, &ocl->device, NULL, NULL, &err);
 	if (err != CL_SUCCESS) {
@@ -4434,6 +4464,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 							   ScreenWidth * ScreenHeight * 3 * sizeof(float), 0, NULL, NULL);
 	err |= clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances, &zero, sizeof(float), 0,
 							   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+	
 	if (err != CL_SUCCESS) {
 		printf("Error clearing buffers: %d\n", err);
 	}
@@ -4590,8 +4621,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	cl_float blur_sigma_range = 15.0f;
 	cl_float blur_sigma_spatial = 2.5f;
 	int blur_passes = 1;
-	// Use fixed-size array instead of VLA
-	#define MAX_BLUR_PASSES 10
+// Use fixed-size array instead of VLA
+#define MAX_BLUR_PASSES 10
 	cl_event blur_events[MAX_BLUR_PASSES];
 	int event_count = 0;
 
@@ -4671,7 +4702,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	}
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
-	
+
 	// === ACQUIRE OPENGL TEXTURE FOR OPENCL USE ===
 	err = clEnqueueAcquireGLObjects(ocl->queue, 1, &ocl->cl_texture_buffer, 0, NULL, NULL);
 	if (err != CL_SUCCESS) {
@@ -5181,6 +5212,109 @@ uint8_t readRenderMode(const char *filename) {
 	return renderMode;
 }
 
+bool isKeyPressed(int key) {
+	return keyState.keys[key] && !keyState.prevKeys[key]; // Just pressed this frame
+}
+
+bool isKeyReleased(int key) {
+	return !keyState.keys[key] && keyState.prevKeys[key]; // Just released this frame
+}
+
+bool isKeyHeld(int key) {
+	return keyState.keys[key]; // Currently held down
+}
+
+void updateKeyStates() {
+	// Copy current state to previous state
+	memcpy(keyState.prevKeys, keyState.keys, sizeof(keyState.keys));
+}
+
+void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods) {
+	if (key < 0 || key > GLFW_KEY_LAST) return; // Safety check
+
+	if (action == GLFW_PRESS) {
+		keyState.keys[key] = true;
+		printf("Key %d pressed\n", key);
+	} else if (action == GLFW_RELEASE) {
+		keyState.keys[key] = false;
+		printf("Key %d released\n", key);
+	}
+}
+
+void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+    if (mouseState.firstMouse) {
+        mouseState.prevX = xpos;
+        mouseState.prevY = ypos;
+        mouseState.firstMouse = false;
+    }
+    
+    mouseState.x = xpos;
+    mouseState.y = ypos;
+    
+    // Calculate delta (change) in mouse position
+    mouseState.deltaX = xpos - mouseState.prevX;
+    mouseState.deltaY = ypos - mouseState.prevY;
+    
+    printf("Mouse moved to: (%.1f, %.1f), Delta: (%.1f, %.1f)\n", 
+           xpos, ypos, mouseState.deltaX, mouseState.deltaY);
+}
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        mouseState.leftButton = (action == GLFW_PRESS);
+        if (action == GLFW_PRESS) {
+            printf("Left mouse button pressed at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+        } else if (action == GLFW_RELEASE) {
+            printf("Left mouse button released at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+        }
+    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        mouseState.rightButton = (action == GLFW_PRESS);
+        if (action == GLFW_PRESS) {
+            printf("Right mouse button pressed at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+        } else if (action == GLFW_RELEASE) {
+            printf("Right mouse button released at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+        }
+    }
+}
+
+bool isMouseButtonPressed(int button) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        return mouseState.leftButton && !mouseState.prevLeftButton;
+    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        return mouseState.rightButton && !mouseState.prevRightButton;
+    }
+    return false;
+}
+
+bool isMouseButtonReleased(int button) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        return !mouseState.leftButton && mouseState.prevLeftButton;
+    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        return !mouseState.rightButton && mouseState.prevRightButton;
+    }
+    return false;
+}
+
+bool isMouseButtonHeld(int button) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        return mouseState.leftButton;
+    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        return mouseState.rightButton;
+    }
+    return false;
+}
+
+void updateMouseStates() {
+    mouseState.prevX = mouseState.x;
+    mouseState.prevY = mouseState.y;
+    mouseState.prevLeftButton = mouseState.leftButton;
+    mouseState.prevRightButton = mouseState.rightButton;
+    
+    // Reset delta after updating (optional, depending on your needs)
+    mouseState.deltaX = 0.0;
+    mouseState.deltaY = 0.0;
+}
+
 int main() {
 	// load BVH
 	struct BVHLinear bvh;
@@ -5410,6 +5544,13 @@ int main() {
 	}
 
 	glfwMakeContextCurrent(window);
+	glfwSetKeyCallback(window, key_callback);
+
+	// Add mouse callbacks
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+
+	mouseState.firstMouse = true;
 
 	// Now initialize OpenCL with OpenGL sharing
 	struct OpenCLContext ocl;
@@ -5419,6 +5560,36 @@ int main() {
 	}
 
 	while (1) {
+		// Update key states at the start of each frame
+		updateKeyStates();
+		if (isKeyPressed(GLFW_KEY_W)) {
+			printf("W was just pressed this frame!\n");
+		}
+		if (isKeyReleased(GLFW_KEY_W)) {
+			printf("W was just released this frame!\n");
+		}
+		if (isKeyHeld(GLFW_KEY_W)) {
+			printf("W is currently held down!\n");
+		}
+
+		updateMouseStates();
+
+		if (fabs(mouseState.deltaX) > 0.1 || fabs(mouseState.deltaY) > 0.1) {
+            printf("Mouse moved: deltaX=%.2f, deltaY=%.2f\n", mouseState.deltaX, mouseState.deltaY);
+        }
+
+		if (isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) {
+            printf("Left mouse button just pressed!\n");
+        }
+        
+        if (isMouseButtonHeld(GLFW_MOUSE_BUTTON_LEFT)) {
+            printf("Left mouse button is held down\n");
+        }
+        
+        if (isMouseButtonReleased(GLFW_MOUSE_BUTTON_LEFT)) {
+            printf("Left mouse button just released!\n");
+        }
+
 		struct timespec start, end;
 		clock_gettime(CLOCK_MONOTONIC, &start);
 		// Calculate delta step based on elapsed time since the last frame
@@ -5465,31 +5636,37 @@ int main() {
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
 		timePartition->renderTime += dt1;
 
-		 // === DISPLAY THE OPENGL TEXTURE ===
-        glClear(GL_COLOR_BUFFER_BIT);
+		// === DISPLAY THE OPENGL TEXTURE ===
+		glClear(GL_COLOR_BUFFER_BIT);
 
-        // Use the texture (simple fullscreen quad)
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, ocl.gl_texture);
+		// Use the texture (simple fullscreen quad)
+		glEnable(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, ocl.gl_texture);
 
-        // Draw fullscreen quad using legacy immediate mode for simplicity
-        glBegin(GL_QUADS);
-		glTexCoord2f(0.0f, 1.0f);  glVertex2f(-1.0f, -1.0f);
-		glTexCoord2f(1.0f, 1.0f);  glVertex2f( 1.0f, -1.0f);
-		glTexCoord2f(1.0f, 0.0f);  glVertex2f( 1.0f,  1.0f);
-		glTexCoord2f(0.0f, 0.0f);  glVertex2f(-1.0f,  1.0f);
+		// Draw fullscreen quad using legacy immediate mode for simplicity
+		glBegin(GL_QUADS);
+		glTexCoord2f(0.0f, 1.0f);
+		glVertex2f(-1.0f, -1.0f);
+		glTexCoord2f(1.0f, 1.0f);
+		glVertex2f(1.0f, -1.0f);
+		glTexCoord2f(1.0f, 0.0f);
+		glVertex2f(1.0f, 1.0f);
+		glTexCoord2f(0.0f, 0.0f);
+		glVertex2f(-1.0f, 1.0f);
 		glEnd();
 
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glDisable(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glDisable(GL_TEXTURE_2D);
 
-
-        // Swap buffers and poll events
-        glfwSwapBuffers(window);
-        glfwPollEvents();
+		// Swap buffers and poll events
+		glfwSwapBuffers(window);
+		glfwPollEvents();
 
 		// Exit on ESC key
 		if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+			break;
+		// Exit on window close
+		if (glfwWindowShouldClose(window))
 			break;
 
 		// float currentFPS = 1.0f / dt1;
