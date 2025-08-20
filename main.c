@@ -94,6 +94,7 @@ enum RenderMode {
 	renderFluid,
 	renderColor,
 	renderWireframe,
+	RENDER_MODE_COUNT // Total number of render modes
 };
 
 struct RawImage {
@@ -341,8 +342,7 @@ struct OpenCLContext {
 struct Camera {
 	struct Ray ray;
 	float fov;
-	uint8_t renderMode;
-	enum RenderMode mode;
+	enum RenderMode renderMode;
 };
 
 struct Triangles {
@@ -5590,13 +5590,16 @@ int main() {
 		if (isKeyHeld(GLFW_KEY_E)) {
 			camera.ray.origin[1] += MoveMultiplier; // Move up
 		}
+		if (isKeyPressed(GLFW_KEY_R)) {
+			camera.renderMode = (camera.renderMode + 1) % RENDER_MODE_COUNT;
+			printf("Render mode changed to: %d\n", camera.renderMode);
+		}
 
 		updateMouseStates();
 
-		static float yaw = 0.0f;   // Horizontal rotation
-		static float pitch = 0.0f; // Vertical rotation
+		static float yaw = 0.0f;
+		static float pitch = 0.0f;
 
-		// In your mouse handling code:
 		if (isMouseButtonHeld(GLFW_MOUSE_BUTTON_LEFT)) {
 			// Update angles
 			yaw += mouseState.deltaX * MouseSensitivity;
