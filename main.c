@@ -53,6 +53,8 @@ int textBufferLen = 0;
 #define NUMBER_OF_CUBES 100
 pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
+#define MoveMultiplier 1.25f
+#define MouseSensitivity 0.25f
 #include <GLFW/glfw3native.h>
 #include <CL/cl_gl.h>
 
@@ -71,14 +73,14 @@ struct KeyState {
 };
 
 struct MouseState {
-    double x, y;           // Current mouse position
-    double prevX, prevY;   // Previous frame mouse position
-    double deltaX, deltaY; // Change in position this frame
-    bool leftButton;       // Left mouse button state
-    bool rightButton;      // Right mouse button state
-    bool prevLeftButton;   // Previous left button state
-    bool prevRightButton;  // Previous right button state
-    bool firstMouse;       // Flag to handle first mouse movement
+	double x, y;		   // Current mouse position
+	double prevX, prevY;   // Previous frame mouse position
+	double deltaX, deltaY; // Change in position this frame
+	bool leftButton;	   // Left mouse button state
+	bool rightButton;	   // Right mouse button state
+	bool prevLeftButton;   // Previous left button state
+	bool prevRightButton;  // Previous right button state
+	bool firstMouse;	   // Flag to handle first mouse movement
 };
 
 struct KeyState keyState = {0};
@@ -2543,12 +2545,12 @@ int readCameraData(struct Camera *camera) {
 	}
 
 	// Read camera position
-	if (fread(&camera->ray.origin[0], sizeof(float), 1, file) != 1 ||
-		fread(&camera->ray.origin[1], sizeof(float), 1, file) != 1 ||
-		fread(&camera->ray.origin[2], sizeof(float), 1, file) != 1 ||
-		fread(&camera->ray.direction[0], sizeof(float), 1, file) != 1 ||
-		fread(&camera->ray.direction[1], sizeof(float), 1, file) != 1 ||
-		fread(&camera->ray.direction[2], sizeof(float), 1, file) != 1 ||
+	if (fread(&camera->ray.origin[0], sizeof(float), 1, file) != 1 ||	 // Position X
+		fread(&camera->ray.origin[1], sizeof(float), 1, file) != 1 ||	 // Position Y
+		fread(&camera->ray.origin[2], sizeof(float), 1, file) != 1 ||	 // Position Z
+		fread(&camera->ray.direction[0], sizeof(float), 1, file) != 1 || // Direction X
+		fread(&camera->ray.direction[1], sizeof(float), 1, file) != 1 || // Direction Y
+		fread(&camera->ray.direction[2], sizeof(float), 1, file) != 1 || // Direction Z
 		fread(&camera->fov, sizeof(float), 1, file) != 1 ||
 		fread(&camera->renderMode, sizeof(uint8_t), 1, file) != 1) {
 
@@ -4464,7 +4466,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 							   ScreenWidth * ScreenHeight * 3 * sizeof(float), 0, NULL, NULL);
 	err |= clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances, &zero, sizeof(float), 0,
 							   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-	
+
 	if (err != CL_SUCCESS) {
 		printf("Error clearing buffers: %d\n", err);
 	}
@@ -5241,78 +5243,74 @@ void key_callback(GLFWwindow *window, int key, int scancode, int action, int mod
 	}
 }
 
-void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
-    if (mouseState.firstMouse) {
-        mouseState.prevX = xpos;
-        mouseState.prevY = ypos;
-        mouseState.firstMouse = false;
-    }
-    
-    mouseState.x = xpos;
-    mouseState.y = ypos;
-    
-    // Calculate delta (change) in mouse position
-    mouseState.deltaX = xpos - mouseState.prevX;
-    mouseState.deltaY = ypos - mouseState.prevY;
-    
-    printf("Mouse moved to: (%.1f, %.1f), Delta: (%.1f, %.1f)\n", 
-           xpos, ypos, mouseState.deltaX, mouseState.deltaY);
+void mouse_callback(GLFWwindow *window, double xpos, double ypos) {
+	if (mouseState.firstMouse) {
+		mouseState.prevX = xpos;
+		mouseState.prevY = ypos;
+		mouseState.firstMouse = false;
+	}
+
+	mouseState.x = xpos;
+	mouseState.y = ypos;
+
+	// Calculate delta (change) in mouse position
+	mouseState.deltaX = xpos - mouseState.prevX;
+	mouseState.deltaY = ypos - mouseState.prevY;
+
+	printf("Mouse moved to: (%.1f, %.1f), Delta: (%.1f, %.1f)\n",
+		   xpos, ypos, mouseState.deltaX, mouseState.deltaY);
 }
 
-void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        mouseState.leftButton = (action == GLFW_PRESS);
-        if (action == GLFW_PRESS) {
-            printf("Left mouse button pressed at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
-        } else if (action == GLFW_RELEASE) {
-            printf("Left mouse button released at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
-        }
-    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        mouseState.rightButton = (action == GLFW_PRESS);
-        if (action == GLFW_PRESS) {
-            printf("Right mouse button pressed at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
-        } else if (action == GLFW_RELEASE) {
-            printf("Right mouse button released at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
-        }
-    }
+void mouse_button_callback(GLFWwindow *window, int button, int action, int mods) {
+	if (button == GLFW_MOUSE_BUTTON_LEFT) {
+		mouseState.leftButton = (action == GLFW_PRESS);
+		if (action == GLFW_PRESS) {
+			printf("Left mouse button pressed at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+		} else if (action == GLFW_RELEASE) {
+			printf("Left mouse button released at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+		}
+	} else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+		mouseState.rightButton = (action == GLFW_PRESS);
+		if (action == GLFW_PRESS) {
+			printf("Right mouse button pressed at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+		} else if (action == GLFW_RELEASE) {
+			printf("Right mouse button released at (%.1f, %.1f)\n", mouseState.x, mouseState.y);
+		}
+	}
 }
 
 bool isMouseButtonPressed(int button) {
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        return mouseState.leftButton && !mouseState.prevLeftButton;
-    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        return mouseState.rightButton && !mouseState.prevRightButton;
-    }
-    return false;
+	if (button == GLFW_MOUSE_BUTTON_LEFT) {
+		return mouseState.leftButton && !mouseState.prevLeftButton;
+	} else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+		return mouseState.rightButton && !mouseState.prevRightButton;
+	}
+	return false;
 }
 
 bool isMouseButtonReleased(int button) {
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        return !mouseState.leftButton && mouseState.prevLeftButton;
-    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        return !mouseState.rightButton && mouseState.prevRightButton;
-    }
-    return false;
+	if (button == GLFW_MOUSE_BUTTON_LEFT) {
+		return !mouseState.leftButton && mouseState.prevLeftButton;
+	} else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+		return !mouseState.rightButton && mouseState.prevRightButton;
+	}
+	return false;
 }
 
 bool isMouseButtonHeld(int button) {
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        return mouseState.leftButton;
-    } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        return mouseState.rightButton;
-    }
-    return false;
+	if (button == GLFW_MOUSE_BUTTON_LEFT) {
+		return mouseState.leftButton;
+	} else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+		return mouseState.rightButton;
+	}
+	return false;
 }
 
 void updateMouseStates() {
-    mouseState.prevX = mouseState.x;
-    mouseState.prevY = mouseState.y;
-    mouseState.prevLeftButton = mouseState.leftButton;
-    mouseState.prevRightButton = mouseState.rightButton;
-    
-    // Reset delta after updating (optional, depending on your needs)
-    mouseState.deltaX = 0.0;
-    mouseState.deltaY = 0.0;
+	mouseState.prevX = mouseState.x;
+	mouseState.prevY = mouseState.y;
+	mouseState.prevLeftButton = mouseState.leftButton;
+	mouseState.prevRightButton = mouseState.rightButton;
 }
 
 int main() {
@@ -5547,8 +5545,8 @@ int main() {
 	glfwSetKeyCallback(window, key_callback);
 
 	// Add mouse callbacks
-    glfwSetCursorPosCallback(window, mouse_callback);
-    glfwSetMouseButtonCallback(window, mouse_button_callback);
+	glfwSetCursorPosCallback(window, mouse_callback);
+	glfwSetMouseButtonCallback(window, mouse_button_callback);
 
 	mouseState.firstMouse = true;
 
@@ -5561,34 +5559,64 @@ int main() {
 
 	while (1) {
 		// Update key states at the start of each frame
+		glfwPollEvents();
 		updateKeyStates();
-		if (isKeyPressed(GLFW_KEY_W)) {
-			printf("W was just pressed this frame!\n");
-		}
-		if (isKeyReleased(GLFW_KEY_W)) {
-			printf("W was just released this frame!\n");
-		}
+
+		float fx = camera.ray.direction[0];
+		float fz = camera.ray.direction[2];
+		// forward/back
 		if (isKeyHeld(GLFW_KEY_W)) {
-			printf("W is currently held down!\n");
+			camera.ray.origin[0] += fx * MoveMultiplier;
+			camera.ray.origin[2] += fz * MoveMultiplier;
+		}
+		if (isKeyHeld(GLFW_KEY_S)) {
+			camera.ray.origin[0] -= fx * MoveMultiplier;
+			camera.ray.origin[2] -= fz * MoveMultiplier;
+		}
+		// strafing: cross(forward,up) = right
+		float rx = fz;
+		float rz = -fx;
+		if (isKeyHeld(GLFW_KEY_A)) {
+			camera.ray.origin[0] += rx * MoveMultiplier;
+			camera.ray.origin[2] += rz * MoveMultiplier;
+		}
+		if (isKeyHeld(GLFW_KEY_D)) {
+			camera.ray.origin[0] -= rx * MoveMultiplier;
+			camera.ray.origin[2] -= rz * MoveMultiplier;
+		}
+		if (isKeyHeld(GLFW_KEY_Q)) {
+			camera.ray.origin[1] -= MoveMultiplier; // Move down
+		}
+		if (isKeyHeld(GLFW_KEY_E)) {
+			camera.ray.origin[1] += MoveMultiplier; // Move up
 		}
 
 		updateMouseStates();
 
-		if (fabs(mouseState.deltaX) > 0.1 || fabs(mouseState.deltaY) > 0.1) {
-            printf("Mouse moved: deltaX=%.2f, deltaY=%.2f\n", mouseState.deltaX, mouseState.deltaY);
-        }
+		static float yaw = 0.0f;   // Horizontal rotation
+		static float pitch = 0.0f; // Vertical rotation
 
-		if (isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) {
-            printf("Left mouse button just pressed!\n");
-        }
-        
-        if (isMouseButtonHeld(GLFW_MOUSE_BUTTON_LEFT)) {
-            printf("Left mouse button is held down\n");
-        }
-        
-        if (isMouseButtonReleased(GLFW_MOUSE_BUTTON_LEFT)) {
-            printf("Left mouse button just released!\n");
-        }
+		// In your mouse handling code:
+		if (isMouseButtonHeld(GLFW_MOUSE_BUTTON_LEFT)) {
+			// Update angles
+			yaw += mouseState.deltaX * MouseSensitivity;
+			pitch -= mouseState.deltaY * MouseSensitivity;
+
+			// Clamp pitch to prevent flipping
+			if (pitch > 89.0f) pitch = 89.0f;
+			if (pitch < -89.0f) pitch = -89.0f;
+
+			// Convert angles to direction vector
+			float pitchRad = pitch * M_PI / 180.0f;
+			float yawRad = yaw * M_PI / 180.0f;
+
+			camera.ray.direction[0] = cosf(pitchRad) * cosf(yawRad);
+			camera.ray.direction[1] = sinf(pitchRad);
+			camera.ray.direction[2] = cosf(pitchRad) * sinf(yawRad);
+
+			mouseState.deltaX = 0.0;
+			mouseState.deltaY = 0.0;
+		}
 
 		struct timespec start, end;
 		clock_gettime(CLOCK_MONOTONIC, &start);
@@ -5604,7 +5632,7 @@ int main() {
 		clock_t loopStartTime = clock();
 
 		clock_t readDataTime = clock();
-		readCameraData(&camera);
+		// readCameraData(&camera);
 		readCursorData(cursor);
 		readPauseData(&paused);
 		clock_t endReadDataTime = clock();
@@ -5660,7 +5688,6 @@ int main() {
 
 		// Swap buffers and poll events
 		glfwSwapBuffers(window);
-		glfwPollEvents();
 
 		// Exit on ESC key
 		if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)

@@ -640,9 +640,9 @@ func (c *Cursor) Update(g *Game) {
 
 			// Calculate camera's right vector (cross product of direction and up)
 			upVector := [3]float32{0, 1, 0}
-			rightX := g.camera.DirY*upVector[2] - g.camera.DirZ*upVector[1]
-			rightY := g.camera.DirZ*upVector[0] - g.camera.DirX*upVector[2]
-			rightZ := g.camera.DirX*upVector[1] - g.camera.DirY*upVector[0]
+			rightX := g.camera.DirY * upVector[2] - g.camera.DirZ * upVector[1]
+			rightY := g.camera.DirZ * upVector[0] - g.camera.DirX * upVector[2]
+			rightZ := g.camera.DirX * upVector[1] - g.camera.DirY * upVector[0]
 
 			// Normalize right vector
 			rightLength := float32(math.Sqrt(float64(rightX*rightX + rightY*rightY + rightZ*rightZ)))
