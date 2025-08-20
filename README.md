@@ -28,7 +28,8 @@ The results show that writing frames is faster than reading them, with write ope
   - [X] movement
   - [X] mouse control
   - [ ] render mode
-    - [ ] render normal, color, distance ... 
+    - [X] change render normal, color, distance ...
+    - [ ] update the rendered frame based on render mode
   ```c
   #include <GLFW/glfw3.h>
   #include <stdio.h>

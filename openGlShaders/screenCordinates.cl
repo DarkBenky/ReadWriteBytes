@@ -248,6 +248,8 @@ float3 generateRoughnessBiasedDirection(
     return normalize(randomDir);
 }
 
+// NODE: For now i want to implement my self to practice
+
 float3 Trace(Ray ray, __global const BVHLinear *bvh, int maxDepth) {
     float3 incomingLight = (float3)(0.0f, 0.0f, 0.0f);
     float3 rayColor = (float3)(1.0f, 1.0f, 1.0f);
@@ -1943,16 +1945,29 @@ __kernel void copyToGLTexture(
     __global float* screen_colors,
     __write_only image2d_t gl_texture,
     int screen_width,
-    int screen_height
+    int screen_height,
+    int mode // 0 = 3x float, 1 = 4x float, 2 = 1x float
 ) {
     int x = get_global_id(0);
     int y = get_global_id(1);
     
     if (x >= screen_width || y >= screen_height) return;
     
-    int idx = (y * screen_width + x) * 3; // Index for a float array
-    float3 color = (float3)(screen_colors[idx], screen_colors[idx+1], screen_colors[idx+2]);
-    
-    // Write directly to OpenGL texture
-    write_imagef(gl_texture, (int2)(x, y), (float4)(color.x, color.y, color.z, 1.0f));
+    if (mode == 0) {
+        // 3x float mode
+        int idx = (y * screen_width + x) * 3; // Index for a float array
+        float3 color = (float3)(screen_colors[idx], screen_colors[idx+1], screen_colors[idx+2]);
+        write_imagef(gl_texture, (int2)(x, y), (float4)(color.x, color.y, color.z, 1.0f));
+    } else if (mode == 1) {
+        // 4x float mode
+        int idx = (y * screen_width + x) * 4; // Index for a float array
+        float4 color = (float4)(screen_colors[idx], screen_colors[idx+1], screen_colors[idx+2], screen_colors[idx+3]);
+        write_imagef(gl_texture, (int2)(x, y), color);
+    } else if (mode == 2) {
+        // 1x float mode
+        int idx = y * screen_width + x; // Index for a single float
+        float gray = screen_colors[idx];
+        write_imagef(gl_texture, (int2)(x, y), (float4)(gray, gray, gray, 1.0f));
+        return;
+    }
 }

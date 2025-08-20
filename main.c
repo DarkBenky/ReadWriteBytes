@@ -284,9 +284,6 @@ struct OpenCLContext {
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
 	cl_mem buffer_distances;
-	cl_mem buffer_opacities;
-	cl_mem buffer_velocities_screen;
-	cl_mem buffer_normals;
 	cl_mem buffer_distances_temp;
 	cl_mem buffer_opacities_temp;
 	cl_mem buffer_triangle_colors;
@@ -311,10 +308,15 @@ struct OpenCLContext {
 	cl_mem buffer_triangle_v2;
 	cl_mem buffer_triangle_v3;
 	cl_mem buffer_triangle_normals;
-	cl_mem buffer_screen_colors;
-	cl_mem buffer_screen_material_roughness;
-	cl_mem buffer_screen_material_metallic;
-	cl_mem buffer_screen_material_emission;
+
+	// screen buffers
+	cl_mem buffer_opacities;				 // ScreenWidth * ScreenHeight * sizeof(float)
+	cl_mem buffer_velocities_screen;		 // ScreenWidth * ScreenHeight * sizeof(float)
+	cl_mem buffer_normals;					 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+	cl_mem buffer_screen_colors;			 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+	cl_mem buffer_screen_material_roughness; // ScreenWidth * ScreenHeight * sizeof(float)
+	cl_mem buffer_screen_material_metallic;	 // ScreenWidth * ScreenHeight * sizeof(float)
+	cl_mem buffer_screen_material_emission;	 // ScreenWidth * ScreenHeight * sizeof(float)
 
 	// Triangle properties
 	cl_mem buffer_triangle_roughness;
@@ -4623,8 +4625,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	cl_float blur_sigma_range = 15.0f;
 	cl_float blur_sigma_spatial = 2.5f;
 	int blur_passes = 1;
-// Use fixed-size array instead of VLA
-#define MAX_BLUR_PASSES 10
+
+#define MAX_BLUR_PASSES 1
 	cl_event blur_events[MAX_BLUR_PASSES];
 	int event_count = 0;
 
@@ -4714,11 +4716,13 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	cl_int screen_width_arg = ScreenWidth;
 	cl_int screen_height_arg = ScreenHeight;
+	cl_int mode = 0; // TODO : change mode and buffer to copy base on render mode 
 
 	err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 1, sizeof(cl_mem), &ocl->cl_texture_buffer);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 2, sizeof(cl_int), &screen_width_arg);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 3, sizeof(cl_int), &screen_height_arg);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 4, sizeof(cl_int), &mode);
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting copyToTexture kernel args: %d\n", err);
