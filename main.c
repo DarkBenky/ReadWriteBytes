@@ -4476,7 +4476,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	// *** RENDER SKYBOX FIRST (fills background) ***
 	renderSkyboxOpenCL(ocl, camera, skyBox, &gpuTimings->renderSkyBoxTime);
 
-	// === ADD TEXT TO RENDER (keeping your existing text rendering) ===
+	// === ADD TEXT TO RENDER ===
 	uint8_t white[3] = {255, 255, 255};
 	uint8_t yellow[3] = {255, 255, 0};
 
@@ -4485,7 +4485,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	snprintf(text, sizeof(text), "Real FPS %.0f", realFPS);
 	addTextOpenCL(ocl, font, text, 545, chart_pos_Y - 15, yellow);
 
-	// Add all your existing text rendering calls here...
 	float skyboxFPS = (gpuTimings->renderSkyBoxTime > 0.001f) ? (1000.0f / gpuTimings->renderSkyBoxTime) : 0.0f;
 	snprintf(text, sizeof(text), "Skybox %.0f FPS", skyboxFPS);
 	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
@@ -4529,7 +4528,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		}
 	}
 
-	// Add more text entries with your existing logic...
 	float trianglesFPS = (gpuTimings->renderTrianglesTime > 0.001f) ? (1000.0f / gpuTimings->renderTrianglesTime) : 0.0f;
 	snprintf(text, sizeof(text), "Triangles %.0f FPS", trianglesFPS);
 	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
@@ -4538,13 +4536,11 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	// *** Screen Space Projection Kernel and sky box ***
 	applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime);
 
-	// Continue with your existing text additions...
 	float reflectionsFPS = (gpuTimings->applyReflectionsTime > 0.001f) ? (1000.0f / gpuTimings->applyReflectionsTime) : 0.0f;
 	snprintf(text, sizeof(text), "Reflections %.0f FPS", reflectionsFPS);
 	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
 	chart_pos_Y += 15;
 
-	// Add remaining text entries...
 	float blurFPS = (gpuTimings->applyBlurTime > 0.001f) ? (1000.0f / gpuTimings->applyBlurTime) : 0.0f;
 	snprintf(text, sizeof(text), "Blur %.0f FPS", blurFPS);
 	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
