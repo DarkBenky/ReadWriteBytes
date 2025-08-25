@@ -86,6 +86,15 @@ struct MouseState {
 struct KeyState keyState = {0};
 struct MouseState mouseState = {0};
 
+char *renderModesName[] = {
+	"Distance",
+	"Velocity",
+	"Opacity",
+	"Normal",
+	"Fluid",
+	"Color",
+	"Wireframe"};
+
 enum RenderMode {
 	renderDistance,
 	renderVelocity,
@@ -283,7 +292,7 @@ struct OpenCLContext {
 	// buffers
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
-	cl_mem buffer_distances;
+
 	cl_mem buffer_distances_temp;
 	cl_mem buffer_opacities_temp;
 	cl_mem buffer_triangle_colors;
@@ -310,6 +319,7 @@ struct OpenCLContext {
 	cl_mem buffer_triangle_normals;
 
 	// screen buffers
+	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_opacities;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_velocities_screen;		 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_normals;					 // ScreenWidth * ScreenHeight * sizeof(float) * 3
@@ -4560,6 +4570,9 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	snprintf(text, sizeof(text), "Particles %.0f FPS", projectParticlesFPS);
 	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
 
+	snprintf(text, sizeof(text), "Render Mode: %s", renderModesName[camera->renderMode]);
+	addTextOpenCL(ocl, font, text, 5, 5, white);
+
 	// render text on screen
 	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime);
 
@@ -4712,9 +4725,45 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	cl_int screen_width_arg = ScreenWidth;
 	cl_int screen_height_arg = ScreenHeight;
-	cl_int mode = 0; // TODO : change mode and buffer to copy base on render mode 
 
-	err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	cl_int mode = 0; // 0 = 3x float, 1 = 4x float, 2 = 1x float
+
+	switch (camera->renderMode) {
+	case renderDistance:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_distances);
+		break;
+	case renderVelocity:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_velocities_screen);
+		break;
+	case renderOpacity:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_opacities);
+		break;
+	case renderNormal:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_normals);
+		break;
+	case renderFluid:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderWireframe:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case RENDER_MODE_COUNT:
+		// This should never happen - RENDER_MODE_COUNT is not a valid render mode
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	}
+
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 1, sizeof(cl_mem), &ocl->cl_texture_buffer);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 2, sizeof(cl_int), &screen_width_arg);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 3, sizeof(cl_int), &screen_height_arg);
@@ -4733,7 +4782,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clEnqueueReleaseGLObjects(ocl->queue, 1, &ocl->cl_texture_buffer, 0, NULL, NULL);
 	clFinish(ocl->queue);
 
-	// === CPU READBACK FOR SCREEN STRUCT (keeping existing functionality) ===
 	float *distances_result = ocl->host_distances_result;
 	float *opacities_result = ocl->host_opacities_result;
 	float *velocities_result = ocl->host_velocities_result;
@@ -4762,14 +4810,12 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		clReleaseEvent(readback_events[i]);
 	}
 
-	// === UPDATE CPU SCREEN STRUCT (keeping existing functionality) ===
 	memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
 	memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
 	memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
 	memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
 	memset(screen->normals, 0, sizeof(float) * ScreenWidth * ScreenHeight * 3);
 
-	// Find max values for normalization
 	float maxDistance = 0.0f, maxVelocity = 0.0f, maxOpacity = 0.0f;
 	for (int i = 0; i < ScreenWidth * ScreenHeight; i++) {
 		if (distances_result[i] > 0.001f && distances_result[i] > maxDistance) {
@@ -4783,7 +4829,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		}
 	}
 
-	// Convert results to screen format
 	for (int y = 0; y < ScreenHeight; y++) {
 		for (int x = 0; x < ScreenWidth; x++) {
 			int idx = y * ScreenWidth + x;
@@ -5515,12 +5560,6 @@ int main() {
 
 	CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
-	// struct OpenCLContext ocl;
-	// int useOpenCL = initializeOpenCL(&ocl, triangles, &skyBox, &font, &bvh);
-	// if (!useOpenCL) {
-	// 	printf("Failed to initialize OpenCL, falling back to CPU\n");
-	// }
-
 	writeFileTriangles("parseObj/triangles.bin", triangles);
 
 	struct GPUTimings gpuTimings;
@@ -5557,10 +5596,13 @@ int main() {
 		printf("Failed to initialize OpenCL-GL interop, falling back to CPU\n");
 	}
 
-	while (1) {
+	camera.renderMode = renderColor;
+
+	bool exit = false;
+
+	while (!glfwWindowShouldClose(window) && !exit) {
 		// Update key states at the start of each frame
 		glfwPollEvents();
-		updateKeyStates();
 
 		float fx = camera.ray.direction[0];
 		float fz = camera.ray.direction[2];
@@ -5591,9 +5633,11 @@ int main() {
 			camera.ray.origin[1] += MoveMultiplier; // Move up
 		}
 		if (isKeyPressed(GLFW_KEY_R)) {
+			enum RenderMode oldMode = camera.renderMode;
 			camera.renderMode = (camera.renderMode + 1) % RENDER_MODE_COUNT;
-			printf("Render mode changed to: %d\n", camera.renderMode);
 		}
+
+		updateKeyStates();
 
 		updateMouseStates();
 
@@ -5688,6 +5732,24 @@ int main() {
 
 		glBindTexture(GL_TEXTURE_2D, 0);
 		glDisable(GL_TEXTURE_2D);
+
+		// // Add 50% opacity triangle in the middle of screen
+		// glEnable(GL_BLEND);
+		// glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+		// // Set color to white with 50% alpha
+		// glColor4f(1.0f, 1.0f, 1.0f, 0.5f);
+
+		// // Draw triangle in the center (normalized coordinates)
+		// glBegin(GL_TRIANGLES);
+		// glVertex2f(0.0f, 0.3f);	  // Top vertex
+		// glVertex2f(-0.3f, -0.3f); // Bottom left vertex
+		// glVertex2f(0.3f, -0.3f);  // Bottom right vertex
+		// glEnd();
+
+		// // Reset color and disable blending
+		// glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+		// glDisable(GL_BLEND);
 
 		// Swap buffers and poll events
 		glfwSwapBuffers(window);
