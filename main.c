@@ -5689,7 +5689,7 @@ int main() {
 
 		clock_t readDataTime = clock();
 		// readCameraData(&camera);
-		readCursorData(cursor);
+		// readCursorData(cursor);
 		readPauseData(&paused);
 		clock_t endReadDataTime = clock();
 		float dt1 = (float)(endReadDataTime - readDataTime) / (float)CLOCKS_PER_SEC;
