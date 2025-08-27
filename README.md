@@ -25,7 +25,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] Add UI to each render mode
- - [ ] render ui in separate buffer as overlay
+  - [ ] render ui in separate buffer as overlay
 - [ ] Init Open Gl
   - [ ] Example Code
   ```c
