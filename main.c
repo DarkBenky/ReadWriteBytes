@@ -319,6 +319,7 @@ struct OpenCLContext {
 	cl_mem buffer_triangle_normals;
 
 	// screen buffers
+	cl_mem buffer_screen_ui;				 // ScreenWidth * ScreenHeight * sizeof(float) * 4
 	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_opacities;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_velocities_screen;		 // ScreenWidth * ScreenHeight * sizeof(float)
@@ -4339,6 +4340,14 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 												 triangles->count * sizeof(int), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating valid triangles buffer: %d\n", err);
+		return 0;
+	}
+
+	// Screen Buffer for UI
+	ocl->buffer_screen_ui = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+											ScreenWidth * ScreenHeight * 4 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating screen UI buffer: %d\n", err);
 		return 0;
 	}
 
