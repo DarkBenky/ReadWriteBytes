@@ -26,8 +26,52 @@ The results show that writing frames is faster than reading them, with write ope
 
 - [ ] Add UI to each render mode
   - [ ] render ui in separate buffer as overlay
-- [ ] Init Open Gl
-  - [ ] Example Code
+- [ ] render all in open gl remove memory sharing with go code
+- [ ] Fix C reading and writing of BVH / open CL code
+  - [ ] Read BVH in C
+- [ ] Fix C reading and writing of BVH / open CL code
+- [ ] Trace Ray Function prototype ![trace diagram](trace.png)
+  - [ ] Finish raytracing kernel
+    - [ ] Initialize kernel
+      - [ ] BVH buffer ...
+- [ ] convert timing to this format
+
+  ```c
+  struct timespec start, end;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  saveScreenNormal(screen, "normal.bin");
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
+  ```
+- [ ] Better screen space reflections (Ray Tracing)
+  - [ ] add shadows (with ray tracing)
+- [ ] (Look Into) Fix .obj file parsing
+- [ ] Update timimg (CPU)
+- [ ] add emission and bloom
+- [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
+
+### Add Open GL to the go code to project particles on GPU directly
+- Render headlessly the image and save it in the to drive so the go code can read it
+- [ ] implement
+
+### Add better timing
+- [ ] add timing
+- [ ] test timing why i get so weird numbers
+
+### Threading and Performance [ ***BackLog*** ]
+- [ ] Implement simulation and rendering in different threads
+  - Render thread should run at a fixed rate (e.g., 24 FPS)
+  - Lock simulation thread when scene is being rendered
+  - Run simulation as fast as possible, but adjust step size based on TPS (higher TPS = smaller simulation steps)
+- [ ] why pragma opm is not helping
+
+### Graphics Enhancement
+- [ ] Accelerate rendering with CUDA
+- [ ] add screens based fluid rendering
+
+### DONE
+- [X] Init Open Gl
+  - [X] Example Code
   ```c
   #include <GLFW/glfw3.h>
   #include <stdio.h>
@@ -106,50 +150,7 @@ The results show that writing frames is faster than reading them, with write ope
       return 0;
   }
   ```
-  - [ ] Render Image as Texture
-- [ ] Fix C reading and writing of BVH / open CL code
-  - [ ] Read BVH in C
-- [ ] Fix C reading and writing of BVH / open CL code
-- [ ] Trace Ray Function prototype ![trace diagram](trace.png)
-  - [ ] Finish raytracing kernel
-    - [ ] Initialize kernel
-      - [ ] BVH buffer ...
-- [ ] convert timing to this format
-
-  ```c
-  struct timespec start, end;
-  clock_gettime(CLOCK_MONOTONIC, &start);
-  saveScreenNormal(screen, "normal.bin");
-  clock_gettime(CLOCK_MONOTONIC, &end);
-  double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
-  ```
-- [ ] Better screen space reflections (Ray Tracing)
-  - [ ] add shadows (with ray tracing)
-- [ ] (Look Into) Fix .obj file parsing
-- [ ] Update timimg (CPU)
-- [ ] add emission and bloom
-- [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
-
-### Add Open GL to the go code to project particles on GPU directly
-- Render headlessly the image and save it in the to drive so the go code can read it
-- [ ] implement
-
-### Add better timing
-- [ ] add timing
-- [ ] test timing why i get so weird numbers
-
-### Threading and Performance [ ***BackLog*** ]
-- [ ] Implement simulation and rendering in different threads
-  - Render thread should run at a fixed rate (e.g., 24 FPS)
-  - Lock simulation thread when scene is being rendered
-  - Run simulation as fast as possible, but adjust step size based on TPS (higher TPS = smaller simulation steps)
-- [ ] why pragma opm is not helping
-
-### Graphics Enhancement
-- [ ] Accelerate rendering with CUDA
-- [ ] add screens based fluid rendering
-
-### DONE
+  - [X] Render Image as Texture
 - [X] Move interactions to c
   - [X] movement
   - [X] mouse control
