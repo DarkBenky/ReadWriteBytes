@@ -302,8 +302,9 @@ struct OpenCLContext {
 
 	// Add OpenGL interop members
 	GLuint gl_texture;		  // OpenGL texture ID
+	GLuint gl_ui_texture;	  // OpenGL texture ID for UI
 	cl_mem cl_texture_buffer; // OpenCL image object from GL texture
-	GLuint gl_pbo;			  // Pixel Buffer Object (optional, for better performance)
+	cl_mem cl_ui_texture_buffer;
 
 	// rayTracing buffers
 	cl_mem buffer_bvh_nodes;
@@ -319,7 +320,6 @@ struct OpenCLContext {
 	cl_mem buffer_triangle_normals;
 
 	// screen buffers
-	cl_mem buffer_screen_ui;				 // ScreenWidth * ScreenHeight * sizeof(float) * 4
 	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_opacities;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_velocities_screen;		 // ScreenWidth * ScreenHeight * sizeof(float)
@@ -970,7 +970,7 @@ float totalTime(struct GPUTimings *gpuTimings) {
 	return total;
 }
 
-void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) {
+void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, cl_mem *renderBuffer) {
 	// Timing chart parameters
 	int chartPosXLocal = chartPosX;
 	int chartPosYLocal = chartPosY;
@@ -993,7 +993,11 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) 
 	cl_int err = 0;
 	cl_int screen_width = ScreenWidth;
 	cl_int screen_height = ScreenHeight;
-	err |= clSetKernelArg(ocl->gpuTimings_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	if (renderBuffer == NULL) {
+		err |= clSetKernelArg(ocl->gpuTimings_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	} else {
+		err |= clSetKernelArg(ocl->gpuTimings_kernel, 0, sizeof(cl_mem), renderBuffer);
+	}
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 1, sizeof(cl_int), &screen_width);
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 2, sizeof(cl_int), &screen_height);
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 3, sizeof(cl_int), &chartWidth);
@@ -3419,7 +3423,7 @@ int uploadTriangleDataOnce(struct OpenCLContext *ocl, struct Triangles *triangle
 	return 1;
 }
 
-void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *gpuTimeMs) {
+void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *gpuTimeMs, cl_mem *renderBuffer) {
 	if (textBufferLen == 0) {
 		if (gpuTimeMs) *gpuTimeMs = 0.0f;
 		return;
@@ -3457,7 +3461,13 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
 	err |= clSetKernelArg(ocl->renderText_kernel, 1, sizeof(cl_int), &fontSizeY);
 	err |= clSetKernelArg(ocl->renderText_kernel, 2, sizeof(cl_int), &spriteSizeX);
 	err |= clSetKernelArg(ocl->renderText_kernel, 3, sizeof(cl_int), &spriteSizeY);
-	err |= clSetKernelArg(ocl->renderText_kernel, 4, sizeof(cl_mem), &ocl->buffer_screen_colors);
+
+	if (renderBuffer == NULL) {
+		err |= clSetKernelArg(ocl->renderText_kernel, 4, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	} else {
+		err |= clSetKernelArg(ocl->renderText_kernel, 4, sizeof(cl_mem), renderBuffer);
+	}
+
 	err |= clSetKernelArg(ocl->renderText_kernel, 5, sizeof(cl_mem), &ocl->buffer_font_data);
 	err |= clSetKernelArg(ocl->renderText_kernel, 6, sizeof(cl_int), &screenWidth);
 	err |= clSetKernelArg(ocl->renderText_kernel, 7, sizeof(cl_int), &screenHeight);
@@ -4119,6 +4129,15 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glBindTexture(GL_TEXTURE_2D, 0);
 
+	// Create OpenGL texture for UI that will be shared with OpenCL
+	glGenTextures(1, &ocl->gl_ui_texture);
+	glBindTexture(GL_TEXTURE_2D, ocl->gl_ui_texture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, ScreenWidth, ScreenHeight, 0,
+				 GL_RGBA, GL_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
 // Create OpenCL context with OpenGL sharing
 #ifdef _WIN32
 	cl_context_properties properties[] = {
@@ -4161,6 +4180,14 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 												   GL_TEXTURE_2D, 0, ocl->gl_texture, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating CL image from GL texture: %d\n", err);
+		return 0;
+	}
+
+	// Create OpenCL image from OpenGL texture for UI
+	ocl->cl_ui_texture_buffer = clCreateFromGLTexture(ocl->context, CL_MEM_WRITE_ONLY,
+													  GL_TEXTURE_2D, 0, ocl->gl_ui_texture, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating CL image from GL texture for UI: %d\n", err);
 		return 0;
 	}
 
@@ -4340,14 +4367,6 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 												 triangles->count * sizeof(int), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating valid triangles buffer: %d\n", err);
-		return 0;
-	}
-
-	// Screen Buffer for UI
-	ocl->buffer_screen_ui = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-											ScreenWidth * ScreenHeight * 4 * sizeof(float), NULL, &err);
-	if (err != CL_SUCCESS) {
-		printf("Error creating screen UI buffer: %d\n", err);
 		return 0;
 	}
 
@@ -4582,11 +4601,14 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	snprintf(text, sizeof(text), "Render Mode: %s", renderModesName[camera->renderMode]);
 	addTextOpenCL(ocl, font, text, 5, 5, white);
 
-	// render text on screen
-	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime);
-
-	// *** GPU Timings Kernel ***
-	renderGPUTimings(ocl, gpuTimings);
+#define renderUI_Separately 1
+#if renderUI_Separately == 1
+	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime, &ocl->cl_ui_texture_buffer);
+	renderGPUTimings(ocl, gpuTimings, &ocl->cl_ui_texture_buffer);
+#else
+	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime, NULL);
+	renderGPUTimings(ocl, gpuTimings, NULL);
+#endif
 
 	// === PARTICLE PROJECTION (keeping your existing particle rendering) ===
 	cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
@@ -4737,6 +4759,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	cl_int mode = 0; // 0 = 3x float, 1 = 4x float, 2 = 1x float
 
+	// TODO : render in UI buffer
 	switch (camera->renderMode) {
 	case renderDistance:
 		mode = 2;
@@ -4767,7 +4790,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
 		break;
 	case RENDER_MODE_COUNT:
-		// This should never happen - RENDER_MODE_COUNT is not a valid render mode
 		mode = 0;
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
 		break;
