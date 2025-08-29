@@ -24,14 +24,14 @@ void *SharedMem = NULL;
 
 #define chartPosY 480 // Y position on screen for timing chart
 #define chartPosX 700 // X position on screen for timing chart
-#define MAX_TEXT_LENGTH 512
+#define MAX_TEXT_LENGTH 2048
 // temporary buffer for saving text
 char text[MAX_TEXT_LENGTH];
 // Buffers for all text rendered on screen
-uint32_t textColor[MAX_TEXT_LENGTH * 4];
-int posX[MAX_TEXT_LENGTH * 4];
-int posY[MAX_TEXT_LENGTH * 4];
-char textBuffer[MAX_TEXT_LENGTH * 4];
+uint32_t textColor[MAX_TEXT_LENGTH];
+int posX[MAX_TEXT_LENGTH];
+int posY[MAX_TEXT_LENGTH];
+char textBuffer[MAX_TEXT_LENGTH];
 int textBufferLen = 0;
 #define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
 #define NUM_PARTICLES 50000
@@ -333,6 +333,12 @@ struct OpenCLContext {
 	cl_mem buffer_triangle_roughness;
 	cl_mem buffer_triangle_metallic;
 	cl_mem buffer_triangle_emission;
+
+	// font buffers
+	cl_mem buffer_text_posX;
+	cl_mem buffer_text_posY;
+	cl_mem buffer_text_chars;
+	cl_mem buffer_text_color;
 
 	// skybox buffers
 	cl_mem buffer_skybox_top;
@@ -3432,15 +3438,34 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
 	cl_int err;
 	cl_event kernel_event; // Add event for profiling
 
-	// Create temporary buffers for this text rendering
-	cl_mem buffer_posX = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-										textBufferLen * sizeof(int), posX, &err);
-	cl_mem buffer_posY = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-										textBufferLen * sizeof(int), posY, &err);
-	cl_mem buffer_text = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-										textBufferLen * sizeof(char), textBuffer, &err);
-	cl_mem buffer_color = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-										 textBufferLen * sizeof(uint32_t), textColor, &err);
+	// update staging buffers
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_text_posX, CL_TRUE, 0,
+							   textBufferLen * sizeof(int), posX, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing posX: %d\n", err);
+		return;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_text_posY, CL_TRUE, 0,
+							   textBufferLen * sizeof(int), posY, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing posY: %d\n", err);
+		return;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_text_chars, CL_TRUE, 0,
+							   textBufferLen * sizeof(char), textBuffer, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing chars: %d\n", err);
+		return;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_text_color, CL_TRUE, 0,
+							   textBufferLen * sizeof(uint32_t), textColor, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing color: %d\n", err);
+		return;
+	}
 
 	if (err != CL_SUCCESS) {
 		printf("Error creating text rendering buffers: %d\n", err);
@@ -3471,17 +3496,14 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
 	err |= clSetKernelArg(ocl->renderText_kernel, 5, sizeof(cl_mem), &ocl->buffer_font_data);
 	err |= clSetKernelArg(ocl->renderText_kernel, 6, sizeof(cl_int), &screenWidth);
 	err |= clSetKernelArg(ocl->renderText_kernel, 7, sizeof(cl_int), &screenHeight);
-	err |= clSetKernelArg(ocl->renderText_kernel, 8, sizeof(cl_mem), &buffer_posX);
-	err |= clSetKernelArg(ocl->renderText_kernel, 9, sizeof(cl_mem), &buffer_posY);
-	err |= clSetKernelArg(ocl->renderText_kernel, 10, sizeof(cl_mem), &buffer_text);
-	err |= clSetKernelArg(ocl->renderText_kernel, 11, sizeof(cl_mem), &buffer_color);
+	err |= clSetKernelArg(ocl->renderText_kernel, 8, sizeof(cl_mem), &ocl->buffer_text_posX);
+	err |= clSetKernelArg(ocl->renderText_kernel, 9, sizeof(cl_mem), &ocl->buffer_text_posY);
+	err |= clSetKernelArg(ocl->renderText_kernel, 10, sizeof(cl_mem), &ocl->buffer_text_chars);
+	err |= clSetKernelArg(ocl->renderText_kernel, 11, sizeof(cl_mem), &ocl->buffer_text_color);
 	err |= clSetKernelArg(ocl->renderText_kernel, 12, sizeof(cl_int), &numChars);
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting RenderText kernel arguments: %d\n", err);
-		clReleaseMemObject(buffer_posX);
-		clReleaseMemObject(buffer_posY);
-		clReleaseMemObject(buffer_text);
 		if (gpuTimeMs) *gpuTimeMs = 0.0f;
 		return;
 	}
@@ -3515,11 +3537,6 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
 
 		clReleaseEvent(kernel_event);
 	}
-
-	// Cleanup
-	clReleaseMemObject(buffer_posX);
-	clReleaseMemObject(buffer_posY);
-	clReleaseMemObject(buffer_text);
 
 	// Reset text buffer length for next rendering
 	textBufferLen = 0;
@@ -4423,6 +4440,52 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	err = CL_SUCCESS;
+	// 1 int position per glyph, so only MAX_TEXT_LENGTH entries
+	ocl->buffer_text_posX = clCreateBuffer(
+		ocl->context,
+		CL_MEM_READ_ONLY,
+		MAX_TEXT_LENGTH * sizeof(int),
+		NULL,
+		&err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating text_posX buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->buffer_text_posY = clCreateBuffer(
+		ocl->context,
+		CL_MEM_READ_ONLY,
+		MAX_TEXT_LENGTH * sizeof(int),
+		NULL,
+		&err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating text_posY buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->buffer_text_chars = clCreateBuffer(
+		ocl->context,
+		CL_MEM_READ_ONLY,
+		MAX_TEXT_LENGTH * sizeof(char),
+		NULL,
+		&err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating text_chars buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->buffer_text_color = clCreateBuffer(
+		ocl->context,
+		CL_MEM_READ_ONLY,
+		MAX_TEXT_LENGTH * sizeof(uint32_t),
+		NULL,
+		&err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating text_color buffer: %d\n", err);
+		return 0;
+	}
+
 	// Initialize skybox buffers
 	if (!initializeSkyboxBuffers(ocl, skyBox)) {
 		printf("Failed to initialize skybox buffers during OpenCL init\n");
@@ -4744,6 +4807,43 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	if (err != CL_SUCCESS) {
 		printf("Error executing normals kernel: %d\n", err);
 	}
+
+	//  === COPY UI TO OPENGL UI TEXTURE ===
+
+#if renderUI_Separately == 1
+	// Acquire UI texture
+	err = clEnqueueAcquireGLObjects(ocl->queue, 1, &ocl->cl_ui_texture_buffer, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error acquiring UI GL texture: %d\n", err);
+		return;
+	}
+
+	// Copy UI buffer to OpenGL UI texture
+	err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 1, sizeof(cl_mem), &ocl->cl_ui_texture_buffer);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 2, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 3, sizeof(cl_int), &screen_height);
+	cl_int mode_ui = 1; // 1 = 4x float for UI
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 4, sizeof(cl_int), &mode_ui);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting copyToTexture kernel args for UI: %d\n", err);
+	}
+
+	size_t ui_global_size[2] = {ScreenWidth, ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->copyToTexture_kernel, 2, NULL,
+								 ui_global_size, NULL, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error executing copyToTexture kernel for UI: %d\n", err);
+	}
+
+	err = clEnqueueReleaseGLObjects(ocl->queue, 1, &ocl->cl_ui_texture_buffer, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error releasing UI GL texture: %d\n", err);
+		return;
+	}
+	clFinish(ocl->queue);
+#endif
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
 
@@ -5742,14 +5842,10 @@ int main() {
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
 		timePartition->renderTime += dt1;
 
-		// === DISPLAY THE OPENGL TEXTURE ===
+		// === DISPLAY THE MAIN SCENE ===
 		glClear(GL_COLOR_BUFFER_BIT);
-
-		// Use the texture (simple fullscreen quad)
 		glEnable(GL_TEXTURE_2D);
 		glBindTexture(GL_TEXTURE_2D, ocl.gl_texture);
-
-		// Draw fullscreen quad using legacy immediate mode for simplicity
 		glBegin(GL_QUADS);
 		glTexCoord2f(0.0f, 1.0f);
 		glVertex2f(-1.0f, -1.0f);
@@ -5760,9 +5856,29 @@ int main() {
 		glTexCoord2f(0.0f, 0.0f);
 		glVertex2f(-1.0f, 1.0f);
 		glEnd();
-
 		glBindTexture(GL_TEXTURE_2D, 0);
 		glDisable(GL_TEXTURE_2D);
+
+// === OVERLAY UI LAYER ===
+#if renderUI_Separately == 1
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glEnable(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, ocl.gl_ui_texture);
+		glBegin(GL_QUADS);
+		glTexCoord2f(0.0f, 1.0f);
+		glVertex2f(-1.0f, -1.0f);
+		glTexCoord2f(1.0f, 1.0f);
+		glVertex2f(1.0f, -1.0f);
+		glTexCoord2f(1.0f, 0.0f);
+		glVertex2f(1.0f, 1.0f);
+		glTexCoord2f(0.0f, 0.0f);
+		glVertex2f(-1.0f, 1.0f);
+		glEnd();
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glDisable(GL_BLEND);
+		glDisable(GL_TEXTURE_2D);
+#endif
 
 		// // Add 50% opacity triangle in the middle of screen
 		// glEnable(GL_BLEND);
