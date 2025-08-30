@@ -541,6 +541,48 @@ __kernel void renderText(
                ScreenColors, FontData, screenWidth, screenHeight, posXValue, posYValue, colorFloat);
 }
 
+__kernel void renderTextImage(
+    const int fontSizeX,
+    const int fontSizeY,
+    const int spriteSizeX,
+    const int spriteSizeY,
+    write_only image2d_t targetImage,
+    __global const char *FontData,
+    const int screenWidth,
+    const int screenHeight,
+    __global const int *posX,
+    __global const int *posY,
+    __global const char *character,
+    __global const uint  *color,
+    const int NumberOfCharacters
+) {
+    int gid = get_global_id(0);
+    if (gid >= NumberOfCharacters) return;
+
+    int x0 = posX[gid];
+    int y0 = posY[gid];
+    uint c  = color[gid];
+    float4 col = (float4)(
+       ((c>>16)&0xFF)/255.0f,
+       ((c>> 8)&0xFF)/255.0f,
+       ( c     &0xFF)/255.0f,
+       1.0f
+    );
+
+    // very simple 8×8 loop, you can inline your renderFont code here
+    for(int cy=0; cy<spriteSizeY; cy++){
+      for(int cx=0; cx<spriteSizeX; cx++){
+        char bit = FontData[( (character[gid]-32) * spriteSizeY + cy)*fontSizeX + ( (character[gid]-32)% (fontSizeX/spriteSizeX))*spriteSizeX + cx];
+        if (bit){
+          int2 coord = (int2)(x0+cx, y0+cy);
+          if (coord.x>=0 && coord.x<screenWidth &&
+              coord.y>=0 && coord.y<screenHeight)
+            write_imagef(targetImage, coord, col);
+        }
+      }
+    }
+}
+
 __kernel void gpuTimings(
     __global float *ScreenColors,
     const int screenWidth,

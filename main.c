@@ -49,7 +49,7 @@ int textBufferLen = 0;
 #define FrameCount 30
 #define NUM_THREADS 0
 #define USE_GPU 1
-#define NUMBER_OF_TRIANGLES 100000
+#define NUMBER_OF_TRIANGLES 10000
 #define NUMBER_OF_CUBES 100
 pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
@@ -66,6 +66,32 @@ pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3native.h>
 #include <CL/cl_gl.h>
+
+const char *clErrorString(cl_int err) {
+	switch (err) {
+	case CL_SUCCESS:
+		return "CL_SUCCESS";
+	case CL_INVALID_MEM_OBJECT:
+		return "CL_INVALID_MEM_OBJECT";
+	case CL_OUT_OF_RESOURCES:
+		return "CL_OUT_OF_RESOURCES";
+	case CL_INVALID_VALUE:
+		return "CL_INVALID_VALUE";
+	case CL_INVALID_DEVICE:
+		return "CL_INVALID_DEVICE";
+	default:
+		return "UNKNOWN_OPENCL_ERROR";
+	}
+}
+
+#define CHECK_CL(err, call)                             \
+	do {                                                \
+		if ((err) != CL_SUCCESS) {                      \
+			fprintf(stderr, "%s => %s (%d)\n",          \
+					(call), clErrorString(err), (err)); \
+			exit(1);                                    \
+		}                                               \
+	} while (0)
 
 struct KeyState {
 	bool keys[GLFW_KEY_LAST + 1];	  // Array to store state of all keys
@@ -672,19 +698,33 @@ void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct
 	cl_int skybox_height = skyBox->top->height;
 
 	err = clSetKernelArg(ocl->skybox_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	CHECK_CL(err, "clSetKernelArg skybox 0");
 	err |= clSetKernelArg(ocl->skybox_kernel, 1, sizeof(cl_float3), &cam_pos);
+	CHECK_CL(err, "clSetKernelArg skybox 1");
 	err |= clSetKernelArg(ocl->skybox_kernel, 2, sizeof(cl_float3), &cam_dir);
+	CHECK_CL(err, "clSetKernelArg skybox 2");
 	err |= clSetKernelArg(ocl->skybox_kernel, 3, sizeof(cl_float), &fov);
+	CHECK_CL(err, "clSetKernelArg skybox 3");
 	err |= clSetKernelArg(ocl->skybox_kernel, 4, sizeof(cl_int), &screen_width);
+	CHECK_CL(err, "clSetKernelArg skybox 4");
 	err |= clSetKernelArg(ocl->skybox_kernel, 5, sizeof(cl_int), &screen_height);
+	CHECK_CL(err, "clSetKernelArg skybox 5");
 	err |= clSetKernelArg(ocl->skybox_kernel, 6, sizeof(cl_mem), &ocl->buffer_skybox_top);
+	CHECK_CL(err, "clSetKernelArg skybox 6");
 	err |= clSetKernelArg(ocl->skybox_kernel, 7, sizeof(cl_mem), &ocl->buffer_skybox_bottom);
+	CHECK_CL(err, "clSetKernelArg skybox 7");
 	err |= clSetKernelArg(ocl->skybox_kernel, 8, sizeof(cl_mem), &ocl->buffer_skybox_left);
+	CHECK_CL(err, "clSetKernelArg skybox 8");
 	err |= clSetKernelArg(ocl->skybox_kernel, 9, sizeof(cl_mem), &ocl->buffer_skybox_right);
+	CHECK_CL(err, "clSetKernelArg skybox 9");
 	err |= clSetKernelArg(ocl->skybox_kernel, 10, sizeof(cl_mem), &ocl->buffer_skybox_front);
+	CHECK_CL(err, "clSetKernelArg skybox 10");
 	err |= clSetKernelArg(ocl->skybox_kernel, 11, sizeof(cl_mem), &ocl->buffer_skybox_back);
+	CHECK_CL(err, "clSetKernelArg skybox 11");
 	err |= clSetKernelArg(ocl->skybox_kernel, 12, sizeof(cl_int), &skybox_width);
+	CHECK_CL(err, "clSetKernelArg skybox 12");
 	err |= clSetKernelArg(ocl->skybox_kernel, 13, sizeof(cl_int), &skybox_height);
+	CHECK_CL(err, "clSetKernelArg skybox 13");
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting skybox kernel arguments: %d\n", err);
@@ -1001,24 +1041,41 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, 
 	cl_int screen_height = ScreenHeight;
 	if (renderBuffer == NULL) {
 		err |= clSetKernelArg(ocl->gpuTimings_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		CHECK_CL(err, "clSetKernelArg gpuTimings 0");
 	} else {
 		err |= clSetKernelArg(ocl->gpuTimings_kernel, 0, sizeof(cl_mem), renderBuffer);
+		CHECK_CL(err, "clSetKernelArg gpuTimings 0 (custom buffer)");
 	}
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 1, sizeof(cl_int), &screen_width);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 1");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 2, sizeof(cl_int), &screen_height);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 2");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 3, sizeof(cl_int), &chartWidth);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 3");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 4, sizeof(cl_int), &chartHeight);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 4");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 5, sizeof(cl_int), &chartPosXLocal);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 5");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 6, sizeof(cl_int), &chartPosYLocal);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 6");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 7, sizeof(cl_int), &paddingY);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 7");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 8, sizeof(cl_float), &gpuTimings->renderSkyBoxTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 8");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 9, sizeof(cl_float), &gpuTimings->renderTrianglesTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 9");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 10, sizeof(cl_float), &gpuTimings->applyReflectionsTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 10");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 11, sizeof(cl_float), &gpuTimings->applyBlurTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 11");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 12, sizeof(cl_float), &gpuTimings->readBackTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 12");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 13, sizeof(cl_float), &gpuTimings->renderTextTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 13");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 14, sizeof(cl_float), &gpuTimings->projectParticlesTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 14");
 	err |= clSetKernelArg(ocl->gpuTimings_kernel, 15, sizeof(cl_float), &maxTime);
+	CHECK_CL(err, "clSetKernelArg gpuTimings 15");
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting gpuTimings kernel arguments: %d\n", err);
@@ -3483,24 +3540,38 @@ void renderTextOpenCL(struct OpenCLContext *ocl, struct ImageFont *font, float *
 	cl_int numChars = textBufferLen;
 
 	err = clSetKernelArg(ocl->renderText_kernel, 0, sizeof(cl_int), &fontSizeX);
+	CHECK_CL(err, "clSetKernelArg fontSizeX");
 	err |= clSetKernelArg(ocl->renderText_kernel, 1, sizeof(cl_int), &fontSizeY);
+	CHECK_CL(err, "clSetKernelArg fontSizeY");
 	err |= clSetKernelArg(ocl->renderText_kernel, 2, sizeof(cl_int), &spriteSizeX);
+	CHECK_CL(err, "clSetKernelArg spriteSizeX");
 	err |= clSetKernelArg(ocl->renderText_kernel, 3, sizeof(cl_int), &spriteSizeY);
+	CHECK_CL(err, "clSetKernelArg spriteSizeY");
 
 	if (renderBuffer == NULL) {
 		err |= clSetKernelArg(ocl->renderText_kernel, 4, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		CHECK_CL(err, "clSetKernelArg screen colors");
 	} else {
 		err |= clSetKernelArg(ocl->renderText_kernel, 4, sizeof(cl_mem), renderBuffer);
+		CHECK_CL(err, "clSetKernelArg custom render buffer");
 	}
 
 	err |= clSetKernelArg(ocl->renderText_kernel, 5, sizeof(cl_mem), &ocl->buffer_font_data);
+	CHECK_CL(err, "clSetKernelArg font data");
 	err |= clSetKernelArg(ocl->renderText_kernel, 6, sizeof(cl_int), &screenWidth);
+	CHECK_CL(err, "clSetKernelArg screenWidth");
 	err |= clSetKernelArg(ocl->renderText_kernel, 7, sizeof(cl_int), &screenHeight);
+	CHECK_CL(err, "clSetKernelArg screenHeight");
 	err |= clSetKernelArg(ocl->renderText_kernel, 8, sizeof(cl_mem), &ocl->buffer_text_posX);
+	CHECK_CL(err, "clSetKernelArg text posX");
 	err |= clSetKernelArg(ocl->renderText_kernel, 9, sizeof(cl_mem), &ocl->buffer_text_posY);
+	CHECK_CL(err, "clSetKernelArg text posY");
 	err |= clSetKernelArg(ocl->renderText_kernel, 10, sizeof(cl_mem), &ocl->buffer_text_chars);
+	CHECK_CL(err, "clSetKernelArg text chars");
 	err |= clSetKernelArg(ocl->renderText_kernel, 11, sizeof(cl_mem), &ocl->buffer_text_color);
+	CHECK_CL(err, "clSetKernelArg text color");
 	err |= clSetKernelArg(ocl->renderText_kernel, 12, sizeof(cl_int), &numChars);
+	CHECK_CL(err, "clSetKernelArg numChars");
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting RenderText kernel arguments: %d\n", err);
@@ -4441,46 +4512,29 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	err = CL_SUCCESS;
-	// 1 int position per glyph, so only MAX_TEXT_LENGTH entries
-	ocl->buffer_text_posX = clCreateBuffer(
-		ocl->context,
-		CL_MEM_READ_ONLY,
-		MAX_TEXT_LENGTH * sizeof(int),
-		NULL,
-		&err);
+	ocl->buffer_text_posX = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+										   MAX_TEXT_LENGTH * sizeof(int), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating text_posX buffer: %d\n", err);
 		return 0;
 	}
 
-	ocl->buffer_text_posY = clCreateBuffer(
-		ocl->context,
-		CL_MEM_READ_ONLY,
-		MAX_TEXT_LENGTH * sizeof(int),
-		NULL,
-		&err);
+	ocl->buffer_text_posY = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+										   MAX_TEXT_LENGTH * sizeof(int), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating text_posY buffer: %d\n", err);
 		return 0;
 	}
 
-	ocl->buffer_text_chars = clCreateBuffer(
-		ocl->context,
-		CL_MEM_READ_ONLY,
-		MAX_TEXT_LENGTH * sizeof(char),
-		NULL,
-		&err);
+	ocl->buffer_text_chars = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											MAX_TEXT_LENGTH * sizeof(char), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating text_chars buffer: %d\n", err);
 		return 0;
 	}
 
-	ocl->buffer_text_color = clCreateBuffer(
-		ocl->context,
-		CL_MEM_READ_ONLY,
-		MAX_TEXT_LENGTH * sizeof(uint32_t),
-		NULL,
-		&err);
+	ocl->buffer_text_color = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											MAX_TEXT_LENGTH * sizeof(uint32_t), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating text_color buffer: %d\n", err);
 		return 0;
