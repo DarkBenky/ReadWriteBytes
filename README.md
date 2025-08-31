@@ -22,40 +22,12 @@ This experiment tests the performance of writing and reading frame data as binar
 ## Conclusion
 The results show that writing frames is faster than reading them, with write operations capable of handling ~442 FPS while read operations can handle ~269 FPS. This suggests that the system could theoretically handle real-time frame processing for applications requiring up to 60 FPS.
 
+### 3. UI Overlay
+- Render text & charts into a temp buffer  
+- Copy buffer → GL texture → screen overlay  
+  
 ## TODO
-
-- [ ] initialize infrastructure for ***renderTextImage**
-  - [ ] do not do it just do it in temp buffer and copy it to texture
-    - [ ] add generic fuction to copy data from buffer to texture
-- [ ] WTF
-  - [ ] Reading BVH: 6519 nodes, 3260 triangles
-BVH loaded successfully: 6519 nodes, 3260 triangles
-BVH loaded with 6519 nodes and 3260 triangles
-Loading font: 128x112 pixels
-Font loaded successfully: 14336 pixels
-SkyBox loaded successfully
-Triangles count after reading: 0
-Triangles written to parseObj/triangles.bin successfully
-File size: 247768 bytes
-Triangle count: 3260
-Skybox buffers initialized successfully
-Uploading triangle data once: 3260 triangles
-Triangle data uploaded successfully
-OpenCL-GL interop initialized successfully
-***Error setting RenderText kernel arguments: -38***
-***Error setting gpuTimings kernel arguments: -38***
-Saved normals (shared mem) in 2.368 ms
-Saved colors (shared mem) in 2.063 ms
-FPS: 10.51, TPS: 2.70, Update: 0.00 s, Render: 0.09 s
-***Error writing points buffer: -5***
-***Error writing velocities buffer: -5***
-***Error writing posX: -5***
-***Error setting gpuTimings kernel arguments: -38***
-- [ ] Add UI to each render mode
-  - [X] Initialize Buffers
-  - [ ] render ui in separate buffer as overlay
-    - [ ] render mode into UI buffer
-    - [X] Modify text and graph rendering functions to accept optional render buffer parameter (defaults to screen color buffer if not specified)
+- [ ] Add timing for rendering of UI
 - [ ] Fix wire frame ghosting ![img](wireFrame.png)
 - [ ] render all in open gl remove memory sharing with go code
 - [ ] Fix C reading and writing of BVH / open CL code
@@ -102,6 +74,38 @@ FPS: 10.51, TPS: 2.70, Update: 0.00 s, Render: 0.09 s
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] Add UI to each render mode
+  - [X] Initialize Buffers
+  - [X] render ui in separate buffer as overlay
+    - [X] render mode into UI buffer
+    - [X] Modify text and graph rendering functions to accept optional render buffer parameter (defaults to screen color buffer if not specified)
+- [X] initialize infrastructure for ***renderTextImage**
+  - [X] do not do it just do it in temp buffer and copy it to texture
+    - [X] add generic fuction to copy data from buffer to texture
+- [X] WTF
+  - [X] Reading BVH: 6519 nodes, 3260 triangles
+BVH loaded successfully: 6519 nodes, 3260 triangles
+BVH loaded with 6519 nodes and 3260 triangles
+Loading font: 128x112 pixels
+Font loaded successfully: 14336 pixels
+SkyBox loaded successfully
+Triangles count after reading: 0
+Triangles written to parseObj/triangles.bin successfully
+File size: 247768 bytes
+Triangle count: 3260
+Skybox buffers initialized successfully
+Uploading triangle data once: 3260 triangles
+Triangle data uploaded successfully
+OpenCL-GL interop initialized successfully
+***Error setting RenderText kernel arguments: -38***
+***Error setting gpuTimings kernel arguments: -38***
+Saved normals (shared mem) in 2.368 ms
+Saved colors (shared mem) in 2.063 ms
+FPS: 10.51, TPS: 2.70, Update: 0.00 s, Render: 0.09 s
+***Error writing points buffer: -5***
+***Error writing velocities buffer: -5***
+***Error writing posX: -5***
+***Error setting gpuTimings kernel arguments: -38***
 - [X] Init Open Gl
   - [X] Example Code
   ```c

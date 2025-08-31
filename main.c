@@ -93,6 +93,8 @@ const char *clErrorString(cl_int err) {
 		}                                               \
 	} while (0)
 
+#define CL_ERROR(err, call) CHECK_CL(err, call)
+
 struct KeyState {
 	bool keys[GLFW_KEY_LAST + 1];	  // Array to store state of all keys
 	bool prevKeys[GLFW_KEY_LAST + 1]; // Previous frame state for detecting press/release
@@ -331,6 +333,7 @@ struct OpenCLContext {
 	GLuint gl_ui_texture;	  // OpenGL texture ID for UI
 	cl_mem cl_texture_buffer; // OpenCL image object from GL texture
 	cl_mem cl_ui_texture_buffer;
+	cl_mem cl_ui_texture_buffer_temp; // Temporary buffer for UI texture
 
 	// rayTracing buffers
 	cl_mem buffer_bvh_nodes;
@@ -4279,6 +4282,14 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	// Crete temporary buffer for rendering to screen before copying to texture
+	ocl->cl_ui_texture_buffer_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+													ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating screen colors buffer: %d\n", err);
+		return 0;
+	}
+
 	// Read kernel source
 	FILE *file = fopen("openGlShaders/screenCordinates.cl", "r");
 	if (!file) {
@@ -4720,8 +4731,21 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 #define renderUI_Separately 1
 #if renderUI_Separately == 1
-	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime, &ocl->cl_ui_texture_buffer);
-	renderGPUTimings(ocl, gpuTimings, &ocl->cl_ui_texture_buffer);
+	// clear temp buffer
+	err = clEnqueueFillBuffer(
+		ocl->queue,
+		ocl->cl_ui_texture_buffer_temp,
+		&zero,
+		sizeof(float), // <=16 and power of two
+		0,
+		ScreenWidth * ScreenHeight * 3 * sizeof(float),
+		0, NULL, NULL);
+	CL_ERROR(err, "Filling UI temp buffer");
+	clFinish(ocl->queue);
+
+	// use temp buffer for UI
+	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime, &ocl->cl_ui_texture_buffer_temp);
+	renderGPUTimings(ocl, gpuTimings, &ocl->cl_ui_texture_buffer_temp);
 #else
 	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime, NULL);
 	renderGPUTimings(ocl, gpuTimings, NULL);
@@ -4873,11 +4897,11 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	}
 
 	// Copy UI buffer to OpenGL UI texture
-	err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->cl_ui_texture_buffer_temp);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 1, sizeof(cl_mem), &ocl->cl_ui_texture_buffer);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 2, sizeof(cl_int), &screen_width);
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 3, sizeof(cl_int), &screen_height);
-	cl_int mode_ui = 1; // 1 = 4x float for UI
+	cl_int mode_ui = 0; // 1 = 4x float for UI
 	err |= clSetKernelArg(ocl->copyToTexture_kernel, 4, sizeof(cl_int), &mode_ui);
 
 	if (err != CL_SUCCESS) {
