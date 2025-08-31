@@ -29,6 +29,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 - [ ] Add timing for rendering of UI
 - [ ] Distance image normalization
+- [ ] Remove CPU read backs
 - [ ] Fix wire frame ghosting ![img](wireFrame.png)
 - [ ] render all in open gl remove memory sharing with go code
 - [ ] Fix C reading and writing of BVH / open CL code
