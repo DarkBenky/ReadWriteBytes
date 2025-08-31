@@ -25,6 +25,8 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 
 - [ ] initialize infrastructure for ***renderTextImage**
+  - [ ] do not do it just do it in temp buffer and copy it to texture
+    - [ ] add generic fuction to copy data from buffer to texture
 - [ ] WTF
   - [ ] Reading BVH: 6519 nodes, 3260 triangles
 BVH loaded successfully: 6519 nodes, 3260 triangles
