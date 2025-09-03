@@ -28,6 +28,10 @@ The results show that writing frames is faster than reading them, with write ope
   
 ## TODO
 - [ ] Add timing for rendering of UI
+- [ ] Move Physis to separate file
+  - [ ] improve collisions to do them in sub ticks
+  - [ ] apply pressure force from center of mass of the cell
+  - [ ] ***Optional*** move fluid sim to another thread
 - [ ] Distance image normalization
 - [ ] Remove CPU read backs
 - [ ] Fix wire frame ghosting ![img](wireFrame.png)
