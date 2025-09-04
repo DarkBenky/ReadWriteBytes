@@ -29,6 +29,7 @@ The results show that writing frames is faster than reading them, with write ope
 ## TODO
 - [ ] Add timing for rendering of UI
 - [ ] Move Physis to separate file
+  - [ ] Make test how fast it can be
   - [ ] improve collisions to do them in sub ticks
   - [ ] apply pressure force from center of mass of the cell
   - [ ] ***Optional*** move fluid sim to another thread
