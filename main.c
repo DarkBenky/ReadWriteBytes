@@ -33,19 +33,19 @@ int posX[MAX_TEXT_LENGTH];
 int posY[MAX_TEXT_LENGTH];
 char textBuffer[MAX_TEXT_LENGTH];
 int textBufferLen = 0;
-#define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
-#define NUM_PARTICLES 50000
-#define GRAVITY 10.0f
-#define DAMPING 0.985f
+#define RENDER_TRIAGES 1	// 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
+#define NUM_PARTICLES 50000 // MOVED TO particleSim.c
+#define GRAVITY 10.0f		// MOVED TO particleSim.c
+#define DAMPING 0.985f		// MOVED TO particleSim.c
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define SHM_NAME "/my_shared_mem"
 #define SIZE ScreenWidth *ScreenHeight * 4 * 2 // Color + Normal
 #define PARTICLE_RADIUS 4
-#define gridResolutionAxis 32
-#define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
-#define temperature 8.5f
-#define pressure temperature * 0.1f
+#define gridResolutionAxis 32														  // MOVED TO particleSim.c
+#define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis) // MOVED TO particleSim.c
+#define temperature 8.5f															  // MOVED TO particleSim.c
+#define pressure temperature * 0.1f													  // MOVED TO particleSim.c
 #define FrameCount 30
 #define NUM_THREADS 0
 #define USE_GPU 1
