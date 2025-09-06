@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
+#include <stdlib.h> // Added for malloc and free
 
 #define NUM_PARTICLES 50000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
-#define gridResolutionAxis 16
+#define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
 #define temperature 8.5f
 #define pressure temperature * 0.1f
@@ -338,3 +340,56 @@ void Step(struct PointSOA *particles, float deltaTime) {
 	ApplyPressure(particles);
 	CollideParticlesInGrid(particles);
 }
+
+// Example usage and performance measurement
+// clang -O3 particleSim.c -o sim -lm -march=native ; ./sim
+// int main() {
+// 	struct PointSOA *particles = malloc(sizeof(struct PointSOA));
+// 	if (particles == NULL) {
+// 		printf("Failed to allocate memory for particles.\n");
+// 		return 1;
+// 	}
+
+// 	// Initialize bounding box
+// 	particles->bBoxMin[0] = 0.0f;
+// 	particles->bBoxMin[1] = 0.0f;
+// 	particles->bBoxMin[2] = 0.0f;
+// 	particles->bBoxMax[0] = 100.0f;
+// 	particles->bBoxMax[1] = 100.0f;
+// 	particles->bBoxMax[2] = 100.0f;
+
+// 	// Initialize particles in a grid
+// 	int particlesPerAxis = (int)cbrtf(NUM_PARTICLES);
+// 	float spacing = (particles->bBoxMax[0] - particles->bBoxMin[0]) / particlesPerAxis;
+// 	int index = 0;
+// 	for (int x = 0; x < particlesPerAxis; x++) {
+// 		for (int y = 0; y < particlesPerAxis; y++) {
+// 			for (int z = 0; z < particlesPerAxis; z++) {
+// 				if (index >= NUM_PARTICLES) break;
+// 				particles->x[index] = particles->bBoxMin[0] + x * spacing + spacing * 0.5f;
+// 				particles->y[index] = particles->bBoxMin[1] + y * spacing + spacing * 0.5f;
+// 				particles->z[index] = particles->bBoxMin[2] + z * spacing + spacing * 0.5f;
+// 				particles->xVelocity[index] = 0.0f;
+// 				particles->yVelocity[index] = 0.0f;
+// 				particles->zVelocity[index] = 0.0f;
+// 				index++;
+// 			}
+// 		}
+// 	}
+
+// 	float deltaTime = 0.016f; // ~60 FPS
+
+// 	struct timespec start, end;
+// 	clock_gettime(CLOCK_MONOTONIC, &start);
+// 	for (int frame = 0; frame < 100; frame++) {
+// 		Step(particles, deltaTime);
+// 	}
+// 	clock_gettime(CLOCK_MONOTONIC, &end);
+// 	double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+//     printf("Simulated 100 frames in %.3f seconds\n", elapsed);
+//     printf("Average time per frame: %.3f ms\n", (elapsed / 100.0) * 1000.0);
+//     printf("Average TPS: %.2f\n", 100.0 / elapsed);
+
+// 	free(particles); // Free the allocated memory
+// 	return 0;
+// }
