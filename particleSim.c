@@ -1,15 +1,15 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
-#include <time.h>
-#include <stdlib.h> // Added for malloc and free
-
-#define NUM_PARTICLES 50000
-#define GRAVITY 10.0f
-#define DAMPING 0.985f
+// #include <time.h>
+// #include <stdlib.h> // Added for malloc and free
+#define DEBUG 1
+#define NUM_PARTICLES 20000
+#define GRAVITY 300.0f
+#define DAMPING 0.95f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
-#define temperature 8.5f
+#define temperature 10.0f
 #define pressure temperature * 0.1f
 #define PARTICLE_RADIUS 4
 
@@ -28,6 +28,9 @@ struct PointSOA {
 	float gridParticleAvgPos[gridResolution][3];
 	float gridCellGradientPressure[gridResolution][3];
 	float gridCellBlurredGradientPressure[gridResolution][3];
+#ifdef DEBUG
+	float totalEnergy; // Total kinetic energy of the system
+#endif
 };
 
 void updateGridData(struct PointSOA *particles) {
@@ -128,6 +131,9 @@ void CalculatePressureGradient(struct PointSOA *particles) {
 		int xIndex = gridCellId % gridResolutionAxis;
 
 		float currentCellPressure = cellParticleCount * pressure;
+		float currentCellAvgPosX = particles->gridParticleAvgPos[gridCellId][0];
+		float currentCellAvgPosY = particles->gridParticleAvgPos[gridCellId][1];
+		float currentCellAvgPosZ = particles->gridParticleAvgPos[gridCellId][2];
 		float gradient[3] = {0.0f, 0.0f, 0.0f};
 
 		for (int n = 0; n < 6; n++) {
@@ -147,12 +153,17 @@ void CalculatePressureGradient(struct PointSOA *particles) {
 
 			// Use zero pressure for empty cells instead of skipping
 			float neighborCellPressure = neighborParticleCount * pressure;
-			float pressureDiff = currentCellPressure - neighborCellPressure;
+			float pressureDiff = neighborCellPressure - currentCellPressure;
 
-			// Direction vectors are already unit length, no need to normalize
-			gradient[0] += pressureDiff * neighbors[n][0];
-			gradient[1] += pressureDiff * neighbors[n][1];
-			gradient[2] += pressureDiff * neighbors[n][2];
+			// float dx = particles->gridParticleAvgPos[neighborGridID][0] - currentCellAvgPosX;
+			// float dy = particles->gridParticleAvgPos[neighborGridID][1] - currentCellAvgPosY;
+			// float dz = particles->gridParticleAvgPos[neighborGridID][2] - currentCellAvgPosZ;
+			float dx = (neighborX - xIndex) * ((particles->bBoxMax[0] - particles->bBoxMin[0]) / gridResolutionAxis);
+			float dy = (neighborY - yIndex) * ((particles->bBoxMax[1] - particles->bBoxMin[1]) / gridResolutionAxis);
+			float dz = (neighborZ - zIndex) * ((particles->bBoxMax[2] - particles->bBoxMin[2]) / gridResolutionAxis);
+			gradient[0] += pressureDiff * dx;
+			gradient[1] += pressureDiff * dy;
+			gradient[2] += pressureDiff * dz;
 		}
 
 		// Store the computed gradient
@@ -214,27 +225,27 @@ void UpdateParticles(struct PointSOA *particles, float deltaTime) {
 		// Boundary constraints
 		if (particles->x[i] < particles->bBoxMin[0]) {
 			particles->x[i] = particles->bBoxMin[0];
-			particles->xVelocity[i] *= -0.5f; // Bounce with energy loss
+			particles->xVelocity[i] *= -DAMPING; // Bounce with energy loss
 		}
 		if (particles->x[i] > particles->bBoxMax[0]) {
 			particles->x[i] = particles->bBoxMax[0];
-			particles->xVelocity[i] *= -0.5f;
+			particles->xVelocity[i] *= -DAMPING;
 		}
 		if (particles->y[i] < particles->bBoxMin[1]) {
 			particles->y[i] = particles->bBoxMin[1];
-			particles->yVelocity[i] *= -0.5f;
+			particles->yVelocity[i] *= -DAMPING;
 		}
 		if (particles->y[i] > particles->bBoxMax[1]) {
 			particles->y[i] = particles->bBoxMax[1];
-			particles->yVelocity[i] *= -0.5f;
+			particles->yVelocity[i] *= -DAMPING;
 		}
 		if (particles->z[i] < particles->bBoxMin[2]) {
 			particles->z[i] = particles->bBoxMin[2];
-			particles->zVelocity[i] *= -0.5f;
+			particles->zVelocity[i] *= -DAMPING;
 		}
 		if (particles->z[i] > particles->bBoxMax[2]) {
 			particles->z[i] = particles->bBoxMax[2];
-			particles->zVelocity[i] *= -0.5f;
+			particles->zVelocity[i] *= -DAMPING;
 		}
 
 		// Apply damping
@@ -263,9 +274,9 @@ void ApplyPressure(struct PointSOA *particles) {
 		for (int p = 0; p < cellParticleCount; p++) {
 			int particleIndex = particles->gridParticleID[gridCellId][p];
 			// Apply pressure force to particle velocity
-			particles->xVelocity[particleIndex] -= gradientX * 0.1f; // Scaled down for stability
-			particles->yVelocity[particleIndex] -= gradientY * 0.1f;
-			particles->zVelocity[particleIndex] -= gradientZ * 0.1f;
+			particles->xVelocity[particleIndex] -= gradientX * 0.01f; // Scaled down for stability
+			particles->yVelocity[particleIndex] -= gradientY * 0.01f;
+			particles->zVelocity[particleIndex] -= gradientZ * 0.01f;
 		}
 	}
 }
@@ -322,12 +333,12 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
 					impulse /= 2.0f; // Assuming equal mass
 
 					// Apply impulse to particle velocities
-					particles->xVelocity[indexA] -= impulse * nx;
-					particles->yVelocity[indexA] -= impulse * ny;
-					particles->zVelocity[indexA] -= impulse * nz;
-					particles->xVelocity[indexB] += impulse * nx;
-					particles->yVelocity[indexB] += impulse * ny;
-					particles->zVelocity[indexB] += impulse * nz;
+					particles->xVelocity[indexA] -= impulse * nx * DAMPING;
+					particles->yVelocity[indexA] -= impulse * ny * DAMPING;
+					particles->zVelocity[indexA] -= impulse * nz * DAMPING;
+					particles->xVelocity[indexB] += impulse * nx * DAMPING;
+					particles->yVelocity[indexB] += impulse * ny * DAMPING;
+					particles->zVelocity[indexB] += impulse * nz * DAMPING;
 				}
 			}
 		}
@@ -335,10 +346,25 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
 }
 
 void Step(struct PointSOA *particles, float deltaTime) {
-	UpdateParticles(particles, deltaTime);
-	updateGridData(particles);
-	ApplyPressure(particles);
-	CollideParticlesInGrid(particles);
+	const int subSteps = 4;
+	float subDeltaTime = deltaTime / subSteps;
+
+	for (int step = 0; step < subSteps; step++) {
+		updateGridData(particles);
+		ApplyPressure(particles);
+		CollideParticlesInGrid(particles);
+		UpdateParticles(particles, subDeltaTime);
+	}
+#ifdef DEBUG
+	// Print Total Energy in the system for debugging
+	float totalEnergy = 0.0f;
+	for (int i = 0; i < NUM_PARTICLES; i++) {
+		totalEnergy += (particles->xVelocity[i] * particles->xVelocity[i] +
+						particles->yVelocity[i] * particles->yVelocity[i] +
+						particles->zVelocity[i] * particles->zVelocity[i]);
+	}
+	particles->totalEnergy = totalEnergy; // Kinetic energy
+#endif
 }
 
 // Example usage and performance measurement

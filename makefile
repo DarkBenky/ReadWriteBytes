@@ -4,8 +4,8 @@ LDFLAGS = -lm -lOpenCL -ljpeg -lglfw -lGL -g
 
 all: main
 
-main: main.c tinyobj_loader_c.h
-	$(CC) $(CFLAGS) main.c -o main $(LDFLAGS)
+main: main.c particleSim.c tinyobj_loader_c.h particleSim.h
+	$(CC) $(CFLAGS) main.c particleSim.c -o main $(LDFLAGS)
 
 clean:
 	rm -f main

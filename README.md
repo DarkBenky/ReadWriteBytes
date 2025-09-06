@@ -27,7 +27,10 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO
+
+- [ ] Draw Bounding Box Around the particles
 - [ ] Add timing for rendering of UI
+- [ ] Add timings for simulations
 - [ ] Move Physis to separate file
   - [ ] Make test how fast it can be
   - [ ] improve collisions to do them in sub ticks

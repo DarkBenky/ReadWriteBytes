@@ -7,7 +7,7 @@
 #include <time.h>
 #include <stdlib.h>
 
-#define NUM_PARTICLES 50000
+#define NUM_PARTICLES 20000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define gridResolutionAxis 32
@@ -15,6 +15,7 @@
 #define temperature 8.5f
 #define pressure temperature * 0.1f
 #define PARTICLE_RADIUS 4
+#define DEBUG 1
 
 struct PointSOA {
     float x[NUM_PARTICLES];
@@ -31,6 +32,9 @@ struct PointSOA {
     float gridParticleAvgPos[gridResolution][3];
     float gridCellGradientPressure[gridResolution][3];
     float gridCellBlurredGradientPressure[gridResolution][3];
+#ifdef DEBUG
+    float totalEnergy; // Total kinetic energy of the system
+#endif
 };
 
 
