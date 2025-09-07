@@ -33,7 +33,7 @@ int posX[MAX_TEXT_LENGTH];
 int posY[MAX_TEXT_LENGTH];
 char textBuffer[MAX_TEXT_LENGTH];
 int textBufferLen = 0;
-#define RENDER_TRIAGES 1	// 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
+#define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
 #define ScreenWidth 800
 #define ScreenHeight 600
 #define SHM_NAME "/my_shared_mem"
@@ -48,6 +48,7 @@ pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
 #define MoveMultiplier 1.25f
 #define MouseSensitivity 0.25f
+#define MAX_BLUR_PASSES 1
 #include <GLFW/glfw3native.h>
 #include <CL/cl_gl.h>
 
@@ -1304,7 +1305,6 @@ void update_particles(struct PointSOA *particles, float dt, struct TimePartition
 	dt_ = (float)(applyPressureTime - collideParticlesTime) / (float)CLOCKS_PER_SEC;
 	timePartition->applyPressureTime += dt_;
 	// printf("Apply pressure time: %f\n", dt_);
-
 
 	clock_t updateParticlesTime = clock();
 	dt_ = (float)(updateParticlesTime - applyPressureTime) / (float)CLOCKS_PER_SEC;
@@ -2640,16 +2640,16 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	snprintf(text, sizeof(text), "Render Mode: %s", renderModesName[camera->renderMode]);
 	addTextOpenCL(ocl, font, text, 5, 5, white);
 
-	#ifdef DEBUG
-		snprintf(text, sizeof(text), "Cam Pos: %.1f %.1f %.1f", camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]);
-		addTextOpenCL(ocl, font, text, 5, 20, white);
-		snprintf(text, sizeof(text), "Cam Dir: %.2f %.2f %.2f", camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]);
-		addTextOpenCL(ocl, font, text, 5, 35, white);
-		snprintf(text, sizeof(text), "Cam FOV: %.1f", camera->fov);
-		addTextOpenCL(ocl, font, text, 5, 50, white);
-		snprintf(text, sizeof(text), "Total Energy: %.1f", particles->totalEnergy);
-		addTextOpenCL(ocl, font, text, 5, 65, white);
-	#endif
+#ifdef DEBUG
+	snprintf(text, sizeof(text), "Cam Pos: %.1f %.1f %.1f", camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]);
+	addTextOpenCL(ocl, font, text, 5, 20, white);
+	snprintf(text, sizeof(text), "Cam Dir: %.2f %.2f %.2f", camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]);
+	addTextOpenCL(ocl, font, text, 5, 35, white);
+	snprintf(text, sizeof(text), "Cam FOV: %.1f", camera->fov);
+	addTextOpenCL(ocl, font, text, 5, 50, white);
+	snprintf(text, sizeof(text), "Total Energy: %.1f", particles->totalEnergy);
+	addTextOpenCL(ocl, font, text, 5, 65, white);
+#endif
 
 #define renderUI_Separately 1
 #if renderUI_Separately == 1
@@ -2683,6 +2683,18 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	cl_int num_points = NUM_PARTICLES;
 	cl_int particle_radius = PARTICLE_RADIUS * 100.0f;
 
+	// calculate max particle velocity for normalization
+	float max_velocity = 0.0f;
+	for (int i = 0; i < NUM_PARTICLES; i++) {
+		float vx = particles->xVelocity[i];
+		float vy = particles->yVelocity[i];
+		float vz = particles->zVelocity[i];
+		float speed = vx * vx + vy * vy + vz * vz;
+		if (speed > max_velocity) {
+			max_velocity = speed;
+		}
+	}
+
 	err = clSetKernelArg(ocl->kernel, 0, sizeof(cl_mem), &ocl->buffer_points);
 	err |= clSetKernelArg(ocl->kernel, 1, sizeof(cl_mem), &ocl->buffer_velocities);
 	err |= clSetKernelArg(ocl->kernel, 2, sizeof(cl_mem), &ocl->buffer_distances);
@@ -2697,6 +2709,9 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	err |= clSetKernelArg(ocl->kernel, 11, sizeof(cl_int), &screen_height);
 	err |= clSetKernelArg(ocl->kernel, 12, sizeof(cl_int), &num_points);
 	err |= clSetKernelArg(ocl->kernel, 13, sizeof(cl_int), &particle_radius);
+	err |= clSetKernelArg(ocl->kernel, 14, sizeof(cl_float), &max_velocity);
+
+	// TODO: Distance normalization will be applied later after rendering of triangles and other staff
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting particle kernel arguments: %d\n", err);
@@ -2727,9 +2742,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	cl_int blur_kernel_size = 2;
 	cl_float blur_sigma_range = 15.0f;
 	cl_float blur_sigma_spatial = 2.5f;
-	int blur_passes = 1;
+	int blur_passes = MAX_BLUR_PASSES;
 
-#define MAX_BLUR_PASSES 1
 	cl_event blur_events[MAX_BLUR_PASSES];
 	int event_count = 0;
 
@@ -2859,7 +2873,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	cl_int mode = 0; // 0 = 3x float, 1 = 4x float, 2 = 1x float
 
-	// TODO : render in UI buffer
 	switch (camera->renderMode) {
 	case renderDistance:
 		mode = 2;
@@ -3551,7 +3564,6 @@ int main() {
 		perror("Failed to allocate memory for particles");
 		return 1;
 	}
-
 
 	struct Screen *screen = (struct Screen *)malloc(sizeof(struct Screen));
 	if (!screen) {

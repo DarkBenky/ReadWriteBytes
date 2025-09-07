@@ -28,15 +28,13 @@ The results show that writing frames is faster than reading them, with write ope
   
 ## TODO
 
+- [ ] Distance image normalization
+  - [ ] Particle Sim
+  - [ ] Triangles
+  - [ ] *Note* save real values then before uploading image to Open GL normalize it
 - [ ] Draw Bounding Box Around the particles
 - [ ] Add timing for rendering of UI
 - [ ] Add timings for simulations
-- [ ] Move Physis to separate file
-  - [ ] Make test how fast it can be
-  - [ ] improve collisions to do them in sub ticks
-  - [ ] apply pressure force from center of mass of the cell
-  - [ ] ***Optional*** move fluid sim to another thread
-- [ ] Distance image normalization
 - [ ] Remove CPU read backs
 - [ ] Fix wire frame ghosting ![img](wireFrame.png)
 - [ ] render all in open gl remove memory sharing with go code
@@ -84,6 +82,36 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] Velocity normalization Particles
+- [X] Move Physis to separate file
+  - [X] Make test how fast it can be
+    - **Run 15000 particles**
+        Simulated 100 frames in 0.441 seconds
+        Average time per frame: 4.414 ms
+        Average TPS: 226.56
+        Number of particles: 15000
+        Average particle simulation time: 0.294 microseconds
+    - **Run 25000 particles**
+        Simulated 100 frames in 0.592 seconds
+        Average time per frame: 5.921 ms
+        Average TPS: 168.90
+        Number of particles: 25000
+        Average particle simulation time: 0.237 microseconds
+    - **Run 50000 particles**
+        Simulated 100 frames in 1.053 seconds
+        Average time per frame: 10.528 ms
+        Average TPS: 94.98
+        Number of particles: 50000
+        Average particle simulation time: 0.211 microseconds
+    - **Run 100000 particles**
+        Simulated 100 frames in 2.093 seconds
+        Average time per frame: 20.926 ms
+        Average TPS: 47.79
+        Number of particles: 100000
+        Average particle simulation time: 0.209 microseconds
+  - [X] improve collisions to do them in sub ticks
+  - [X] apply pressure force from center of mass of the cell
+  - [ ] ***Optional*** move fluid sim to another thread
 - [X] Add UI to each render mode
   - [X] Initialize Buffers
   - [X] render ui in separate buffer as overlay

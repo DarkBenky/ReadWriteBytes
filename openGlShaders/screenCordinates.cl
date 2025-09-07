@@ -1216,7 +1216,6 @@ __kernel void blur_distances(
     }
 }
 
-
 // 1. Project particles to screen-space z-buffer (distances + velocities + basic opacity)
 __kernel void project_points_to_screen(
     __global const float* points,
@@ -1232,7 +1231,9 @@ __kernel void project_points_to_screen(
     const int screenWidth,
     const int screenHeight,
     const int numPoints,
-    const int ParticleRadius
+    const int ParticleRadius,
+    const float maxParticleVelocity
+    // const float maxParticleDistance
 ) {
     int i = get_global_id(0);
     if (i >= numPoints) return;
@@ -1241,9 +1242,10 @@ __kernel void project_points_to_screen(
     float3 point = (float3)( points[3*i+0],
                              points[3*i+1],
                              points[3*i+2] );
-    float3 vel   = (float3)( velocities[3*i+0],
-                             velocities[3*i+1],
-                             velocities[3*i+2] );
+
+    // normalize velocity to 0,1 range based on maxParticleVelocity
+    float velNormalized =   (velocities[3*i+0] * velocities[3*i+0] + velocities[3*i+1] * velocities[3*i+1] + velocities[3*i+2] * velocities[3*i+2]) / maxParticleVelocity;
+                        
 
     // Compute camera basis
     float3 forward = normalize(camDir);
@@ -1317,7 +1319,7 @@ __kernel void project_points_to_screen(
             // Update ScreenDistances with spherical surface depth
             if (ScreenDistances[offsetIndex] == 0 || surfaceDistance < ScreenDistances[offsetIndex]) {
                 ScreenDistances[offsetIndex] = surfaceDistance;
-                ScreenVelocities[offsetIndex] = length(vel);
+                ScreenVelocities[offsetIndex] = velNormalized;
                  // your normal in local sphere‐space:
                 float nx = dx / (float)radiusInt;
                 float ny = dy / (float)radiusInt;
@@ -1333,12 +1335,9 @@ __kernel void project_points_to_screen(
 
             float maxFloat = 1000000.0f; // Arbitrary large value for opacity cap
 
-            // Screen Opacity should accumulate
             if (ScreenOpacities[offsetIndex] < maxFloat) { 
                 ScreenOpacities[offsetIndex] += 0.1f; // Increment opacity
             }
-
-           
         }
     }
 }
@@ -1501,81 +1500,6 @@ __kernel void calculateVertexCoordinate(
 
     validTriangles[triangleId] = 1;
 }
-
-// void drawLineWireframe(
-//     const float2 start,
-//     const float2 end,
-//     const float startDepth,
-//     const float endDepth,
-//     __global float* ScreenColors,
-//     __global float* ScreenDistances,
-//     const int screenWidth,
-//     const int screenHeight,
-//     const float3 wireColor,
-//     const int lineWidth  // NEW: Add line width parameter
-// ) {
-//     // Bresenham's line algorithm for the center line
-//     int x0 = (int)start.x;
-//     int y0 = (int)start.y;
-//     int x1 = (int)end.x;
-//     int y1 = (int)end.y;
-    
-//     int dx = abs(x1 - x0);
-//     int dy = abs(y1 - y0);
-//     int x_inc = (x0 < x1) ? 1 : -1;
-//     int y_inc = (y0 < y1) ? 1 : -1;
-//     int error = dx - dy;
-    
-//     int x = x0;
-//     int y = y0;
-    
-//     float totalDistance = distance(start, end);
-//     int halfWidth = lineWidth / 2;
-    
-//     while (true) {
-//         // For each point on the line, draw a square of lineWidth x lineWidth
-//         for (int dy_offset = -halfWidth; dy_offset <= halfWidth; dy_offset++) {
-//             for (int dx_offset = -halfWidth; dx_offset <= halfWidth; dx_offset++) {
-//                 int pixelX = x + dx_offset;
-//                 int pixelY = y + dy_offset;
-                
-//                 // Bounds check
-//                 if (pixelX >= 0 && pixelX < screenWidth && pixelY >= 0 && pixelY < screenHeight) {
-//                     int pixelIndex = pixelY * screenWidth + pixelX;
-                    
-//                     // Interpolate depth along the line
-//                     float t = (totalDistance > 0.0f) ? 
-//                              distance((float2)(x, y), start) / totalDistance : 0.0f;
-//                     float depth = mix(startDepth, endDepth, t);
-                    
-//                     // Depth test
-//                     if (ScreenDistances[pixelIndex] == 0.0f || depth < ScreenDistances[pixelIndex]) {
-//                         ScreenDistances[pixelIndex] = depth;
-                        
-//                         int colorIndex = pixelIndex * 3;
-//                         ScreenColors[colorIndex] = wireColor.x;
-//                         ScreenColors[colorIndex + 1] = wireColor.y;
-//                         ScreenColors[colorIndex + 2] = wireColor.z;
-//                     }
-//                 }
-//             }
-//         }
-        
-//         // Check if we've reached the end
-//         if (x == x1 && y == y1) break;
-        
-//         // Bresenham step
-//         int error2 = error * 2;
-//         if (error2 > -dy) {
-//             error -= dy;
-//             x += x_inc;
-//         }
-//         if (error2 < dx) {
-//             error += dx;
-//             y += y_inc;
-//         }
-//     }
-// }
 
 void drawLineWireframe(
     const float2 start,

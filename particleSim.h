@@ -7,7 +7,7 @@
 #include <time.h>
 #include <stdlib.h>
 
-#define NUM_PARTICLES 20000
+#define NUM_PARTICLES 15000
 #define GRAVITY 10.0f
 #define DAMPING 0.985f
 #define gridResolutionAxis 32
