@@ -252,6 +252,7 @@ struct OpenCLContext {
 	cl_command_queue queue;
 	cl_program program;
 	// kernels
+	cl_kernel drawBoundingBox_kernel;
 	cl_kernel kernel; // project particles kernel
 	cl_kernel blur_kernel;
 	cl_kernel normals_kernel;
@@ -917,6 +918,7 @@ struct GPUTimings {
 	float readBackTime;
 	float renderTextTime;
 	float projectParticlesTime;
+	float renderBoundingBoxTime;
 };
 
 float totalTime(struct GPUTimings *gpuTimings) {
@@ -1667,435 +1669,6 @@ void renderWireframeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
 	clReleaseEvent(kernel_event);
 }
 
-// int initializeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangles, struct SkyBox *skyBox, struct ImageFont *imageFont, struct BVHLinear *bvh) {
-// 	cl_int err;
-
-// 	// Get platform
-// 	err = clGetPlatformIDs(1, &ocl->platform, NULL);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error getting OpenCL platform: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Get device
-// 	err = clGetDeviceIDs(ocl->platform, CL_DEVICE_TYPE_GPU, 1, &ocl->device, NULL);
-// 	if (err != CL_SUCCESS) {
-// 		// Fallback to CPU if GPU not available
-// 		err = clGetDeviceIDs(ocl->platform, CL_DEVICE_TYPE_CPU, 1, &ocl->device, NULL);
-// 		if (err != CL_SUCCESS) {
-// 			printf("Error getting OpenCL device: %d\n", err);
-// 			return 0;
-// 		}
-// 	}
-
-// 	// Create context
-// 	ocl->context = clCreateContext(NULL, 1, &ocl->device, NULL, NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating OpenCL context: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create command queue WITH PROFILING ENABLED
-// 	ocl->queue = clCreateCommandQueue(ocl->context, ocl->device, CL_QUEUE_PROFILING_ENABLE, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating OpenCL command queue: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Read kernel source
-// 	FILE *file = fopen("openGlShaders/screenCordinates.cl", "r");
-// 	if (!file) {
-// 		printf("Error opening kernel file\n");
-// 		return 0;
-// 	}
-
-// 	fseek(file, 0, SEEK_END);
-// 	size_t source_size = ftell(file);
-// 	fseek(file, 0, SEEK_SET);
-
-// 	char *source = (char *)malloc(source_size + 1);
-// 	fread(source, 1, source_size, file);
-// 	source[source_size] = '\0';
-// 	fclose(file);
-
-// 	// Create program
-// 	ocl->program = clCreateProgramWithSource(ocl->context, 1, (const char **)&source, &source_size, &err);
-// 	free(source);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating OpenCL program: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Build program
-// 	err = clBuildProgram(ocl->program, 1, &ocl->device, NULL, NULL, NULL);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error building OpenCL program: %d\n", err);
-
-// 		// Get build log
-// 		size_t log_size;
-// 		clGetProgramBuildInfo(ocl->program, ocl->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
-// 		char *log = (char *)malloc(log_size);
-// 		clGetProgramBuildInfo(ocl->program, ocl->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
-// 		printf("Build log: %s\n", log);
-// 		free(log);
-// 		return 0;
-// 	}
-
-// 	ocl->wireframe_kernel = clCreateKernel(ocl->program, "renderWireFrame", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating wireframe kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// kernel for projecting vertices to screen
-// 	ocl->calculateVertex_kernel = clCreateKernel(ocl->program, "calculateVertexCoordinate", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating calculateVertexCoordinate kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// kernel for ray-tracing
-// 	ocl->applyRayTracedReflections_kernel = clCreateKernel(ocl->program, "applyRayTracedReflections", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating rayTrace kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// kernel for rendering particles
-// 	ocl->shadePixels_kernel = clCreateKernel(ocl->program, "ShadePixels", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating ShadePixels kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// kernel for rendering text
-// 	ocl->renderText_kernel = clCreateKernel(ocl->program, "renderText", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating renderText kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->gpuTimings_kernel = clCreateKernel(ocl->program, "gpuTimings", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating gpuTimings kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// particle projection kernel
-// 	ocl->kernel = clCreateKernel(ocl->program, "project_points_to_screen", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating OpenCL kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// kernels for blur-ing distances and opacities
-// 	ocl->blur_kernel = clCreateKernel(ocl->program, "blur_distances", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating blur kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create applyReflections kernel
-// 	ocl->applyReflections_kernel = clCreateKernel(ocl->program, "applyReflections", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating applyReflections kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create skybox kernel
-// 	ocl->skybox_kernel = clCreateKernel(ocl->program, "renderSkyBox", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating skybox kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->normals_kernel = clCreateKernel(ocl->program, "calculate_normals_from_blurred_distances", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating normals kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create triangle kernel
-// 	ocl->triangle_kernel = clCreateKernel(ocl->program, "renderTriangles", &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle kernel: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create particle buffers
-// 	ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 										NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating points buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// create buffer for BVH nodes
-// 	ocl->buffer_bvh_nodes = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 										   bvh->NodesCount * sizeof(struct BVHNode), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating BVH nodes buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// create buffer for BVH triangles
-// 	ocl->buffer_bvh_triangles = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 											   bvh->TrianglesCount * sizeof(struct Triangle), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating BVH triangles buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// upload BVH data
-// 	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_bvh_nodes, CL_TRUE, 0,
-// 							   bvh->NodesCount * sizeof(struct BVHNode), bvh->Nodes, 0, NULL, NULL);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error writing BVH nodes buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// buffer for triangle vertices
-// 	ocl->buffer_triangle_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 											 triangles->count * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle v1 buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// upload triangle data for bvh
-// 	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_bvh_triangles, CL_TRUE, 0,
-// 							   bvh->TrianglesCount * sizeof(struct Triangle), bvh->Triangles, 0, NULL, NULL);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error writing BVH triangles buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// buffer for projected vertices of triangles to screen
-// 	ocl->buffer_projected_verts = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 												 triangles->count * 9 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating projected vertices buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// buffer for bounding boxes of triangles
-// 	ocl->buffer_triangle_bboxes = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 												 triangles->count * 4 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle bboxes buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// buffer for valid triangles
-// 	ocl->buffer_valid_triangles = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 												 triangles->count * sizeof(int), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating valid triangles buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_triangle_bboxes = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 												 triangles->count * 4 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle bboxes buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_valid_triangles = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 												 triangles->count * sizeof(int), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating valid triangles buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// crete screen material properties buffers
-// 	ocl->buffer_screen_material_roughness = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
-// 														   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating screen material roughness buffer: %d\n", err);
-// 		return 0;
-// 	}
-// 	ocl->buffer_screen_material_metallic = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
-// 														  ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating screen material metallic buffer: %d\n", err);
-// 		return 0;
-// 	}
-// 	ocl->buffer_screen_material_emission = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
-// 														  ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating screen material emission buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_velocities = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 											NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating velocities buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_distances = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
-// 										   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating distances buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_opacities = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
-// 										   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating opacities buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_velocities_screen = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
-// 												   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating screen velocities buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create normals buffer
-// 	ocl->buffer_normals = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
-// 										 ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating normals buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create temporary buffers for blur pipeline
-// 	ocl->buffer_distances_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 												ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating temp distances buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_opacities_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 												ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating temp opacities buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// crete buffers for triangle properties
-// 	ocl->buffer_triangle_roughness = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 													triangles->count * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle roughness buffer: %d\n", err);
-// 		return 0;
-// 	}
-// 	ocl->buffer_triangle_metallic = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 												   triangles->count * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle metalness buffer: %d\n", err);
-// 		return 0;
-// 	}
-// 	ocl->buffer_triangle_emission = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 												   triangles->count * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle emission buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Create triangle buffers (allocated once, reused every frame)
-// 	ocl->buffer_triangle_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 											 triangles->count * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle v1 buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_triangle_v2 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 											 triangles->count * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle v2 buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_triangle_v3 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 											 triangles->count * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle v3 buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	ocl->buffer_triangle_normals = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 												  triangles->count * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle normals buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// ADD TRIANGLE COLORS BUFFER
-// 	ocl->buffer_triangle_colors = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-// 												 triangles->count * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating triangle colors buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// ADD SCREEN COLORS BUFFER
-// 	ocl->buffer_screen_colors = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-// 											   ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating screen colors buffer: %d\n", err);
-// 		return 0;
-// 	}
-
-// 	// Buffer for font
-// 	size_t font_size = imageFont->width * imageFont->height * sizeof(char);
-// 	ocl->buffer_font_data = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-// 										   font_size, imageFont->data, &err);
-// 	if (err != CL_SUCCESS) {
-// 		printf("Error creating font buffer: %d\n", err);
-// 		return 0;
-// 	}
-// 	printf("Font uploaded to GPU: %dx%d pixels (%zu bytes)\n", imageFont->width, imageFont->height, font_size);
-
-// 	// *** INITIALIZE SKYBOX BUFFERS AND UPLOAD DATA ***
-// 	if (!initializeSkyboxBuffers(ocl, skyBox)) {
-// 		printf("Failed to initialize skybox buffers during OpenCL init\n");
-// 		return 0;
-// 	}
-
-// 	// *** UPLOAD TRIANGLE DATA ONCE ***
-// 	if (!uploadTriangleDataOnce(ocl, triangles)) {
-// 		printf("Failed to upload triangle data during OpenCL init\n");
-// 		return 0;
-// 	}
-
-// 	// Set static kernel arguments that never change
-// 	if (!setupStaticKernelArguments(ocl, triangles, skyBox)) {
-// 		printf("Failed to set static kernel arguments during OpenCL init\n");
-// 		return 0;
-// 	}
-
-// 	// Pre-allocate host memory buffers
-// 	ocl->host_points_data = (float *)malloc(NUM_PARTICLES * 3 * sizeof(float));
-// 	ocl->host_velocities_data = (float *)malloc(NUM_PARTICLES * 3 * sizeof(float));
-// 	ocl->host_distances_result = (float *)malloc(ScreenWidth * ScreenHeight * sizeof(float));
-// 	ocl->host_opacities_result = (float *)malloc(ScreenWidth * ScreenHeight * sizeof(float));
-// 	ocl->host_velocities_result = (float *)malloc(ScreenWidth * ScreenHeight * sizeof(float));
-// 	ocl->host_normals_result = (float *)malloc(ScreenWidth * ScreenHeight * 3 * sizeof(float));
-
-// 	// ADD HOST MEMORY FOR SCREEN COLORS
-// 	ocl->host_screen_colors_result = (float *)malloc(ScreenWidth * ScreenHeight * 3 * sizeof(float));
-
-// 	// Check for allocation failures
-// 	if (!ocl->host_points_data || !ocl->host_velocities_data ||
-// 		!ocl->host_distances_result || !ocl->host_opacities_result ||
-// 		!ocl->host_velocities_result || !ocl->host_normals_result ||
-// 		!ocl->host_screen_colors_result) {
-// 		printf("Failed to allocate host memory for OpenCL\n");
-// 		return 0;
-// 	}
-
-// 	printf("OpenCL initialized successfully with triangle support and colors\n");
-// 	return 1;
-// }
-
 int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangles,
 						   struct SkyBox *skyBox, struct ImageFont *imageFont,
 						   struct BVHLinear *bvh, GLFWwindow *window) {
@@ -2254,6 +1827,12 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	ocl->applyRayTracedReflections_kernel = clCreateKernel(ocl->program, "applyRayTracedReflections", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating rayTrace kernel: %d\n", err);
+		return 0;
+	}
+
+	ocl->drawBoundingBox_kernel = clCreateKernel(ocl->program, "drawBoundingBox", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating rayTrace kernel: %d\n", err);
 		return 0;
@@ -2502,6 +2081,72 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	return 1;
 }
 
+void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct PointSOA *particles, float *gpuTimeMs) {
+	cl_int err;
+	cl_event kernel_event;
+
+	// Set kernel arguments for drawing bounding box
+	cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+	cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+	cl_float3 cam_up = {0.0f, 1.0f, 0.0f}; // Standard up vector
+	cl_float fov = camera->fov;
+	cl_int screen_width = ScreenWidth;
+	cl_int screen_height = ScreenHeight;
+	cl_float3 bbox_min = {particles->bBoxMin[0], particles->bBoxMin[1], particles->bBoxMin[2]};
+	cl_float3 bbox_max = {particles->bBoxMax[0], particles->bBoxMax[1], particles->bBoxMax[2]};
+
+	// Set all kernel arguments
+	err = clSetKernelArg(ocl->drawBoundingBox_kernel, 0, sizeof(cl_mem), &ocl->buffer_distances);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 1, sizeof(cl_mem), &ocl->buffer_opacities);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 2, sizeof(cl_mem), &ocl->buffer_velocities_screen);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 3, sizeof(cl_float3), &cam_pos);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 4, sizeof(cl_float3), &cam_dir);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 5, sizeof(cl_float3), &cam_up);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 6, sizeof(cl_float), &fov);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 7, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 8, sizeof(cl_int), &screen_height);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 9, sizeof(cl_float3), &bbox_min);
+	err |= clSetKernelArg(ocl->drawBoundingBox_kernel, 10, sizeof(cl_float3), &bbox_max);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting drawBoundingBox kernel arguments: %d\n", err);
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+
+	// Execute the kernel
+	size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->drawBoundingBox_kernel, 2, NULL,
+								 global_work_size, NULL, 0, NULL, &kernel_event);
+
+	if (err != CL_SUCCESS) {
+		printf("Error executing drawBoundingBox kernel: %d\n", err);
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+
+	// Wait for completion
+	clFinish(ocl->queue);
+
+	// Get timing information if requested
+	if (gpuTimeMs != NULL) {
+		cl_ulong start_time, end_time;
+		err = clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START,
+									  sizeof(start_time), &start_time, NULL);
+		err |= clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END,
+									   sizeof(end_time), &end_time, NULL);
+
+		if (err == CL_SUCCESS) {
+			*gpuTimeMs = (end_time - start_time) * 1e-6f; // Convert nanoseconds to milliseconds
+		} else {
+			*gpuTimeMs = 0.0f;
+		}
+	}
+
+	// Clean up the event
+	clReleaseEvent(kernel_event);
+}
+
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	cl_int err;
 	cl_event readback_events[5]; // Array to hold all readback events
@@ -2695,6 +2340,9 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		}
 	}
 
+	// Render Bounding Box of Particles Simulation area
+	renderBoundingBox(ocl, camera, particles, &gpuTimings->renderBoundingBoxTime);
+
 	err = clSetKernelArg(ocl->kernel, 0, sizeof(cl_mem), &ocl->buffer_points);
 	err |= clSetKernelArg(ocl->kernel, 1, sizeof(cl_mem), &ocl->buffer_velocities);
 	err |= clSetKernelArg(ocl->kernel, 2, sizeof(cl_mem), &ocl->buffer_distances);
@@ -2726,6 +2374,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	}
 
 	clFinish(ocl->queue);
+
+	
 
 	// Get particle kernel timing
 	cl_ulong start_time, end_time;

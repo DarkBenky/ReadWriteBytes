@@ -1216,6 +1216,96 @@ __kernel void blur_distances(
     }
 }
 
+__kernel void drawBoundingBox(
+    __global float *ScreenDistances,
+    __global float *ScreenOpacities,
+    __global float *ScreenVelocities,
+    const float3 camPos,
+    const float3 camDir,
+    const float3 camUp,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight,
+    const float3 bBoxMin,
+    const float3 bBoxMax
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    // Camera basis vectors (precompute once per thread)
+    float3 forward = normalize(camDir);
+    float3 right = normalize(cross(forward, camUp));
+    float3 up = cross(right, forward);
+    
+    // Convert screen coordinates to NDC
+    float ndcX = (x + 0.5f) / screenWidth * 2.0f - 1.0f;
+    float ndcY = -((y + 0.5f) / screenHeight * 2.0f - 1.0f);
+    
+    // Create ray direction
+    float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
+    
+    // Ray-AABB intersection using slab method
+    float3 invRayDir = 1.0f / rayDir;
+    float3 t1 = (bBoxMin - camPos) * invRayDir;
+    float3 t2 = (bBoxMax - camPos) * invRayDir;
+    
+    // Ensure t1 <= t2 for all components
+    float3 tMin = fmin(t1, t2);
+    float3 tMax = fmax(t1, t2);
+    
+    // Find intersection interval
+    float tNear = fmax(fmax(tMin.x, tMin.y), tMin.z);
+    float tFar = fmin(fmin(tMax.x, tMax.y), tMax.z);
+    
+    // Check if ray intersects the bounding box
+    if (tNear <= tFar && tFar > 0.001f) {
+        // Use the near intersection point (closest to camera)
+        float t = (tNear > 0.001f) ? tNear : tFar;
+        
+        int pixelIndex = y * screenWidth + x;
+        
+        // Only update if this is closer than existing geometry
+        if (ScreenDistances[pixelIndex] == 0.0f || t < ScreenDistances[pixelIndex]) {
+            // Calculate which face we hit to determine color intensity
+            float3 hitPoint = camPos + rayDir * t;
+            float3 center = (bBoxMin + bBoxMax) * 0.5f;
+            float3 size = bBoxMax - bBoxMin;
+            float3 localPos = (hitPoint - center) / size; // Normalize to [-0.5, 0.5]
+            
+            // Determine which face (for edge highlighting)
+            float3 absLocal = fabs(localPos);
+            float maxComp = fmax(fmax(absLocal.x, absLocal.y), absLocal.z);
+            
+            // Check if we're near an edge (for wireframe effect)
+            float edgeThickness = 0.02f; // Adjust for thicker/thinner edges
+            bool isEdge = false;
+            
+            if (maxComp == absLocal.x) {
+                // Hit X face, check Y and Z edges
+                isEdge = (fabs(absLocal.y) > 0.5f - edgeThickness) || 
+                         (fabs(absLocal.z) > 0.5f - edgeThickness);
+            } else if (maxComp == absLocal.y) {
+                // Hit Y face, check X and Z edges
+                isEdge = (fabs(absLocal.x) > 0.5f - edgeThickness) || 
+                         (fabs(absLocal.z) > 0.5f - edgeThickness);
+            } else {
+                // Hit Z face, check X and Y edges
+                isEdge = (fabs(absLocal.x) > 0.5f - edgeThickness) || 
+                         (fabs(absLocal.y) > 0.5f - edgeThickness);
+            }
+            
+            // Set distance and opacity based on whether it's an edge
+            if (isEdge) {
+                ScreenDistances[pixelIndex] = t;
+                ScreenOpacities[pixelIndex] = 1.0f;
+                ScreenVelocities[pixelIndex] = 1.0f;
+            }
+        }
+    }
+}
+
 // 1. Project particles to screen-space z-buffer (distances + velocities + basic opacity)
 __kernel void project_points_to_screen(
     __global const float* points,
