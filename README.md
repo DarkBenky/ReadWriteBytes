@@ -28,13 +28,14 @@ The results show that writing frames is faster than reading them, with write ope
   
 ## TODO
 
+- [ ] Fix Timings
+  - [ ] Add More Timings
+    - [ ] Add timing for rendering of UI
+    - [ ] Add timings for simulations
 - [ ] Distance image normalization
   - [ ] Particle Sim
   - [ ] Triangles
   - [ ] *Note* save real values then before uploading image to Open GL normalize it
-- [ ] Add More Timings
-  - [ ] Add timing for rendering of UI
-  - [ ] Add timings for simulations
 - [ ] Remove CPU read backs
 - [ ] Fix wire frame ghosting ![img](wireFrame.png)
 - [ ] render all in open gl remove memory sharing with go code
