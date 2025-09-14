@@ -28,6 +28,12 @@ The results show that writing frames is faster than reading them, with write ope
   
 ## TODO
 
+- [ ] Trace Ray Function prototype ![trace diagram](trace.png)
+  - [ ] implemented it on your own
+    - [ ] Finish raytracing kernel
+      - [ ] Initialize kernel
+        - [ ] BVH buffer ...
+- [ ] Add Antialiasing
 - [ ] Fix Timings
   - [ ] Add More Timings
     - [ ] Add timing for rendering of UI
@@ -36,17 +42,11 @@ The results show that writing frames is faster than reading them, with write ope
   - [ ] Particle Sim
   - [ ] Triangles
   - [ ] *Note* save real values then before uploading image to Open GL normalize it
-- [ ] Remove CPU read backs
 - [ ] Fix wire frame ghosting ![img](wireFrame.png)
 - [ ] render all in open gl remove memory sharing with go code
 - [ ] Fix C reading and writing of BVH / open CL code
   - [ ] Read BVH in C
 - [ ] Fix C reading and writing of BVH / open CL code
-- [ ] Trace Ray Function prototype ![trace diagram](trace.png)
-  - [ ] implemented it on your own
-    - [ ] Finish raytracing kernel
-      - [ ] Initialize kernel
-        - [ ] BVH buffer ...
 - [ ] convert timing to this format
 
   ```c
@@ -83,6 +83,7 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] Remove CPU read backs
 - [X] Draw Bounding Box Around the particles
 - [X] Velocity normalization Particles
 - [X] Move Physis to separate file

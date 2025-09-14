@@ -1238,16 +1238,7 @@ void saveScreenNormal(struct Screen *screen) {
 	memcpy((uint8_t *)SharedMem + offset, buffer, ScreenWidth * ScreenHeight * 4);
 }
 
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct Camera *lightCamera, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
-	// printf("\n--- Starting render ---\n");
-	int start = clock();
-	clearScreen(screen);
-	// clearScreen(lightScreen);
-	int clearScreenTime = clock();
-
-	float dt = (float)(clearScreenTime - start) / (float)CLOCKS_PER_SEC;
-	timePartition->clearScreenTime += dt;
-	// printf("Clear screen time: %f\n", dt);
+void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	if (USE_GPU == 1) {
 		projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox, gpuTimings, font);
 		// save normal screen
@@ -1263,37 +1254,6 @@ void render(struct Screen *screen, struct PointSOA *particles, struct Camera *ca
 		ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
 		printf("Saved colors (shared mem) in %.3f ms\n", ms);
 	}
-	clock_t projectParticlesTime = clock();
-
-	dt = (float)(projectParticlesTime - clearScreenTime) / (float)CLOCKS_PER_SEC;
-	timePartition->projectParticlesTime += dt;
-	// printf("Project particles time: %f\n", dt);
-
-	// projectParticles(particles, lightCamera, lightScreen, timePartition, threadsData, particleIndexes);
-	clock_t projectLightParticlesTime = clock();
-
-	dt = (float)(projectLightParticlesTime - projectParticlesTime) / (float)CLOCKS_PER_SEC;
-	timePartition->projectLightParticlesTime += dt;
-
-	drawCursor(screen, cursor, camera);
-	clock_t drawCursorTime = clock();
-
-	dt = (float)(drawCursorTime - projectLightParticlesTime) / (float)CLOCKS_PER_SEC;
-	timePartition->drawCursorTime += dt;
-	// printf("Draw cursor time: %f\n", dt);
-
-	clock_t drawBoundingBoxTime = clock();
-
-	dt = (float)(drawBoundingBoxTime - drawCursorTime) / (float)CLOCKS_PER_SEC;
-	timePartition->drawBoundingBoxTime += dt;
-	// printf("Draw bounding box time: %f\n", dt);
-
-	saveScreen(screen, "output.bin");
-	// saveScreen(lightScreen, "light.bin");
-	clock_t saveScreenTime = clock();
-	dt = (float)(saveScreenTime - drawBoundingBoxTime) / (float)CLOCKS_PER_SEC;
-	timePartition->saveScreenTime += dt;
-	// printf("Save screen time: %f\n", dt);
 }
 
 void update_particles(struct PointSOA *particles, float dt, struct TimePartition *timePartition, struct Cursor *cursor) {
@@ -2149,7 +2109,6 @@ void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct 
 
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	cl_int err;
-	cl_event readback_events[5]; // Array to hold all readback events
 
 	// Use pre-allocated buffers instead of malloc
 	float *points_data = ocl->host_points_data;
@@ -2375,7 +2334,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	clFinish(ocl->queue);
 
-	
 
 	// Get particle kernel timing
 	cl_ulong start_time, end_time;
@@ -2575,83 +2533,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	}
 	clEnqueueReleaseGLObjects(ocl->queue, 1, &ocl->cl_texture_buffer, 0, NULL, NULL);
 	clFinish(ocl->queue);
-
-	float *distances_result = ocl->host_distances_result;
-	float *opacities_result = ocl->host_opacities_result;
-	float *velocities_result = ocl->host_velocities_result;
-	float *normals_result = ocl->host_normals_result;
-
-	err = clEnqueueReadBuffer(ocl->queue, final_blurred_distances_buf, CL_FALSE, 0,
-							  ScreenWidth * ScreenHeight * sizeof(float), distances_result, 0, NULL, &readback_events[0]);
-	err |= clEnqueueReadBuffer(ocl->queue, s_opac_src, CL_FALSE, 0,
-							   ScreenWidth * ScreenHeight * sizeof(float), opacities_result, 0, NULL, &readback_events[1]);
-	err |= clEnqueueReadBuffer(ocl->queue, ocl->buffer_velocities_screen, CL_FALSE, 0,
-							   ScreenWidth * ScreenHeight * sizeof(float), velocities_result, 0, NULL, &readback_events[2]);
-	err |= clEnqueueReadBuffer(ocl->queue, ocl->buffer_normals, CL_FALSE, 0,
-							   ScreenWidth * ScreenHeight * 3 * sizeof(float), normals_result, 0, NULL, &readback_events[3]);
-	err |= clEnqueueReadBuffer(ocl->queue, ocl->buffer_screen_colors, CL_FALSE, 0,
-							   ScreenWidth * ScreenHeight * 3 * sizeof(float), ocl->host_screen_colors_result, 0, NULL, &readback_events[4]);
-
-	clWaitForEvents(5, readback_events);
-
-	// Get readback timing
-	cl_ulong first_start, last_end;
-	clGetEventProfilingInfo(readback_events[0], CL_PROFILING_COMMAND_START, sizeof(first_start), &first_start, NULL);
-	clGetEventProfilingInfo(readback_events[4], CL_PROFILING_COMMAND_END, sizeof(last_end), &last_end, NULL);
-	gpuTimings->readBackTime = (last_end - first_start) * 1e-6f;
-
-	for (int i = 0; i < 5; i++) {
-		clReleaseEvent(readback_events[i]);
-	}
-
-	memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
-	memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
-	memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
-	memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
-	memset(screen->normals, 0, sizeof(float) * ScreenWidth * ScreenHeight * 3);
-
-	float maxDistance = 0.0f, maxVelocity = 0.0f, maxOpacity = 0.0f;
-	for (int i = 0; i < ScreenWidth * ScreenHeight; i++) {
-		if (distances_result[i] > 0.001f && distances_result[i] > maxDistance) {
-			maxDistance = distances_result[i];
-		}
-		if (velocities_result[i] > maxVelocity) {
-			maxVelocity = velocities_result[i];
-		}
-		if (opacities_result[i] > maxOpacity) {
-			maxOpacity = opacities_result[i];
-		}
-	}
-
-	for (int y = 0; y < ScreenHeight; y++) {
-		for (int x = 0; x < ScreenWidth; x++) {
-			int idx = y * ScreenWidth + x;
-
-			if (opacities_result[idx] > 0.0f) {
-				if (maxDistance > 0.0f) {
-					screen->distance[x][y] = (uint8_t)(255 * (1.0f - distances_result[idx] / (maxDistance + 1.0f)));
-				}
-				if (maxVelocity > 0.0f) {
-					screen->velocity[x][y] = (uint8_t)(255 * (velocities_result[idx] / (maxVelocity + 1.0f)));
-				}
-				if (maxOpacity > 0.0f) {
-					screen->normalizedOpacity[x][y] = (uint8_t)(255 * (opacities_result[idx] / (maxOpacity + 1.0f)));
-				}
-			}
-
-			// Copy normals
-			float *nr = normals_result + idx * 3;
-			screen->normals[x][y][0] = nr[0];
-			screen->normals[x][y][1] = nr[1];
-			screen->normals[x][y][2] = nr[2];
-
-			// Copy screen colors
-			float *color = ocl->host_screen_colors_result + idx * 3;
-			screen->colors[x][y][0] = (uint8_t)(color[0] * 255.0f);
-			screen->colors[x][y][1] = (uint8_t)(color[1] * 255.0f);
-			screen->colors[x][y][2] = (uint8_t)(color[2] * 255.0f);
-		}
-	}
 }
 
 void cleanupOpenCL(struct OpenCLContext *ocl) {
@@ -3263,16 +3144,6 @@ int main() {
 	particles->bBoxMax[1] = 80.0f;
 	particles->bBoxMax[2] = 80.0f;
 
-	struct Camera lightCamera;
-	lightCamera.fov = 1.0f; // Set light camera FOV to match main camera
-	lightCamera.ray.origin[0] = 50.142f;
-	lightCamera.ray.origin[1] = 142.607f;
-	lightCamera.ray.origin[2] = -62.493f;
-	// Set light camera direction to point towards the particles
-	lightCamera.ray.direction[0] = -0.148f;
-	lightCamera.ray.direction[1] = -0.721f;
-	lightCamera.ray.direction[2] = 0.680f; // Looking down the Z-axis
-
 	clearScreen(screen);
 
 	float averageFPS[FrameCount];
@@ -3457,7 +3328,7 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(screen, particles, &camera, cursor, timePartition, particleIndexes, &lightCamera, &ocl, triangles, &skyBox, &gpuTimings, &font);
+		render(screen, particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
