@@ -252,6 +252,7 @@ struct OpenCLContext {
 	cl_command_queue queue;
 	cl_program program;
 	// kernels
+	cl_kernel antiAliasKernel;
 	cl_kernel drawBoundingBox_kernel;
 	cl_kernel kernel; // project particles kernel
 	cl_kernel blur_kernel;
@@ -919,6 +920,7 @@ struct GPUTimings {
 	float renderTextTime;
 	float projectParticlesTime;
 	float renderBoundingBoxTime;
+	float antiAliasingTime;
 };
 
 float totalTime(struct GPUTimings *gpuTimings) {
@@ -1774,6 +1776,12 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	// Create all kernels
+	ocl->antiAliasKernel = clCreateKernel(ocl->program, "antiAlias", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating antiAlias kernel: %d\n", err);
+		return 0;
+	}
+
 	ocl->wireframe_kernel = clCreateKernel(ocl->program, "renderWireFrame", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating wireframe kernel: %d\n", err);
@@ -2107,6 +2115,57 @@ void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct 
 	clReleaseEvent(kernel_event);
 }
 
+void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) {
+	cl_int err;
+	cl_event kernel_event; // Add event for timing
+
+	// Simple box blur kernel execution
+	size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
+
+	err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	err |= clSetKernelArg(ocl->antiAliasKernel, 1, sizeof(cl_mem), &ocl->buffer_distances);
+	cl_int screen_width = ScreenWidth;
+	cl_int screen_height = ScreenHeight;
+	err |= clSetKernelArg(ocl->antiAliasKernel, 2, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->antiAliasKernel, 3, sizeof(cl_int), &screen_height);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting antiAlias kernel arguments: %d\n", err);
+		if (gpuTimings) gpuTimings->antiAliasingTime = 0.0f; // Set timing to 0 on error
+		return;
+	}
+
+	// Execute kernel with timing event
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->antiAliasKernel, 2, NULL,
+								 global_work_size, NULL, 0, NULL, &kernel_event);
+	if (err != CL_SUCCESS) {
+		printf("Error executing antiAlias kernel: %d\n", err);
+		if (gpuTimings) gpuTimings->antiAliasingTime = 0.0f; // Set timing to 0 on error
+		return;
+	}
+
+	clFinish(ocl->queue);
+
+	// Get timing information
+	if (gpuTimings != NULL) {
+		cl_ulong start_time, end_time;
+		err = clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START,
+									  sizeof(start_time), &start_time, NULL);
+		err |= clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END,
+									   sizeof(end_time), &end_time, NULL);
+
+		if (err == CL_SUCCESS) {
+			// Store timing in the blur time field (or add a new field for antialiasing)
+			gpuTimings->antiAliasingTime = (end_time - start_time) * 1e-6f; // Convert ns to ms
+		} else {
+			gpuTimings->antiAliasingTime = 0.0f;
+		}
+	}
+
+	// Clean up the event
+	clReleaseEvent(kernel_event);
+}
+
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	cl_int err;
 
@@ -2334,7 +2393,6 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	clFinish(ocl->queue);
 
-
 	// Get particle kernel timing
 	cl_ulong start_time, end_time;
 	err = clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
@@ -2467,6 +2525,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clFinish(ocl->queue);
 #endif
 
+	antiAliasingOpenCL(ocl, gpuTimings);
+
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
 
 	// === ACQUIRE OPENGL TEXTURE FOR OPENCL USE ===
@@ -2583,6 +2643,11 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
 	if (ocl->program) clReleaseProgram(ocl->program);
 	if (ocl->queue) clReleaseCommandQueue(ocl->queue);
 	if (ocl->context) clReleaseContext(ocl->context);
+
+	// Release anti-aliasing kernel
+	if (ocl->antiAliasKernel) clReleaseKernel(ocl->antiAliasKernel);
+	if (ocl->kernel) clReleaseKernel(ocl->kernel);
+	if (ocl->skybox_kernel) clReleaseKernel(ocl->skybox_kernel);
 }
 
 void my_file_reader(void *ctx, const char *filename, int is_mtl, const char *obj_filename, char **buf, size_t *len) {

@@ -248,7 +248,6 @@ float3 generateRoughnessBiasedDirection(
     return normalize(randomDir);
 }
 
-// NODE: For now i want to implement my self to practice
 
 float3 Trace(Ray ray, __global const BVHLinear *bvh, int maxDepth) {
     float3 incomingLight = (float3)(0.0f, 0.0f, 0.0f);
@@ -1990,5 +1989,60 @@ __kernel void copyToGLTexture(
         float gray = screen_colors[idx];
         write_imagef(gl_texture, (int2)(x, y), (float4)(gray, gray, gray, 1.0f));
         return;
+    }
+}
+
+__kernel void antiAlias(
+    __global float* input_colors,
+    __global float* input_distances,
+    int screen_width,
+    int screen_height
+    // int mode // 0 = 3x float, 1 = 4x float, 2 = 1x float TODO
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screen_width || y >= screen_height) return;
+    
+    int idx = (y * screen_width + x) * 3; // Index for a float array
+    float3 center_color = (float3)(input_colors[idx], input_colors[idx+1], input_colors[idx+2]);
+    float center_distance = input_distances[y * screen_width + x];
+    
+    if (length(center_color) == 0.0f) {
+        // If center pixel is black, no need to process
+        return;
+    }
+    
+    float3 accum_color = center_color;
+    int count = 1;
+    
+    // Check 8 neighboring pixels
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue; // Skip center pixel
+            
+            int nx = x + dx;
+            int ny = y + dy;
+            
+            if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+                int nidx = (ny * screen_width + nx) * 3;
+                float3 neighbor_color = (float3)(input_colors[nidx], input_colors[nidx+1], input_colors[nidx+2]);
+                float neighbor_distance = input_distances[ny * screen_width + nx];
+                
+                // Only consider neighbors with similar distance
+                if (length(neighbor_color) > 0.0f && fabs(neighbor_distance - center_distance) < 0.01f) {
+                    accum_color += neighbor_color;
+                    count++;
+                }
+            }
+        }
+    }
+    
+    // Average the accumulated color
+    if (count > 1) {
+        accum_color /= (float)count;
+        input_colors[idx]   = accum_color.x;
+        input_colors[idx+1] = accum_color.y;
+        input_colors[idx+2] = accum_color.z;
     }
 }
