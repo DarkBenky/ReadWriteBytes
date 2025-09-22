@@ -2115,19 +2115,55 @@ void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct 
 	clReleaseEvent(kernel_event);
 }
 
-void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings) {
+void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, struct Camera *camera) {
 	cl_int err;
 	cl_event kernel_event; // Add event for timing
 
+	cl_int mode = 0; // 0 = 3x float, 1 = 4x float, 2 = 1x float
+
+	switch (camera->renderMode) {
+	case renderDistance:
+		mode = 2;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_distances);
+		break;
+	case renderVelocity:
+		mode = 2;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_velocities_screen);
+		break;
+	case renderOpacity:
+		mode = 2;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_opacities);
+		break;
+	case renderNormal:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_normals);
+		break;
+	case renderFluid:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderWireframe:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case RENDER_MODE_COUNT:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	}
+
 	// Simple box blur kernel execution
 	size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
-
-	err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
 	err |= clSetKernelArg(ocl->antiAliasKernel, 1, sizeof(cl_mem), &ocl->buffer_distances);
 	cl_int screen_width = ScreenWidth;
 	cl_int screen_height = ScreenHeight;
 	err |= clSetKernelArg(ocl->antiAliasKernel, 2, sizeof(cl_int), &screen_width);
 	err |= clSetKernelArg(ocl->antiAliasKernel, 3, sizeof(cl_int), &screen_height);
+	err |= clSetKernelArg(ocl->antiAliasKernel, 4, sizeof(cl_int), &mode);
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting antiAlias kernel arguments: %d\n", err);
@@ -2525,7 +2561,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clFinish(ocl->queue);
 #endif
 
-	antiAliasingOpenCL(ocl, gpuTimings);
+	antiAliasingOpenCL(ocl, gpuTimings, camera);
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
 

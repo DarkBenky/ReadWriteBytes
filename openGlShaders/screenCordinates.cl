@@ -1996,53 +1996,171 @@ __kernel void antiAlias(
     __global float* input_colors,
     __global float* input_distances,
     int screen_width,
-    int screen_height
-    // int mode // 0 = 3x float, 1 = 4x float, 2 = 1x float TODO
+    int screen_height,
+    int mode // 0 = 3x float, 1 = 4x float, 2 = 1x float
 ) {
     int x = get_global_id(0);
     int y = get_global_id(1);
     
     if (x >= screen_width || y >= screen_height) return;
-    
-    int idx = (y * screen_width + x) * 3; // Index for a float array
-    float3 center_color = (float3)(input_colors[idx], input_colors[idx+1], input_colors[idx+2]);
-    float center_distance = input_distances[y * screen_width + x];
-    
-    if (length(center_color) == 0.0f) {
-        // If center pixel is black, no need to process
-        return;
-    }
-    
-    float3 accum_color = center_color;
-    int count = 1;
-    
-    // Check 8 neighboring pixels
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue; // Skip center pixel
-            
-            int nx = x + dx;
-            int ny = y + dy;
-            
-            if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                int nidx = (ny * screen_width + nx) * 3;
-                float3 neighbor_color = (float3)(input_colors[nidx], input_colors[nidx+1], input_colors[nidx+2]);
-                float neighbor_distance = input_distances[ny * screen_width + nx];
-                
-                // Only consider neighbors with similar distance
-                if (length(neighbor_color) > 0.0f && fabs(neighbor_distance - center_distance) < 0.01f) {
-                    accum_color += neighbor_color;
-                    count++;
+
+    if (mode == 0) {
+        // 3x float mode (RGB)
+        int idx = (y * screen_width + x) * 3;
+        float3 center_color = (float3)(input_colors[idx], input_colors[idx+1], input_colors[idx+2]);
+        float center_distance = input_distances[y * screen_width + x];
+        
+        if (length(center_color) == 0.0f) {
+            return; // Skip black pixels
+        }
+        
+        float3 accum_color = center_color;
+        float total_weight = 1.0f;
+        
+        // Enhanced 3x3 kernel with distance-based weights
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue; // Skip center pixel
+                    
+                int nx = x + dx;
+                int ny = y + dy;
+                    
+                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+                    int nidx = (ny * screen_width + nx) * 3;
+                    float3 neighbor_color = (float3)(input_colors[nidx], input_colors[nidx+1], input_colors[nidx+2]);
+                    float neighbor_distance = input_distances[ny * screen_width + nx];
+                        
+                    if (length(neighbor_color) > 0.0f) {
+                        // Distance-based weight (closer distances get higher weight)
+                        float distance_diff = fabs(neighbor_distance - center_distance);
+                        float depth_threshold = max(0.01f, center_distance * 0.01f); // Adaptive threshold
+                        
+                        if (distance_diff < depth_threshold) {
+                            // Spatial weight (closer pixels get higher weight)
+                            float spatial_weight = 1.0f / (1.0f + sqrt((float)(dx*dx + dy*dy)));
+                            float depth_weight = exp(-distance_diff / depth_threshold);
+                            float final_weight = spatial_weight * depth_weight;
+                            
+                            accum_color += neighbor_color * final_weight;
+                            total_weight += final_weight;
+                        }
+                    }
                 }
             }
         }
-    }
-    
-    // Average the accumulated color
-    if (count > 1) {
-        accum_color /= (float)count;
-        input_colors[idx]   = accum_color.x;
-        input_colors[idx+1] = accum_color.y;
-        input_colors[idx+2] = accum_color.z;
+        
+        // Weighted average
+        if (total_weight > 1.0f) {
+            accum_color /= total_weight;
+            input_colors[idx]   = accum_color.x;
+            input_colors[idx+1] = accum_color.y;
+            input_colors[idx+2] = accum_color.z;
+        }
+        
+    } else if (mode == 1) {
+        // 4x float mode (RGBA)
+        int idx = (y * screen_width + x) * 4;
+        float4 center_color = (float4)(input_colors[idx], input_colors[idx+1], 
+                                      input_colors[idx+2], input_colors[idx+3]);
+        float center_distance = input_distances[y * screen_width + x];
+        
+        if (length(center_color.xyz) == 0.0f) {
+            return; // Skip black pixels
+        }
+        
+        float4 accum_color = center_color;
+        float total_weight = 1.0f;
+        
+        // Enhanced 3x3 kernel for RGBA
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue; // Skip center pixel
+                
+                int nx = x + dx;
+                int ny = y + dy;
+                
+                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+                    int nidx = (ny * screen_width + nx) * 4;
+                    float4 neighbor_color = (float4)(input_colors[nidx], input_colors[nidx+1], 
+                                                    input_colors[nidx+2], input_colors[nidx+3]);
+                    float neighbor_distance = input_distances[ny * screen_width + nx];
+                    
+                    if (length(neighbor_color.xyz) > 0.0f) {
+                        // Distance-based weight
+                        float distance_diff = fabs(neighbor_distance - center_distance);
+                        float depth_threshold = max(0.01f, center_distance * 0.01f);
+                        
+                        if (distance_diff < depth_threshold) {
+                            // Spatial weight
+                            float spatial_weight = 1.0f / (1.0f + sqrt((float)(dx*dx + dy*dy)));
+                            float depth_weight = exp(-distance_diff / depth_threshold);
+                            float final_weight = spatial_weight * depth_weight;
+                            
+                            accum_color += neighbor_color * final_weight;
+                            total_weight += final_weight;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Weighted average
+        if (total_weight > 1.0f) {
+            accum_color /= total_weight;
+            input_colors[idx]   = accum_color.x;
+            input_colors[idx+1] = accum_color.y;
+            input_colors[idx+2] = accum_color.z;
+            input_colors[idx+3] = accum_color.w;
+        }
+        
+    } else if (mode == 2) {
+        // 1x float mode (Grayscale)
+        int idx = y * screen_width + x;
+        float center_color = input_colors[idx];
+        float center_distance = input_distances[idx];
+        
+        if (center_color == 0.0f) {
+            return; // Skip black pixels
+        }
+        
+        float accum_color = center_color;
+        float total_weight = 1.0f;
+        
+        // Enhanced 3x3 kernel for grayscale
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue; // Skip center pixel
+                
+                int nx = x + dx;
+                int ny = y + dy;
+                
+                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+                    int nidx = ny * screen_width + nx;
+                    float neighbor_color = input_colors[nidx];
+                    float neighbor_distance = input_distances[nidx];
+                    
+                    if (neighbor_color > 0.0f) {
+                        // Distance-based weight
+                        float distance_diff = fabs(neighbor_distance - center_distance);
+                        float depth_threshold = max(0.01f, center_distance * 0.01f);
+                        
+                        if (distance_diff < depth_threshold) {
+                            // Spatial weight
+                            float spatial_weight = 1.0f / (1.0f + sqrt((float)(dx*dx + dy*dy)));
+                            float depth_weight = exp(-distance_diff / depth_threshold);
+                            float final_weight = spatial_weight * depth_weight;
+                            
+                            accum_color += neighbor_color * final_weight;
+                            total_weight += final_weight;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Weighted average
+        if (total_weight > 1.0f) {
+            input_colors[idx] = accum_color / total_weight;
+        }
     }
 }
