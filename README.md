@@ -35,6 +35,7 @@ The results show that writing frames is faster than reading them, with write ope
       - [ ] Initialize kernel
         - [ ] BVH buffer ...
 - [ ] Add Antialiasing
+  - [ ] Normals to enhance it
   - [ ] Modified Antialiasing to be dynamic based on render mode
   - [ ] Add Timings
 - [ ] Fix Timings
