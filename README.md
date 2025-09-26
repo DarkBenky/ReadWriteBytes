@@ -26,18 +26,18 @@ The results show that writing frames is faster than reading them, with write ope
 - Render text & charts into a temp buffer  
 - Copy buffer → GL texture → screen overlay  
   
-## TODO
+## TODO - Base on priority
 
+- [ ] Add Antialiasing
+  - [ ] Normals to enhance it
+  - [ ] Modified Antialiasing to be dynamic based on render mode
+  - [ ] Add Timings
 - [ ] BVH c Implementation
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] implemented it on your own
     - [ ] Finish raytracing kernel
       - [ ] Initialize kernel
         - [ ] BVH buffer ...
-- [ ] Add Antialiasing
-  - [ ] Normals to enhance it
-  - [ ] Modified Antialiasing to be dynamic based on render mode
-  - [ ] Add Timings
 - [ ] Fix Timings
   - [ ] Add More Timings
     - [ ] Add timing for rendering of UI
