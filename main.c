@@ -341,6 +341,7 @@ struct Camera {
 	struct Ray ray;
 	float fov;
 	enum RenderMode renderMode;
+	bool AntiAlias;
 };
 
 struct Triangles {
@@ -625,17 +626,6 @@ void CreateCube(float centerX, float centerY, float centerZ, float size, struct 
 	AddTriangle(triangles, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
 	AddTriangle(triangles, v2[0], v2[1], v2[2], v6[0], v6[1], v6[2], v5[0], v5[1], v5[2], colorR, colorG, colorB, Roughness, Metallic, Emission);
 }
-
-struct Screen {
-	uint8_t distance[ScreenWidth][ScreenHeight];
-	uint8_t velocity[ScreenWidth][ScreenHeight];
-	uint8_t normalizedOpacity[ScreenWidth][ScreenHeight];
-	uint8_t normalizedOpacityLight[ScreenWidth][ScreenHeight];
-	uint8_t colors[ScreenWidth][ScreenHeight][3];
-	uint16_t particleCount[ScreenWidth][ScreenHeight];
-	uint16_t opacity[ScreenWidth][ScreenHeight];
-	float normals[ScreenWidth][ScreenHeight][3]; // Normal vectors for lighting
-};
 
 void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox, float *gpuTimeMs) {
 	cl_int err;
@@ -1010,7 +1000,7 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, 
 }
 
 // Function prototypes
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font);
 
 struct Light {
 	float x;
@@ -1025,71 +1015,6 @@ struct Cursor {
 	float force;
 	bool active;
 };
-
-void drawCursor(struct Screen *screen, struct Cursor *cursor, struct Camera *camera) {
-	// Use same projection method as particles
-	const float halfWidth = ScreenWidth * 0.5f;
-	const float halfHeight = ScreenHeight * 0.5f;
-
-	// Calculate view matrix vectors - same as in projectParticles
-	float right[3], trueUp[3];
-	float up[3] = {0, 1, 0};
-
-	// Calculate right vector using cross product
-	right[0] = camera->ray.direction[1] * up[2] - camera->ray.direction[2] * up[1];
-	right[1] = camera->ray.direction[2] * up[0] - camera->ray.direction[0] * up[2];
-	right[2] = camera->ray.direction[0] * up[1] - camera->ray.direction[1] * up[0];
-
-	// Calculate true up vector
-	trueUp[0] = right[1] * camera->ray.direction[2] - right[2] * camera->ray.direction[1];
-	trueUp[1] = right[2] * camera->ray.direction[0] - right[0] * camera->ray.direction[2];
-	trueUp[2] = right[0] * camera->ray.direction[1] - right[1] * camera->ray.direction[0];
-
-	// Calculate vector from camera to cursor
-	float x = cursor->x - camera->ray.origin[0];
-	float y = cursor->y - camera->ray.origin[1];
-	float z = cursor->z - camera->ray.origin[2];
-
-	// Calculate dot product to check if cursor is in front of camera
-	float dotProduct = x * camera->ray.direction[0] +
-					   y * camera->ray.direction[1] +
-					   z * camera->ray.direction[2];
-
-	// Only draw cursor if it's in front of the camera
-	if (dotProduct > 0) {
-		float fovScale = 1.0f / (dotProduct * camera->fov);
-
-		// Calculate screen position
-		float screenRight = (x * right[0] + y * right[1] + z * right[2]) * fovScale;
-		float screenUp = (x * trueUp[0] + y * trueUp[1] + z * trueUp[2]) * fovScale;
-
-		int screenX = (int)(screenRight * halfWidth + halfWidth);
-		int screenY = (int)(-screenUp * halfHeight + halfHeight);
-
-		// Clamp to screen bounds
-		screenX = (screenX < 0) ? 0 : (screenX >= ScreenWidth ? ScreenWidth - 1 : screenX);
-		screenY = (screenY < 0) ? 0 : (screenY >= ScreenHeight ? ScreenHeight - 1 : screenY);
-
-		// Draw horizontal line of cross
-		const int cursorRadius = 5;
-		for (int px = screenX - cursorRadius; px <= screenX + cursorRadius; px++) {
-			if (px >= 0 && px < ScreenWidth) {
-				screen->distance[px][screenY] = 255;
-				screen->velocity[px][screenY] = 255;
-				screen->normalizedOpacity[px][screenY] = 255;
-			}
-		}
-		// Draw vertical line of cross (fixed: use screenX for column)
-		for (int py = screenY - cursorRadius; py <= screenY + cursorRadius; py++) {
-			if (py >= 0 && py < ScreenHeight) {
-				// screen->distance[screenX][py] = 255;
-				screen->velocity[screenX][py] = 255;
-				screen->normalizedOpacity[screenX][py] = 255;
-			}
-		}
-	}
-}
-
 void readCursorData(struct Cursor *cursor) {
 	FILE *file = fopen("cursor.bin", "rb");
 	if (!file) {
@@ -1168,117 +1093,10 @@ float fastInvSqrt(float x) {
 	return y * (1.5f - 0.5f * x * y * y);
 };
 
-void clearScreen(struct Screen *screen) {
-	// Clear all screen buffers using memset - much faster than nested loops
-	memset(screen->distance, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
-	memset(screen->velocity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
-	memset(screen->normalizedOpacity, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight);
-	memset(screen->opacity, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
-	memset(screen->particleCount, 0, sizeof(uint16_t) * ScreenWidth * ScreenHeight);
-	memset(screen->normals, 0, sizeof(float) * ScreenWidth * ScreenHeight * 3);
-	memset(screen->colors, 0, sizeof(uint8_t) * ScreenWidth * ScreenHeight * 3);
-}
-
-void saveScreen(struct Screen *screen, const char *filename) {
-	FILE *file = fopen(filename, "wb");
-	if (!file) {
-		perror("Failed to open file");
-		return;
-	}
-
-	static uint8_t buffer[ScreenWidth * ScreenHeight * 3];
-
-	int i = 0;
-	for (int y = 0; y < ScreenHeight; y++) {
-		for (int x = 0; x < ScreenWidth; x++) {
-			buffer[i++] = screen->distance[x][y];		   // Changed from [x][y] to [y][x]
-			buffer[i++] = screen->velocity[x][y];		   // Changed from [x][y] to [y][x]
-			buffer[i++] = screen->normalizedOpacity[x][y]; // Changed from [x][y] to [y][x]
-		}
-	}
-
-	fwrite(buffer, 1, ScreenWidth * ScreenHeight * 3, file);
-	fclose(file);
-}
-
-void saveScreenColor(struct Screen *screen) {
-	static uint8_t buffer[ScreenWidth * ScreenHeight * 4];
-
-	// Single loop is more cache-friendly
-	int totalPixels = ScreenWidth * ScreenHeight;
-	for (int i = 0; i < totalPixels; i++) {
-		int x = i % ScreenWidth;
-		int y = i / ScreenWidth;
-		int bufferIdx = i * 4;
-
-		buffer[bufferIdx] = screen->colors[x][y][0];	 // R
-		buffer[bufferIdx + 1] = screen->colors[x][y][1]; // G
-		buffer[bufferIdx + 2] = screen->colors[x][y][2]; // B
-		buffer[bufferIdx + 3] = 255;					 // Alpha
-	}
-
-	memcpy(SharedMem, buffer, ScreenWidth * ScreenHeight * 4);
-}
-
-void saveScreenNormal(struct Screen *screen) {
-	static uint8_t buffer[ScreenWidth * ScreenHeight * 4];
-
-	int totalPixels = ScreenWidth * ScreenHeight;
-	for (int i = 0; i < totalPixels; i++) {
-		int x = i % ScreenWidth;
-		int y = i / ScreenWidth;
-		int bufferIdx = i * 4;
-
-		// Convert from [-1,1] to [0,255] range
-		buffer[bufferIdx] = (uint8_t)((screen->normals[x][y][0] * 0.5f + 0.5f) * 255.0f);
-		buffer[bufferIdx + 1] = (uint8_t)((screen->normals[x][y][1] * 0.5f + 0.5f) * 255.0f);
-		buffer[bufferIdx + 2] = (uint8_t)((screen->normals[x][y][2] * 0.5f + 0.5f) * 255.0f);
-		buffer[bufferIdx + 3] = 255; // Alpha
-	}
-
-	size_t offset = ScreenWidth * ScreenHeight * 4;
-	memcpy((uint8_t *)SharedMem + offset, buffer, ScreenWidth * ScreenHeight * 4);
-}
-
-void render(struct Screen *screen, struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
+void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	if (USE_GPU == 1) {
-		projectParticlesOpenCL(openCLContext, particles, camera, screen, triangles, skyBox, gpuTimings, font);
-		// save normal screen
-		struct timespec start, end;
-		clock_gettime(CLOCK_MONOTONIC, &start);
-		saveScreenNormal(screen);
-		clock_gettime(CLOCK_MONOTONIC, &end);
-		double ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
-		printf("Saved normals (shared mem) in %.3f ms\n", ms);
-		clock_gettime(CLOCK_MONOTONIC, &start);
-		saveScreenColor(screen);
-		clock_gettime(CLOCK_MONOTONIC, &end);
-		ms = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
-		printf("Saved colors (shared mem) in %.3f ms\n", ms);
+		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font);
 	}
-}
-
-void update_particles(struct PointSOA *particles, float dt, struct TimePartition *timePartition, struct Cursor *cursor) {
-	clock_t start = clock();
-	clock_t collideParticlesTime = clock();
-	float dt_ = (float)(collideParticlesTime - start) / (float)CLOCKS_PER_SEC;
-	timePartition->collisionTime += dt_;
-	// printf("Collision time: %f\n", dt_);
-
-	clock_t applyPressureTime = clock();
-	dt_ = (float)(applyPressureTime - collideParticlesTime) / (float)CLOCKS_PER_SEC;
-	timePartition->applyPressureTime += dt_;
-	// printf("Apply pressure time: %f\n", dt_);
-
-	clock_t updateParticlesTime = clock();
-	dt_ = (float)(updateParticlesTime - applyPressureTime) / (float)CLOCKS_PER_SEC;
-	timePartition->updateParticlesTime += dt_;
-	// printf("Update particles time: %f\n", dt_);
-
-	clock_t moveToBoxTime = clock();
-	dt_ = (float)(moveToBoxTime - updateParticlesTime) / (float)CLOCKS_PER_SEC;
-	timePartition->moveToBoxTime += dt_;
-	// printf("Move to box time: %f\n", dt_);
 }
 
 // read the pause.bin
@@ -2203,7 +2021,7 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 	clReleaseEvent(kernel_event);
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Screen *screen, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	cl_int err;
 
 	// Use pre-allocated buffers instead of malloc
@@ -2562,7 +2380,10 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clFinish(ocl->queue);
 #endif
 
-	antiAliasingOpenCL(ocl, gpuTimings, camera);
+	if (camera->AntiAlias == true) {
+		antiAliasingOpenCL(ocl, gpuTimings, camera);
+	}
+	
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
 
@@ -3198,13 +3019,6 @@ int main() {
 		return 1;
 	}
 
-	struct Screen *screen = (struct Screen *)malloc(sizeof(struct Screen));
-	if (!screen) {
-		perror("Failed to allocate memory for screen");
-		free(particles);
-		return 1;
-	}
-
 	for (int i = 0; i < NUM_PARTICLES; i++) {
 		particles->x[i] = (float)(rand() % 50 + 30);
 		particles->y[i] = (float)(rand() % 50);
@@ -3214,22 +3028,11 @@ int main() {
 		particles->zVelocity[i] = (float)(rand() % 10) / 100.0f;
 	}
 
-	struct Screen *lightScreen = (struct Screen *)malloc(sizeof(struct Screen));
-	if (!lightScreen) {
-		perror("Failed to allocate memory for light screen");
-		free(particles);
-		free(screen);
-		return 1;
-	}
-	// Initialize light screen buffers
-	clearScreen(lightScreen);
-
 	// initialize the cursor
 	struct Cursor *cursor = (struct Cursor *)malloc(sizeof(struct Cursor));
 	if (!cursor) {
 		perror("Failed to allocate memory for cursor");
 		free(particles);
-		free(screen);
 		return 1;
 	}
 	cursor->x = 0.0f;
@@ -3246,8 +3049,6 @@ int main() {
 	particles->bBoxMax[1] = 80.0f;
 	particles->bBoxMax[2] = 80.0f;
 
-	clearScreen(screen);
-
 	float averageFPS[FrameCount];
 	int averageUpdateTime = 0;
 	int averageRenderTime = 0;
@@ -3258,7 +3059,6 @@ int main() {
 	if (!timePartition) {
 		perror("Failed to allocate memory for time partition");
 		free(particles);
-		free(screen);
 		return 1;
 	}
 
@@ -3361,6 +3161,12 @@ int main() {
 			enum RenderMode oldMode = camera.renderMode;
 			camera.renderMode = (camera.renderMode + 1) % RENDER_MODE_COUNT;
 		}
+		if (isKeyPressed(GLFW_KEY_P)) {
+			paused = !paused;
+		}
+		if (isKeyPressed(GLFW_KEY_L)) {
+			camera.AntiAlias = !camera.AntiAlias;
+		}
 
 		updateKeyStates();
 
@@ -3414,23 +3220,19 @@ int main() {
 		// Update the grid data and record timing
 		// First, update the grid data regardless of pause state
 		clock_t startGridTime = clock();
-		Step(particles, 1.0f / 60.0f); // Always update grid data
+		if (!paused) {
+			Step(particles, 1.0f / 60.0f); // Always update grid data
+		}
 		clock_t endGridTime = clock();
 		dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;
 		timePartition->updateGridTime += dt1;
 
-		// Only update particles if NOT paused
-		if (!paused) {
-			update_particles(particles, dt, timePartition, cursor);
-		} else {
-			printf("Simulation paused, skipping update\n");
-		}
 
 		clock_t afterUpdateTime = clock();
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(screen, particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font);
+		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
@@ -3554,7 +3356,6 @@ int main() {
 
 	// Clean up
 	free(particles);
-	free(screen);
 
 	return 0;
 }
