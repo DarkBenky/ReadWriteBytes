@@ -27,7 +27,7 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
-
+- [ ] add CohesionForce, ViscosityForce
 - [ ] Add Antialiasing
   - [X] Normals to enhance it
   - [X] Modified Antialiasing to be dynamic based on render mode
