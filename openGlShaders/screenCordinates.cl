@@ -1992,19 +1992,150 @@ __kernel void copyToGLTexture(
     }
 }
 
-bool detectEdge(
+typedef struct {
+    float edge_strength;
+    float2 edge_direction;
+    bool is_silhouette;
+    float luminance_contrast;
+    float alpha_variance;
+} EdgeInfo;
+
+EdgeInfo analyzeEdge(
     const int x,
     const int y,
+    __global const float* input_colors,
     __global const float* input_distances,
     __global const float* input_normals,
     const int screen_width,
     const int screen_height,
+    const int mode,
     const float center_distance,
-    const float3 center_normal
+    const float3 center_normal,
+    const float4 center_color_full
+) {
+    EdgeInfo edge_info;
+    edge_info.edge_strength = 0.0f;
+    edge_info.edge_direction = (float2)(0.0f, 0.0f);
+    edge_info.is_silhouette = false;
+    edge_info.luminance_contrast = 0.0f;
+    edge_info.alpha_variance = 0.0f;
+    
+    const float normal_threshold = 0.92f;
+    const float depth_base_threshold = 0.02f;
+    const float depth_scale_factor = 0.008f;
+    const float luminance_threshold = 0.15f;
+    const float alpha_threshold = 0.1f;
+    
+    float center_luminance = dot(center_color_full.xyz, (float3)(0.299f, 0.587f, 0.114f));
+    
+    float2 gradient_normal = (float2)(0.0f, 0.0f);
+    float2 gradient_depth = (float2)(0.0f, 0.0f);
+    float2 gradient_luminance = (float2)(0.0f, 0.0f);
+    float max_alpha_diff = 0.0f;
+    float max_luminance_diff = 0.0f;
+    
+    int sobel_x[9] = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
+    int sobel_y[9] = {-1, -2, -1, 0, 0, 0, 1, 2, 1};
+    int offsets_x[9] = {-1, 0, 1, -1, 0, 1, -1, 0, 1};
+    int offsets_y[9] = {-1, -1, -1, 0, 0, 0, 1, 1, 1};
+    
+    for (int i = 0; i < 9; i++) {
+        int nx = x + offsets_x[i];
+        int ny = y + offsets_y[i];
+        
+        if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+            int neighbor_idx = ny * screen_width + nx;
+            float neighbor_distance = input_distances[neighbor_idx];
+            
+            if (neighbor_distance > 0.001f) {
+                float3 neighbor_normal = vload3(0, &input_normals[neighbor_idx * 3]);
+                float4 neighbor_color_full;
+                
+                if (mode == 0) {
+                    float3 neighbor_color = vload3(0, &input_colors[neighbor_idx * 3]);
+                    neighbor_color_full = (float4)(neighbor_color.x, neighbor_color.y, neighbor_color.z, 1.0f);
+                } else if (mode == 1) {
+                    neighbor_color_full = vload4(0, &input_colors[neighbor_idx * 4]);
+                } else {
+                    float gray = input_colors[neighbor_idx];
+                    neighbor_color_full = (float4)(gray, gray, gray, 1.0f);
+                }
+                
+                if (length(neighbor_normal) > 0.001f) {
+                    neighbor_normal = normalize(neighbor_normal);
+                    
+                    float normal_similarity = dot(center_normal, neighbor_normal);
+                    float depth_diff = fabs(neighbor_distance - center_distance);
+                    float neighbor_luminance = dot(neighbor_color_full.xyz, (float3)(0.299f, 0.587f, 0.114f));
+                    float luminance_diff = fabs(center_luminance - neighbor_luminance);
+                    float alpha_diff = fabs(center_color_full.w - neighbor_color_full.w);
+                    
+                    if (normal_similarity < normal_threshold) {
+                        edge_info.is_silhouette = true;
+                        edge_info.edge_strength = max(edge_info.edge_strength, 1.0f - normal_similarity);
+                    }
+                    
+                    float adaptive_depth_threshold = depth_base_threshold + center_distance * depth_scale_factor;
+                    if (depth_diff > adaptive_depth_threshold) {
+                        edge_info.edge_strength = max(edge_info.edge_strength, 
+                                                    min(1.0f, depth_diff / adaptive_depth_threshold));
+                    }
+                    
+                    if (luminance_diff > luminance_threshold) {
+                        edge_info.edge_strength = max(edge_info.edge_strength, 
+                                                    min(1.0f, luminance_diff / luminance_threshold));
+                        max_luminance_diff = max(max_luminance_diff, luminance_diff);
+                    }
+                    
+                    if (alpha_diff > alpha_threshold) {
+                        max_alpha_diff = max(max_alpha_diff, alpha_diff);
+                    }
+                    
+                    float sobel_weight_x = (float)sobel_x[i] / 8.0f;
+                    float sobel_weight_y = (float)sobel_y[i] / 8.0f;
+                    
+                    gradient_depth += (float2)(sobel_weight_x, sobel_weight_y) * depth_diff;
+                    gradient_luminance += (float2)(sobel_weight_x, sobel_weight_y) * luminance_diff;
+                    
+                    float normal_diff = 1.0f - normal_similarity;
+                    gradient_normal += (float2)(sobel_weight_x, sobel_weight_y) * normal_diff;
+                }
+            } else {
+                edge_info.edge_strength = 1.0f;
+                edge_info.is_silhouette = true;
+            }
+        }
+    }
+    
+    float2 combined_gradient = gradient_normal + gradient_depth * 0.5f + gradient_luminance * 0.3f;
+    edge_info.edge_direction = length(combined_gradient) > 0.001f ? normalize(combined_gradient) : (float2)(0.0f, 0.0f);
+    edge_info.luminance_contrast = max_luminance_diff;
+    edge_info.alpha_variance = max_alpha_diff;
+    
+    return edge_info;
+}
+
+bool detectEdge(
+    const int x,
+    const int y,
+    __global const float* input_colors,
+    __global const float* input_distances,
+    __global const float* input_normals,
+    const int screen_width,
+    const int screen_height,
+    const int mode,
+    const float center_distance,
+    const float3 center_normal,
+    const float4 center_color_full
 ) {
     const float normal_threshold = 0.92f;
     const float depth_base_threshold = 0.02f;
     const float depth_scale_factor = 0.008f;
+    const float luminance_threshold = 0.08f;
+    const float color_threshold = 0.12f;
+    const float alpha_threshold = 0.05f;
+    
+    float center_luminance = dot(center_color_full.xyz, (float3)(0.299f, 0.587f, 0.114f));
     
     int neighbors[8] = {-1, 0, 1, 0, 0, -1, 0, 1};
     
@@ -2022,6 +2153,17 @@ bool detectEdge(
                 if (length(neighbor_normal) > 0.001f) {
                     neighbor_normal = normalize(neighbor_normal);
                     
+                    float4 neighbor_color_full;
+                    if (mode == 0) {
+                        float3 neighbor_color = vload3(0, &input_colors[neighbor_idx * 3]);
+                        neighbor_color_full = (float4)(neighbor_color.x, neighbor_color.y, neighbor_color.z, 1.0f);
+                    } else if (mode == 1) {
+                        neighbor_color_full = vload4(0, &input_colors[neighbor_idx * 4]);
+                    } else {
+                        float gray = input_colors[neighbor_idx];
+                        neighbor_color_full = (float4)(gray, gray, gray, 1.0f);
+                    }
+                    
                     float normal_similarity = dot(center_normal, neighbor_normal);
                     if (normal_similarity < normal_threshold) {
                         return true;
@@ -2034,6 +2176,26 @@ bool detectEdge(
                     if (depth_diff > adaptive_depth_threshold) {
                         return true;
                     }
+                    
+                    float neighbor_luminance = dot(neighbor_color_full.xyz, (float3)(0.299f, 0.587f, 0.114f));
+                    float luminance_diff = fabs(center_luminance - neighbor_luminance);
+                    
+                    if (luminance_diff > luminance_threshold) {
+                        return true;
+                    }
+                    
+                    float3 color_diff = center_color_full.xyz - neighbor_color_full.xyz;
+                    float color_distance = length(color_diff);
+                    
+                    if (color_distance > color_threshold) {
+                        return true;
+                    }
+                    
+                    float alpha_diff = fabs(center_color_full.w - neighbor_color_full.w);
+                    
+                    if (alpha_diff > alpha_threshold) {
+                        return true;
+                    }
                 }
             } else {
                 return true;
@@ -2042,6 +2204,198 @@ bool detectEdge(
     }
     
     return false;
+}
+
+float4 sampleSubpixel(
+    const int x,
+    const int y,
+    __global const float* input_colors,
+    const int screen_width,
+    const int screen_height,
+    const int mode,
+    const float2 offset
+) {
+    float fx = (float)x + offset.x;
+    float fy = (float)y + offset.y;
+    
+    int x0 = (int)floor(fx);
+    int y0 = (int)floor(fy);
+    int x1 = min(x0 + 1, screen_width - 1);
+    int y1 = min(y0 + 1, screen_height - 1);
+    
+    x0 = max(x0, 0);
+    y0 = max(y0, 0);
+    
+    float wx = fx - (float)x0;
+    float wy = fy - (float)y0;
+    
+    float4 c00, c10, c01, c11;
+    
+    if (mode == 0) {
+        float3 color00 = vload3(0, &input_colors[(y0 * screen_width + x0) * 3]);
+        float3 color10 = vload3(0, &input_colors[(y0 * screen_width + x1) * 3]);
+        float3 color01 = vload3(0, &input_colors[(y1 * screen_width + x0) * 3]);
+        float3 color11 = vload3(0, &input_colors[(y1 * screen_width + x1) * 3]);
+        c00 = (float4)(color00.x, color00.y, color00.z, 1.0f);
+        c10 = (float4)(color10.x, color10.y, color10.z, 1.0f);
+        c01 = (float4)(color01.x, color01.y, color01.z, 1.0f);
+        c11 = (float4)(color11.x, color11.y, color11.z, 1.0f);
+    } else if (mode == 1) {
+        c00 = vload4(0, &input_colors[(y0 * screen_width + x0) * 4]);
+        c10 = vload4(0, &input_colors[(y0 * screen_width + x1) * 4]);
+        c01 = vload4(0, &input_colors[(y1 * screen_width + x0) * 4]);
+        c11 = vload4(0, &input_colors[(y1 * screen_width + x1) * 4]);
+    } else {
+        float g00 = input_colors[y0 * screen_width + x0];
+        float g10 = input_colors[y0 * screen_width + x1];
+        float g01 = input_colors[y1 * screen_width + x0];
+        float g11 = input_colors[y1 * screen_width + x1];
+        c00 = (float4)(g00, g00, g00, 1.0f);
+        c10 = (float4)(g10, g10, g10, 1.0f);
+        c01 = (float4)(g01, g01, g01, 1.0f);
+        c11 = (float4)(g11, g11, g11, 1.0f);
+    }
+    
+    float4 top = mix(c00, c10, wx);
+    float4 bottom = mix(c01, c11, wx);
+    return mix(top, bottom, wy);
+}
+
+void performAdvancedEdgeSmoothing(
+    const int x,
+    const int y,
+    __global float* input_colors,
+    __global float* input_distances,
+    __global float* input_normals,
+    const int screen_width,
+    const int screen_height,
+    const int mode,
+    const float4 center_color_full,
+    const float center_distance,
+    const float3 center_normal,
+    const EdgeInfo edge_info
+) {
+    float4 accum_color = center_color_full * 4.0f;
+    float3 accum_normal = center_normal * 4.0f;
+    float accum_distance = center_distance * 4.0f;
+    float total_weight = 4.0f;
+    
+    int kernel_size = edge_info.is_silhouette ? 2 : 1;
+    float edge_strength_factor = 1.0f + edge_info.edge_strength * 0.5f;
+    
+    float2 perpendicular_dir = (float2)(-edge_info.edge_direction.y, edge_info.edge_direction.x);
+    
+    float subpixel_offsets[12] = {
+        -0.375f, -0.125f,  0.125f, -0.375f,  0.375f, -0.125f,
+        -0.125f,  0.125f,  0.125f,  0.125f,  0.375f,  0.375f
+    };
+    
+    for (int sample = 0; sample < 6; sample++) {
+        float2 sample_offset = (float2)(subpixel_offsets[sample * 2], subpixel_offsets[sample * 2 + 1]);
+        
+        if (edge_info.edge_strength > 0.3f) {
+            sample_offset += perpendicular_dir * (sample - 2.5f) * 0.2f * edge_info.edge_strength;
+        }
+        
+        float4 subpixel_color = sampleSubpixel(x, y, input_colors, screen_width, screen_height, mode, sample_offset);
+        float subpixel_weight = 0.8f + 0.4f * cos((float)sample * 1.047f);
+        
+        accum_color += subpixel_color * subpixel_weight;
+        total_weight += subpixel_weight;
+    }
+    
+    for (int dy = -kernel_size; dy <= kernel_size; dy++) {
+        for (int dx = -kernel_size; dx <= kernel_size; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            
+            int nx = x + dx;
+            int ny = y + dy;
+            
+            if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+                int neighbor_idx = ny * screen_width + nx;
+                float neighbor_distance = input_distances[neighbor_idx];
+                
+                if (neighbor_distance > 0.001f) {
+                    float3 neighbor_normal = vload3(0, &input_normals[neighbor_idx * 3]);
+                    
+                    if (length(neighbor_normal) > 0.001f) {
+                        neighbor_normal = normalize(neighbor_normal);
+                        
+                        float4 neighbor_color_full;
+                        if (mode == 0) {
+                            float3 neighbor_color = vload3(0, &input_colors[neighbor_idx * 3]);
+                            neighbor_color_full = (float4)(neighbor_color.x, neighbor_color.y, neighbor_color.z, 1.0f);
+                        } else if (mode == 1) {
+                            neighbor_color_full = vload4(0, &input_colors[neighbor_idx * 4]);
+                        } else {
+                            float gray = input_colors[neighbor_idx];
+                            neighbor_color_full = (float4)(gray, gray, gray, 1.0f);
+                        }
+                        
+                        float normal_similarity = dot(center_normal, neighbor_normal);
+                        float depth_diff = fabs(neighbor_distance - center_distance);
+                        float max_depth_diff = center_distance * 0.08f + 0.04f;
+                        
+                        float color_distance = length(neighbor_color_full.xyz - center_color_full.xyz);
+                        float alpha_diff = fabs(neighbor_color_full.w - center_color_full.w);
+                        
+                        float similarity_threshold = edge_info.is_silhouette ? 0.2f : 0.6f;
+                        float color_threshold = edge_info.luminance_contrast > 0.2f ? 0.8f : 0.4f;
+                        
+                        if (normal_similarity > similarity_threshold && 
+                            depth_diff < max_depth_diff &&
+                            color_distance < color_threshold &&
+                            alpha_diff < 0.3f) {
+                            
+                            float spatial_weight = 1.0f / (1.0f + (float)(dx*dx + dy*dy));
+                            float similarity_weight = normal_similarity * normal_similarity;
+                            float color_weight = 1.0f / (1.0f + color_distance * 2.0f);
+                            float alpha_weight = 1.0f / (1.0f + alpha_diff * 5.0f);
+                            
+                            float final_weight = spatial_weight * similarity_weight * color_weight * alpha_weight * edge_strength_factor;
+                            
+                            if (edge_info.is_silhouette && normal_similarity < 0.7f) {
+                                final_weight *= 0.3f;
+                            }
+                            
+                            accum_color += neighbor_color_full * final_weight;
+                            accum_normal += neighbor_normal * final_weight;
+                            accum_distance += neighbor_distance * final_weight;
+                            total_weight += final_weight;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if (total_weight > 0.1f) {
+        accum_color /= total_weight;
+        accum_normal = normalize(accum_normal / total_weight);
+        accum_distance /= total_weight;
+        
+        accum_color = clamp(accum_color, 0.0f, 4.0f);
+        
+        if (edge_info.luminance_contrast > 0.1f) {
+            float contrast_boost = 1.0f + edge_info.luminance_contrast * 0.1f;
+            accum_color.xyz = mix(accum_color.xyz, center_color_full.xyz, 0.2f) * contrast_boost;
+        }
+        
+        if (mode == 0) {
+            int color_idx = (y * screen_width + x) * 3;
+            vstore3(accum_color.xyz, 0, &input_colors[color_idx]);
+        } else if (mode == 1) {
+            int color_idx = (y * screen_width + x) * 4;
+            vstore4(accum_color, 0, &input_colors[color_idx]);
+        } else if (mode == 2) {
+            int color_idx = y * screen_width + x;
+            input_colors[color_idx] = (accum_color.x + accum_color.y + accum_color.z) / 3.0f;
+        }
+        
+        int normal_idx = (y * screen_width + x) * 3;
+        vstore3(accum_normal, 0, &input_normals[normal_idx]);
+        input_distances[y * screen_width + x] = accum_distance;
+    }
 }
 
 void performEdgeSmoothing(
@@ -2165,8 +2519,19 @@ __kernel void antiAlias(
     
     if (length(center_color) < 0.001f) return;
     
-    bool is_edge = detectEdge(x, y, input_distances, input_normals, 
-                             screen_width, screen_height, center_distance, center_normal);
+    float4 center_color_full;
+    if (mode == 0) {
+        center_color_full = (float4)(center_color.x, center_color.y, center_color.z, 1.0f);
+    } else if (mode == 1) {
+        float4 color4 = vload4(0, &input_colors[pixel_idx * 4]);
+        center_color_full = color4;
+    } else {
+        float gray = input_colors[pixel_idx];
+        center_color_full = (float4)(gray, gray, gray, 1.0f);
+    }
+
+    bool is_edge = detectEdge(x, y, input_colors, input_distances, input_normals, 
+                             screen_width, screen_height, mode, center_distance, center_normal, center_color_full);
     
     if (is_edge) {
         performEdgeSmoothing(x, y, input_colors, input_distances, input_normals,
