@@ -31,6 +31,8 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] Add Antialiasing
   - [ ] Normals to enhance it
   - [ ] Modified Antialiasing to be dynamic based on render mode
+  - [ ] Add TAA
+    - [ ] Previous frame buffer
   - [ ] Add Timings
 - [ ] BVH c Implementation
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)

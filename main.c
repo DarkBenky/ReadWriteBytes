@@ -2164,6 +2164,7 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 	err |= clSetKernelArg(ocl->antiAliasKernel, 2, sizeof(cl_int), &screen_width);
 	err |= clSetKernelArg(ocl->antiAliasKernel, 3, sizeof(cl_int), &screen_height);
 	err |= clSetKernelArg(ocl->antiAliasKernel, 4, sizeof(cl_int), &mode);
+	err |= clSetKernelArg(ocl->antiAliasKernel, 5, sizeof(cl_mem), &ocl->buffer_normals);
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting antiAlias kernel arguments: %d\n", err);
