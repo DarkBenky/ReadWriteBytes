@@ -2562,7 +2562,9 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clFinish(ocl->queue);
 #endif
 
-	antiAliasingOpenCL(ocl, gpuTimings, camera);
+	// antiAliasingOpenCL(ocl, gpuTimings, camera);
+	// antiAliasingOpenCL(ocl, gpuTimings, camera);
+	// antiAliasingOpenCL(ocl, gpuTimings, camera);
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
 

@@ -1992,359 +1992,185 @@ __kernel void copyToGLTexture(
     }
 }
 
+bool detectEdge(
+    const int x,
+    const int y,
+    __global const float* input_distances,
+    __global const float* input_normals,
+    const int screen_width,
+    const int screen_height,
+    const float center_distance,
+    const float3 center_normal
+) {
+    const float normal_threshold = 0.92f;
+    const float depth_base_threshold = 0.02f;
+    const float depth_scale_factor = 0.008f;
+    
+    int neighbors[8] = {-1, 0, 1, 0, 0, -1, 0, 1};
+    
+    for (int i = 0; i < 8; i += 2) {
+        int nx = x + neighbors[i];
+        int ny = y + neighbors[i + 1];
+        
+        if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+            int neighbor_idx = ny * screen_width + nx;
+            float neighbor_distance = input_distances[neighbor_idx];
+            
+            if (neighbor_distance > 0.001f) {
+                float3 neighbor_normal = vload3(0, &input_normals[neighbor_idx * 3]);
+                
+                if (length(neighbor_normal) > 0.001f) {
+                    neighbor_normal = normalize(neighbor_normal);
+                    
+                    float normal_similarity = dot(center_normal, neighbor_normal);
+                    if (normal_similarity < normal_threshold) {
+                        return true;
+                    }
+                    
+                    float depth_diff = fabs(neighbor_distance - center_distance);
+                    float adaptive_depth_threshold = depth_base_threshold + 
+                                                   center_distance * depth_scale_factor;
+                    
+                    if (depth_diff > adaptive_depth_threshold) {
+                        return true;
+                    }
+                }
+            } else {
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+void performEdgeSmoothing(
+    const int x,
+    const int y,
+    __global float* input_colors,
+    __global float* input_distances,
+    __global float* input_normals,
+    const int screen_width,
+    const int screen_height,
+    const int mode,
+    const float3 center_color,
+    const float center_distance,
+    const float3 center_normal
+) {
+    float3 accum_color = center_color * 2.0f;
+    float3 accum_normal = center_normal * 2.0f;
+    float accum_distance = center_distance * 2.0f;
+    float total_weight = 2.0f;
+    
+    int offsets[16] = {-1, -1, 0, -1, 1, -1, -1, 0, 1, 0, -1, 1, 0, 1, 1, 1};
+    float weights[8] = {0.7f, 1.0f, 0.7f, 1.0f, 1.0f, 0.7f, 1.0f, 0.7f};
+    
+    for (int i = 0; i < 16; i += 2) {
+        int nx = x + offsets[i];
+        int ny = y + offsets[i + 1];
+        
+        if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
+            int neighbor_idx = ny * screen_width + nx;
+            float neighbor_distance = input_distances[neighbor_idx];
+            
+            if (neighbor_distance > 0.001f) {
+                float3 neighbor_normal = vload3(0, &input_normals[neighbor_idx * 3]);
+                
+                if (length(neighbor_normal) > 0.001f) {
+                    neighbor_normal = normalize(neighbor_normal);
+                    
+                    float normal_similarity = dot(center_normal, neighbor_normal);
+                    float depth_diff = fabs(neighbor_distance - center_distance);
+                    float max_depth_diff = center_distance * 0.05f + 0.03f;
+                    
+                    if (normal_similarity > 0.4f && depth_diff < max_depth_diff) {
+                        float weight = weights[i / 2] * normal_similarity;
+                        
+                        if (mode == 0) {
+                            float3 neighbor_color = vload3(0, &input_colors[neighbor_idx * 3]);
+                            accum_color += neighbor_color * weight;
+                        } else if (mode == 1) {
+                            float4 neighbor_color4 = vload4(0, &input_colors[neighbor_idx * 4]);
+                            accum_color += neighbor_color4.xyz * weight;
+                        } else if (mode == 2) {
+                            float neighbor_gray = input_colors[neighbor_idx];
+                            accum_color += (float3)(neighbor_gray, neighbor_gray, neighbor_gray) * weight;
+                        }
+                        
+                        accum_normal += neighbor_normal * weight;
+                        accum_distance += neighbor_distance * weight;
+                        total_weight += weight;
+                    }
+                }
+            }
+        }
+    }
+    
+    if (total_weight > 0.1f) {
+        accum_color /= total_weight;
+        accum_normal = normalize(accum_normal / total_weight);
+        accum_distance /= total_weight;
+        
+        if (mode == 0) {
+            int color_idx = (y * screen_width + x) * 3;
+            vstore3(accum_color, 0, &input_colors[color_idx]);
+        } else if (mode == 1) {
+            int color_idx = (y * screen_width + x) * 4;
+            float4 orig_color4 = vload4(0, &input_colors[color_idx]);
+            vstore4((float4)(accum_color.x, accum_color.y, accum_color.z, orig_color4.w), 0, &input_colors[color_idx]);
+        } else if (mode == 2) {
+            int color_idx = y * screen_width + x;
+            input_colors[color_idx] = (accum_color.x + accum_color.y + accum_color.z) / 3.0f;
+        }
+        
+        int normal_idx = (y * screen_width + x) * 3;
+        vstore3(accum_normal, 0, &input_normals[normal_idx]);
+        input_distances[y * screen_width + x] = accum_distance;
+    }
+}
+
 __kernel void antiAlias(
     __global float* input_colors,
     __global float* input_distances,
     int screen_width,
     int screen_height,
-    int mode, // 0 = 3x float, 1 = 4x float, 2 = 1x float
-    __global const float* input_normals
+    int mode,
+    __global float* input_normals
 ) {
     int x = get_global_id(0);
     int y = get_global_id(1);
     
     if (x >= screen_width || y >= screen_height) return;
-
+    
+    int pixel_idx = y * screen_width + x;
+    float center_distance = input_distances[pixel_idx];
+    
+    if (center_distance <= 0.001f) return;
+    
+    float3 center_normal = vload3(0, &input_normals[pixel_idx * 3]);
+    if (length(center_normal) < 0.001f) return;
+    
+    center_normal = normalize(center_normal);
+    
+    float3 center_color;
     if (mode == 0) {
-        // 3x float mode (RGB)
-        int idx = (y * screen_width + x) * 3;
-        int normal_idx = (y * screen_width + x) * 3;
-        
-        float3 center_color = (float3)(input_colors[idx], input_colors[idx+1], input_colors[idx+2]);
-        float center_distance = input_distances[y * screen_width + x];
-        float3 center_normal = (float3)(input_normals[normal_idx], input_normals[normal_idx+1], input_normals[normal_idx+2]);
-        
-        if (length(center_color) == 0.0f || length(center_normal) == 0.0f) {
-            return; // Skip black pixels or pixels without normals
-        }
-        
-        // Normalize the center normal
-        center_normal = normalize(center_normal);
-        
-        float3 accum_color = center_color;
-        float total_weight = 1.0f;
-        
-        // Edge detection parameters
-        float normal_threshold = 0.7f;    // Cosine of ~45 degrees
-        float depth_sensitivity = 0.002f;  // Depth edge sensitivity
-        bool is_edge_pixel = false;
-        
-        // First pass: detect edges using normals and depth
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0) continue;
-                
-                int nx = x + dx;
-                int ny = y + dy;
-                
-                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                    int neighbor_normal_idx = (ny * screen_width + nx) * 3;
-                    float3 neighbor_normal = (float3)(input_normals[neighbor_normal_idx], 
-                                                     input_normals[neighbor_normal_idx+1], 
-                                                     input_normals[neighbor_normal_idx+2]);
-                    float neighbor_distance = input_distances[ny * screen_width + nx];
-                    
-                    if (length(neighbor_normal) > 0.0f) {
-                        neighbor_normal = normalize(neighbor_normal);
-                        
-                        // Normal discontinuity detection
-                        float normal_similarity = dot(center_normal, neighbor_normal);
-                        
-                        // Depth discontinuity detection
-                        float depth_diff = fabs(neighbor_distance - center_distance);
-                        float adaptive_depth_threshold = max(depth_sensitivity, center_distance * depth_sensitivity);
-                        
-                        // Edge detection
-                        if (normal_similarity < normal_threshold || depth_diff > adaptive_depth_threshold) {
-                            is_edge_pixel = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (is_edge_pixel) break;
-        }
-        
-        // Second pass: apply appropriate filtering
-        if (is_edge_pixel) {
-            // Advanced edge-aware filtering for edge pixels
-            for (int dy = -2; dy <= 2; dy++) {
-                for (int dx = -2; dx <= 2; dx++) {
-                    if (dx == 0 && dy == 0) continue;
-                    
-                    int nx = x + dx;
-                    int ny = y + dy;
-                    
-                    if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                        int nidx = (ny * screen_width + nx) * 3;
-                        int neighbor_normal_idx = (ny * screen_width + nx) * 3;
-                        
-                        float3 neighbor_color = (float3)(input_colors[nidx], input_colors[nidx+1], input_colors[nidx+2]);
-                        float neighbor_distance = input_distances[ny * screen_width + nx];
-                        float3 neighbor_normal = (float3)(input_normals[neighbor_normal_idx], 
-                                                         input_normals[neighbor_normal_idx+1], 
-                                                         input_normals[neighbor_normal_idx+2]);
-                        
-                        if (length(neighbor_color) > 0.0f && length(neighbor_normal) > 0.0f) {
-                            neighbor_normal = normalize(neighbor_normal);
-                            
-                            // Multi-factor weighting
-                            float distance_diff = fabs(neighbor_distance - center_distance);
-                            float depth_threshold = max(0.05f, center_distance * 0.05f);
-                            
-                            // Normal similarity weight
-                            float normal_similarity = max(0.0f, dot(center_normal, neighbor_normal));
-                            float normal_weight = pow(normal_similarity, 2.0f);
-                            
-                            // Spatial weight (Gaussian-like)
-                            float spatial_distance = sqrt((float)(dx*dx + dy*dy));
-                            float spatial_weight = exp(-spatial_distance * spatial_distance * 0.2f);
-                            
-                            // Depth continuity weight
-                            float depth_weight = exp(-distance_diff / depth_threshold);
-                            
-                            // Color similarity weight (bilateral filtering component)
-                            float3 color_diff = center_color - neighbor_color;
-                            float color_distance = length(color_diff);
-                            float color_weight = exp(-color_distance * color_distance * 5.0f);
-                            
-                            // Combined weight
-                            float final_weight = spatial_weight * normal_weight * depth_weight * color_weight;
-                            
-                            // Only include samples that are reasonably similar
-                            if (normal_similarity > 0.3f && distance_diff < depth_threshold * 2.0f) {
-                                accum_color += neighbor_color * final_weight;
-                                total_weight += final_weight;
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Standard 3x3 filtering for non-edge pixels
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    if (dx == 0 && dy == 0) continue;
-                    
-                    int nx = x + dx;
-                    int ny = y + dy;
-                    
-                    if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                        int nidx = (ny * screen_width + nx) * 3;
-                        int neighbor_normal_idx = (ny * screen_width + nx) * 3;
-                        
-                        float3 neighbor_color = (float3)(input_colors[nidx], input_colors[nidx+1], input_colors[nidx+2]);
-                        float neighbor_distance = input_distances[ny * screen_width + nx];
-                        float3 neighbor_normal = (float3)(input_normals[neighbor_normal_idx], 
-                                                         input_normals[neighbor_normal_idx+1], 
-                                                         input_normals[neighbor_normal_idx+2]);
-                        
-                        if (length(neighbor_color) > 0.0f && length(neighbor_normal) > 0.0f) {
-                            neighbor_normal = normalize(neighbor_normal);
-                            
-                            // Simple filtering for smooth areas
-                            float normal_similarity = dot(center_normal, neighbor_normal);
-                            if (normal_similarity > 0.8f) {
-                                float spatial_weight = 1.0f / (1.0f + sqrt((float)(dx*dx + dy*dy)));
-                                accum_color += neighbor_color * spatial_weight;
-                                total_weight += spatial_weight;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Apply weighted average
-        if (total_weight > 1.0f) {
-            accum_color /= total_weight;
-            input_colors[idx]   = accum_color.x;
-            input_colors[idx+1] = accum_color.y;
-            input_colors[idx+2] = accum_color.z;
-        }
-        
+        center_color = vload3(0, &input_colors[pixel_idx * 3]);
     } else if (mode == 1) {
-        // 4x float mode (RGBA) - Similar implementation
-        int idx = (y * screen_width + x) * 4;
-        int normal_idx = (y * screen_width + x) * 3;
-        
-        float4 center_color = (float4)(input_colors[idx], input_colors[idx+1], 
-                                      input_colors[idx+2], input_colors[idx+3]);
-        float center_distance = input_distances[y * screen_width + x];
-        float3 center_normal = (float3)(input_normals[normal_idx], input_normals[normal_idx+1], input_normals[normal_idx+2]);
-        
-        if (length(center_color.xyz) == 0.0f || length(center_normal) == 0.0f) {
-            return;
-        }
-        
-        center_normal = normalize(center_normal);
-        
-        float4 accum_color = center_color;
-        float total_weight = 1.0f;
-        
-        // Edge detection
-        bool is_edge_pixel = false;
-        float normal_threshold = 0.7f;
-        float depth_sensitivity = 0.02f;
-        
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0) continue;
-                
-                int nx = x + dx;
-                int ny = y + dy;
-                
-                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                    int neighbor_normal_idx = (ny * screen_width + nx) * 3;
-                    float3 neighbor_normal = (float3)(input_normals[neighbor_normal_idx], 
-                                                     input_normals[neighbor_normal_idx+1], 
-                                                     input_normals[neighbor_normal_idx+2]);
-                    float neighbor_distance = input_distances[ny * screen_width + nx];
-                    
-                    if (length(neighbor_normal) > 0.0f) {
-                        neighbor_normal = normalize(neighbor_normal);
-                        float normal_similarity = dot(center_normal, neighbor_normal);
-                        float depth_diff = fabs(neighbor_distance - center_distance);
-                        float adaptive_depth_threshold = max(depth_sensitivity, center_distance * depth_sensitivity);
-                        
-                        if (normal_similarity < normal_threshold || depth_diff > adaptive_depth_threshold) {
-                            is_edge_pixel = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (is_edge_pixel) break;
-        }
-        
-        // Apply filtering based on edge detection
-        int kernel_size = is_edge_pixel ? 2 : 1;
-        for (int dy = -kernel_size; dy <= kernel_size; dy++) {
-            for (int dx = -kernel_size; dx <= kernel_size; dx++) {
-                if (dx == 0 && dy == 0) continue;
-                
-                int nx = x + dx;
-                int ny = y + dy;
-                
-                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                    int nidx = (ny * screen_width + nx) * 4;
-                    int neighbor_normal_idx = (ny * screen_width + nx) * 3;
-                    
-                    float4 neighbor_color = (float4)(input_colors[nidx], input_colors[nidx+1], 
-                                                    input_colors[nidx+2], input_colors[nidx+3]);
-                    float neighbor_distance = input_distances[ny * screen_width + nx];
-                    float3 neighbor_normal = (float3)(input_normals[neighbor_normal_idx], 
-                                                     input_normals[neighbor_normal_idx+1], 
-                                                     input_normals[neighbor_normal_idx+2]);
-                    
-                    if (length(neighbor_color.xyz) > 0.0f && length(neighbor_normal) > 0.0f) {
-                        neighbor_normal = normalize(neighbor_normal);
-                        
-                        float normal_similarity = max(0.0f, dot(center_normal, neighbor_normal));
-                        float spatial_distance = sqrt((float)(dx*dx + dy*dy));
-                        float spatial_weight = exp(-spatial_distance * spatial_distance * 0.2f);
-                        float normal_weight = pow(normal_similarity, 2.0f);
-                        
-                        float final_weight = spatial_weight * normal_weight;
-                        
-                        if (normal_similarity > (is_edge_pixel ? 0.3f : 0.8f)) {
-                            accum_color += neighbor_color * final_weight;
-                            total_weight += final_weight;
-                        }
-                    }
-                }
-            }
-        }
-        
-        if (total_weight > 1.0f) {
-            accum_color /= total_weight;
-            input_colors[idx]   = accum_color.x;
-            input_colors[idx+1] = accum_color.y;
-            input_colors[idx+2] = accum_color.z;
-            input_colors[idx+3] = accum_color.w;
-        }
-        
+        float4 color4 = vload4(0, &input_colors[pixel_idx * 4]);
+        center_color = color4.xyz;
     } else if (mode == 2) {
-        // 1x float mode (Grayscale) - Simplified version
-        int idx = y * screen_width + x;
-        int normal_idx = (y * screen_width + x) * 3;
-        
-        float center_color = input_colors[idx];
-        float center_distance = input_distances[idx];
-        float3 center_normal = (float3)(input_normals[normal_idx], input_normals[normal_idx+1], input_normals[normal_idx+2]);
-        
-        if (center_color == 0.0f || length(center_normal) == 0.0f) {
-            return;
-        }
-        
-        center_normal = normalize(center_normal);
-        
-        float accum_color = center_color;
-        float total_weight = 1.0f;
-        
-        // Edge detection for grayscale
-        bool is_edge_pixel = false;
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0) continue;
-                
-                int nx = x + dx;
-                int ny = y + dy;
-                
-                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                    int neighbor_normal_idx = (ny * screen_width + nx) * 3;
-                    float3 neighbor_normal = (float3)(input_normals[neighbor_normal_idx], 
-                                                     input_normals[neighbor_normal_idx+1], 
-                                                     input_normals[neighbor_normal_idx+2]);
-                    
-                    if (length(neighbor_normal) > 0.0f) {
-                        neighbor_normal = normalize(neighbor_normal);
-                        if (dot(center_normal, neighbor_normal) < 0.7f) {
-                            is_edge_pixel = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (is_edge_pixel) break;
-        }
-        
-        // Apply filtering
-        int kernel_size = is_edge_pixel ? 2 : 1;
-        for (int dy = -kernel_size; dy <= kernel_size; dy++) {
-            for (int dx = -kernel_size; dx <= kernel_size; dx++) {
-                if (dx == 0 && dy == 0) continue;
-                
-                int nx = x + dx;
-                int ny = y + dy;
-                
-                if (nx >= 0 && nx < screen_width && ny >= 0 && ny < screen_height) {
-                    int nidx = ny * screen_width + nx;
-                    int neighbor_normal_idx = (ny * screen_width + nx) * 3;
-                    
-                    float neighbor_color = input_colors[nidx];
-                    float3 neighbor_normal = (float3)(input_normals[neighbor_normal_idx], 
-                                                     input_normals[neighbor_normal_idx+1], 
-                                                     input_normals[neighbor_normal_idx+2]);
-                    
-                    if (neighbor_color > 0.0f && length(neighbor_normal) > 0.0f) {
-                        neighbor_normal = normalize(neighbor_normal);
-                        float normal_similarity = max(0.0f, dot(center_normal, neighbor_normal));
-                        
-                        if (normal_similarity > (is_edge_pixel ? 0.3f : 0.8f)) {
-                            float spatial_weight = 1.0f / (1.0f + sqrt((float)(dx*dx + dy*dy)));
-                            float final_weight = spatial_weight * normal_similarity;
-                            
-                            accum_color += neighbor_color * final_weight;
-                            total_weight += final_weight;
-                        }
-                    }
-                }
-            }
-        }
-        
-        if (total_weight > 1.0f) {
-            input_colors[idx] = accum_color / total_weight;
-        }
+        float gray = input_colors[pixel_idx];
+        center_color = (float3)(gray, gray, gray);
+    }
+    
+    if (length(center_color) < 0.001f) return;
+    
+    bool is_edge = detectEdge(x, y, input_distances, input_normals, 
+                             screen_width, screen_height, center_distance, center_normal);
+    
+    if (is_edge) {
+        performEdgeSmoothing(x, y, input_colors, input_distances, input_normals,
+                           screen_width, screen_height, mode, 
+                           center_color, center_distance, center_normal);
     }
 }
