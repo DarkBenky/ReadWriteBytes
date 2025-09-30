@@ -38,6 +38,8 @@ The results show that writing frames is faster than reading them, with write ope
   - [ ] Add Timings
 - [ ] Add Pause
   - [ ] Add Text rendering
+- [ ] Add planes and misiles
+  - [ ] render heat in separate buffer
 - [ ] BVH c Implementation
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] implemented it on your own
