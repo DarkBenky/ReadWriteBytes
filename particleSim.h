@@ -8,11 +8,11 @@
 #include <stdlib.h>
 
 #define NUM_PARTICLES 15000
-#define GRAVITY 10.0f
+#define GRAVITY 500.0f
 #define DAMPING 0.985f
 #define gridResolutionAxis 32
 #define gridResolution (gridResolutionAxis * gridResolutionAxis * gridResolutionAxis)
-#define temperature 8.5f
+#define temperature 10.0f
 #define pressure temperature * 0.1f
 #define PARTICLE_RADIUS 4
 #define DEBUG 1

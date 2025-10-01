@@ -27,7 +27,7 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
-- [ ] add CohesionForce, ViscosityForce
+- [ ] Add Setting for fluid with GUI
 - [ ] Add Antialiasing
   - [X] Normals to enhance it
   - [X] Modified Antialiasing to be dynamic based on render mode
@@ -95,6 +95,7 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] add CohesionForce, ViscosityForce
 - [X] Remove CPU read backs
 - [X] Draw Bounding Box Around the particles
 - [X] Velocity normalization Particles
