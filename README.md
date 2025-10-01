@@ -27,6 +27,7 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
+- [ ] Simulate fluid on gpu move the code to separate file 
 - [ ] Add Setting for fluid with GUI
 - [ ] Add Antialiasing
   - [X] Normals to enhance it
