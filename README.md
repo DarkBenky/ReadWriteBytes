@@ -28,7 +28,7 @@ The results show that writing frames is faster than reading them, with write ope
   
 ## TODO - Base on priority
 - [ ] Simulate fluid on gpu move the code to separate file
-- [ ] - [ ] fire sim
+- [ ] fire sim
 ```c
   type Particles struct {
       float posX[count]
