@@ -28,7 +28,30 @@ The results show that writing frames is faster than reading them, with write ope
   
 ## TODO - Base on priority
 - [ ] Simulate fluid on gpu move the code to separate file
-- [ ] implement missiles
+- [ ] - [ ] fire sim
+```c
+  type Particles struct {
+      float posX[count]
+      float posY[count]
+      float posZ[count]
+      float velX[count]
+      float velY[count]
+      float velZ[count]
+      float lifeTime[count]
+      float basePos[3]
+      float baseColor[3]
+      float fireColor[3]
+      float SmokeColor[3]
+      float maxLifeTime
+      Size  float
+    }
+```
+  - [ ] run on gpu
+    - [ ] move up with some random side wiggle
+    - [ ] render color based on the liftime lerp between base color -> fire color -> smoke color
+  -   [ ] when life time is bigger then reset position and life time
+- [ ] Add planes and misiles
+  - [ ] render heat in separate buffer
 - [ ] Add Setting for fluid with GUI
 - [ ] Add Antialiasing
   - [X] Normals to enhance it
@@ -40,8 +63,6 @@ The results show that writing frames is faster than reading them, with write ope
   - [ ] Add Timings
 - [ ] Add Pause
   - [ ] Add Text rendering
-- [ ] Add planes and misiles
-  - [ ] render heat in separate buffer
 - [ ] BVH c Implementation
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] implemented it on your own
