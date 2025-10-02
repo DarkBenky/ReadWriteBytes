@@ -50,6 +50,7 @@ The results show that writing frames is faster than reading them, with write ope
     - [ ] move up with some random side wiggle
     - [ ] render color based on the liftime lerp between base color -> fire color -> smoke color
   -   [ ] when life time is bigger then reset position and life time
+  - [ ] integrate it to main file
 - [ ] Add planes and misiles
   - [ ] render heat in separate buffer
 - [ ] Add Setting for fluid with GUI
