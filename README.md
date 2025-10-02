@@ -46,10 +46,10 @@ The results show that writing frames is faster than reading them, with write ope
       Size  float
     }
 ```
-  - [ ] run on gpu
-    - [ ] move up with some random side wiggle
-    - [ ] render color based on the liftime lerp between base color -> fire color -> smoke color
-  -   [ ] when life time is bigger then reset position and life time
+  - [X] run on gpu
+    - [X] move up with some random side wiggle
+    - [X] render color based on the lifetime lerp between base color -> fire color -> smoke color
+  -   [X] when life time is bigger then reset position and life time
   - [ ] integrate it to main file
 - [ ] Add planes and misiles
   - [ ] render heat in separate buffer
