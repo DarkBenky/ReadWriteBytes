@@ -27,8 +27,8 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
-- [ ] Simulate fluid on gpu move the code to separate file
-- [ ] fire sim
+- [X] Simulate fluid on gpu move the code to separate file
+- [X] fire sim
 ```c
   type Particles struct {
       float posX[count]
@@ -53,6 +53,7 @@ The results show that writing frames is faster than reading them, with write ope
   - [ ] integrate it to main file
 - [ ] Add planes and misiles
   - [ ] render heat in separate buffer
+    - [ ] add data link 
 - [ ] Add Setting for fluid with GUI
 - [ ] Add Antialiasing
   - [X] Normals to enhance it
@@ -97,6 +98,8 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] (Look Into) Fix .obj file parsing
 - [ ] Update timimg (CPU)
 - [ ] add emission and bloom
+  - [ ] ***Note** can be handled with ray tracing
+  - [ ] ***Optional*** add cnn to denoise ray tracer inmplement it in openCL to make it fast
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
 
 ### Add Open GL to the go code to project particles on GPU directly
