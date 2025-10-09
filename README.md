@@ -51,6 +51,7 @@ The results show that writing frames is faster than reading them, with write ope
     - [X] render color based on the lifetime lerp between base color -> fire color -> smoke color
   -   [X] when life time is bigger then reset position and life time
   - [ ] integrate it to main file
+    - [ ] add it to render modes
 - [ ] Add planes and misiles
   - [ ] render heat in separate buffer
     - [ ] add data link 
