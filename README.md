@@ -27,6 +27,7 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
+- [ ] ***FIRE RENDERING SAME AS OLD CODE***
 - [X] Simulate fluid on gpu move the code to separate file
 - [X] fire sim
 ```c

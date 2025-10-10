@@ -3,24 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-void initFireSimulation(struct Particles *particles) {
-	for (int i = 0; i < NUM_PARTICLES; i++) {
-		particles->posX[i] = particles->basePos[0] + (rand() / (float)RAND_MAX - 0.5f) * 0.5f;
-		particles->posY[i] = particles->basePos[1];
-		particles->posZ[i] = particles->basePos[2] + (rand() / (float)RAND_MAX - 0.5f) * 0.5f;
-		particles->velX[i] = (rand() / (float)RAND_MAX - 0.5f) * 2.0f;
-		particles->velY[i] = rand() / (float)RAND_MAX * 3.0f + 2.0f;
-		particles->velZ[i] = (rand() / (float)RAND_MAX - 0.5f) * 2.0f;
-		particles->lifeTime[i] = rand() / (float)RAND_MAX * particles->maxLifeTime;
-	}
-}
-
 void renderFireParticles(struct OpenCLContextFireSim *cl, struct Particles *particles,
 						 int screenWidth, int screenHeight, float *viewMatrix, float *projMatrix) {
 
 	cl_float3 baseColor = {{particles->baseColor[0], particles->baseColor[1], particles->baseColor[2]}};
 	cl_float3 fireColor = {{particles->fireColor[0], particles->fireColor[1], particles->fireColor[2]}};
 	cl_float3 smokeColor = {{particles->SmokeColor[0], particles->SmokeColor[1], particles->SmokeColor[2]}};
+
 	cl_float16 viewMat, projMat;
 
 	for (int i = 0; i < 16; i++) {
@@ -28,7 +17,7 @@ void renderFireParticles(struct OpenCLContextFireSim *cl, struct Particles *part
 		projMat.s[i] = projMatrix[i];
 	}
 
-	size_t globalSize = NUM_PARTICLES;
+	size_t globalSize = FIRE_PARTICLES;
 
 	clSetKernelArg(cl->kernelRenderParticles, 0, sizeof(cl_mem), &cl->posX);
 	clSetKernelArg(cl->kernelRenderParticles, 1, sizeof(cl_mem), &cl->posY);
@@ -39,10 +28,10 @@ void renderFireParticles(struct OpenCLContextFireSim *cl, struct Particles *part
 	clSetKernelArg(cl->kernelRenderParticles, 6, sizeof(cl_float3), &baseColor);
 	clSetKernelArg(cl->kernelRenderParticles, 7, sizeof(cl_float3), &fireColor);
 	clSetKernelArg(cl->kernelRenderParticles, 8, sizeof(cl_float3), &smokeColor);
-	clSetKernelArg(cl->kernelRenderParticles, 9, sizeof(float), &particles->maxLifeTime);
-	clSetKernelArg(cl->kernelRenderParticles, 10, sizeof(float), &particles->particleSize);
-	clSetKernelArg(cl->kernelRenderParticles, 11, sizeof(int), &screenWidth);
-	clSetKernelArg(cl->kernelRenderParticles, 12, sizeof(int), &screenHeight);
+	clSetKernelArg(cl->kernelRenderParticles, 9, sizeof(cl_float), &particles->maxLifeTime);
+	clSetKernelArg(cl->kernelRenderParticles, 10, sizeof(cl_float), &particles->particleSize);
+	clSetKernelArg(cl->kernelRenderParticles, 11, sizeof(cl_int), &screenWidth);
+	clSetKernelArg(cl->kernelRenderParticles, 12, sizeof(cl_int), &screenHeight);
 	clSetKernelArg(cl->kernelRenderParticles, 13, sizeof(cl_float16), &viewMat);
 	clSetKernelArg(cl->kernelRenderParticles, 14, sizeof(cl_float16), &projMat);
 
@@ -55,18 +44,18 @@ void renderFireParticles(struct OpenCLContextFireSim *cl, struct Particles *part
 	clSetKernelArg(cl->kernelBlurFire, 2, sizeof(int), &screenWidth);
 	clSetKernelArg(cl->kernelBlurFire, 3, sizeof(int), &screenHeight);
 
-	int pass = 0;
-	clSetKernelArg(cl->kernelBlurFire, 4, sizeof(int), &pass);
-	clEnqueueNDRangeKernel(cl->queue, cl->kernelBlurFire, 2, NULL, globalSize2D, NULL, 0, NULL, NULL);
+	// int pass = 0;
+	// clSetKernelArg(cl->kernelBlurFire, 4, sizeof(int), &pass);
+	// clEnqueueNDRangeKernel(cl->queue, cl->kernelBlurFire, 2, NULL, globalSize2D, NULL, 0, NULL, NULL);
 
-	pass = 1;
-	clSetKernelArg(cl->kernelBlurFire, 4, sizeof(int), &pass);
-	clEnqueueNDRangeKernel(cl->queue, cl->kernelBlurFire, 2, NULL, globalSize2D, NULL, 0, NULL, NULL);
+	// pass = 1;
+	// clSetKernelArg(cl->kernelBlurFire, 4, sizeof(int), &pass);
+	// clEnqueueNDRangeKernel(cl->queue, cl->kernelBlurFire, 2, NULL, globalSize2D, NULL, 0, NULL, NULL);
 
 	clFinish(cl->queue);
 }
 
-int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource) {
+int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource, int screenWidth, int screenHeight, struct Particles *particles) {
 	cl_int err;
 
 	err = clGetPlatformIDs(1, &cl->platform, NULL);
@@ -86,7 +75,15 @@ int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource)
 	if (err != CL_SUCCESS) return -1;
 
 	err = clBuildProgram(cl->program, 1, &cl->device, NULL, NULL, NULL);
-	if (err != CL_SUCCESS) return -1;
+	if (err != CL_SUCCESS) {
+		size_t log_size;
+		clGetProgramBuildInfo(cl->program, cl->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+		char *log = (char *)malloc(log_size);
+		clGetProgramBuildInfo(cl->program, cl->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+		printf("OpenCL build error:\n%s\n", log);
+		free(log);
+		return -1;
+	}
 
 	cl->kernelUpdateParticles = clCreateKernel(cl->program, "fireSim", &err);
 	if (err != CL_SUCCESS) return -1;
@@ -97,27 +94,54 @@ int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource)
 	cl->kernelBlurFire = clCreateKernel(cl->program, "blurFire", &err);
 	if (err != CL_SUCCESS) return -1;
 
-	cl->posX = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * NUM_PARTICLES, NULL, &err);
-	cl->posY = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * NUM_PARTICLES, NULL, &err);
-	cl->posZ = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * NUM_PARTICLES, NULL, &err);
-	cl->velX = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * NUM_PARTICLES, NULL, &err);
-	cl->velY = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * NUM_PARTICLES, NULL, &err);
-	cl->velZ = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * NUM_PARTICLES, NULL, &err);
-	cl->lifeTime = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * NUM_PARTICLES, NULL, &err);
+	cl->posX = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
+	if (err != CL_SUCCESS) return -1;
+	cl->posY = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
+	if (err != CL_SUCCESS) return -1;
+	cl->posZ = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
+	if (err != CL_SUCCESS) return -1;
+	cl->velX = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
+	if (err != CL_SUCCESS) return -1;
+	cl->velY = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
+	if (err != CL_SUCCESS) return -1;
+	cl->velZ = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
+	if (err != CL_SUCCESS) return -1;
+	cl->lifeTime = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
+	if (err != CL_SUCCESS) return -1;
+
+	clEnqueueWriteBuffer(cl->queue, cl->posX, CL_TRUE, 0, sizeof(float) * FIRE_PARTICLES, particles->posX, 0, NULL, NULL);
+	clEnqueueWriteBuffer(cl->queue, cl->posY, CL_TRUE, 0, sizeof(float) * FIRE_PARTICLES, particles->posY, 0, NULL, NULL);
+	clEnqueueWriteBuffer(cl->queue, cl->posZ, CL_TRUE, 0, sizeof(float) * FIRE_PARTICLES, particles->posZ, 0, NULL, NULL);
+	clEnqueueWriteBuffer(cl->queue, cl->velX, CL_TRUE, 0, sizeof(float) * FIRE_PARTICLES, particles->velX, 0, NULL, NULL);
+	clEnqueueWriteBuffer(cl->queue, cl->velY, CL_TRUE, 0, sizeof(float) * FIRE_PARTICLES, particles->velY, 0, NULL, NULL);
+	clEnqueueWriteBuffer(cl->queue, cl->velZ, CL_TRUE, 0, sizeof(float) * FIRE_PARTICLES, particles->velZ, 0, NULL, NULL);
+	clEnqueueWriteBuffer(cl->queue, cl->lifeTime, CL_TRUE, 0, sizeof(float) * FIRE_PARTICLES, particles->lifeTime, 0, NULL, NULL);
+
+	size_t colorBufferSize = screenWidth * screenHeight * 3 * sizeof(float);
+	cl->buffer_color = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, colorBufferSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create color buffer: %d\n", err);
+		return -1;
+	}
+
+	size_t depthBufferSize = screenWidth * screenHeight * sizeof(float);
+	cl->buffer_depth = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, depthBufferSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create depth buffer: %d\n", err);
+		return -1;
+	}
+
+	cl->buffer_temp = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, colorBufferSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create temp buffer: %d\n", err);
+		return -1;
+	}
 
 	return 0;
 }
 
 void stepFireSimulation(struct OpenCLContextFireSim *cl, struct Particles *particles, float deltaTime) {
 	cl_float3 basePos = {{particles->basePos[0], particles->basePos[1], particles->basePos[2]}};
-
-	clEnqueueWriteBuffer(cl->queue, cl->posX, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->posX, 0, NULL, NULL);
-	clEnqueueWriteBuffer(cl->queue, cl->posY, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->posY, 0, NULL, NULL);
-	clEnqueueWriteBuffer(cl->queue, cl->posZ, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->posZ, 0, NULL, NULL);
-	clEnqueueWriteBuffer(cl->queue, cl->velX, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->velX, 0, NULL, NULL);
-	clEnqueueWriteBuffer(cl->queue, cl->velY, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->velY, 0, NULL, NULL);
-	clEnqueueWriteBuffer(cl->queue, cl->velZ, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->velZ, 0, NULL, NULL);
-	clEnqueueWriteBuffer(cl->queue, cl->lifeTime, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->lifeTime, 0, NULL, NULL);
 
 	clSetKernelArg(cl->kernelUpdateParticles, 0, sizeof(cl_mem), &cl->posX);
 	clSetKernelArg(cl->kernelUpdateParticles, 1, sizeof(cl_mem), &cl->posY);
@@ -130,16 +154,10 @@ void stepFireSimulation(struct OpenCLContextFireSim *cl, struct Particles *parti
 	clSetKernelArg(cl->kernelUpdateParticles, 8, sizeof(float), &particles->maxLifeTime);
 	clSetKernelArg(cl->kernelUpdateParticles, 9, sizeof(float), &deltaTime);
 
-	size_t globalSize = NUM_PARTICLES;
+	size_t globalSize = FIRE_PARTICLES;
 	clEnqueueNDRangeKernel(cl->queue, cl->kernelUpdateParticles, 1, NULL, &globalSize, NULL, 0, NULL, NULL);
 
-	clEnqueueReadBuffer(cl->queue, cl->posX, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->posX, 0, NULL, NULL);
-	clEnqueueReadBuffer(cl->queue, cl->posY, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->posY, 0, NULL, NULL);
-	clEnqueueReadBuffer(cl->queue, cl->posZ, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->posZ, 0, NULL, NULL);
-	clEnqueueReadBuffer(cl->queue, cl->velX, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->velX, 0, NULL, NULL);
-	clEnqueueReadBuffer(cl->queue, cl->velY, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->velY, 0, NULL, NULL);
-	clEnqueueReadBuffer(cl->queue, cl->velZ, CL_FALSE, 0, sizeof(float) * NUM_PARTICLES, particles->velZ, 0, NULL, NULL);
-	clEnqueueReadBuffer(cl->queue, cl->lifeTime, CL_TRUE, 0, sizeof(float) * NUM_PARTICLES, particles->lifeTime, 0, NULL, NULL);
+	clFinish(cl->queue);
 }
 
 void cleanupFireSim(struct OpenCLContextFireSim *cl) {

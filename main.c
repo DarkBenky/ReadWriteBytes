@@ -19,6 +19,7 @@
 #include <string.h>
 #include <GLFW/glfw3.h>
 #include <stdio.h>
+#include "fireSim/fireSim.h"
 
 void *SharedMem = NULL;
 
@@ -115,7 +116,9 @@ char *renderModesName[] = {
 	"Normal",
 	"Fluid",
 	"Color",
-	"Wireframe"};
+	"Wireframe",
+	"renderFireColor",
+	"renderFireDistance"};
 
 enum RenderMode {
 	renderDistance,
@@ -125,6 +128,8 @@ enum RenderMode {
 	renderFluid,
 	renderColor,
 	renderWireframe,
+	renderFireColor,
+	renderFireDepth,
 	RENDER_MODE_COUNT // Total number of render modes
 };
 
@@ -1000,7 +1005,7 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, 
 }
 
 // Function prototypes
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct Particles *fireParticles, struct OpenCLContextFireSim *oclFireSim);
 
 struct Light {
 	float x;
@@ -1093,9 +1098,9 @@ float fastInvSqrt(float x) {
 	return y * (1.5f - 0.5f * x * y * y);
 };
 
-void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
+void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct Particles *fireParticles, struct OpenCLContextFireSim *oclFireSim) {
 	if (USE_GPU == 1) {
-		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font);
+		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font, fireParticles, oclFireSim);
 	}
 }
 
@@ -1933,7 +1938,7 @@ void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct 
 	clReleaseEvent(kernel_event);
 }
 
-void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, struct Camera *camera) {
+void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, struct Camera *camera, struct OpenCLContextFireSim *fireOcl) {
 	cl_int err;
 	cl_event kernel_event; // Add event for timing
 
@@ -1967,6 +1972,14 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 	case renderWireframe:
 		mode = 0;
 		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderFireColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &fireOcl->buffer_color);
+		break;
+	case renderFireDepth:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &fireOcl->buffer_depth);
 		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;
@@ -2021,7 +2034,77 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 	clReleaseEvent(kernel_event);
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
+float viewMatrix[16];
+float projMatrix[16];
+
+void updateProjectionMatrix(struct Camera *camera) {
+	float forward[3] = {
+		camera->ray.direction[0],
+		camera->ray.direction[1],
+		camera->ray.direction[2]};
+
+	float forwardLen = sqrtf(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
+	if (forwardLen > 0.0001f) {
+		forward[0] /= forwardLen;
+		forward[1] /= forwardLen;
+		forward[2] /= forwardLen;
+	}
+
+	float worldUp[3] = {0.0f, 1.0f, 0.0f};
+
+	float right[3];
+	right[0] = forward[1] * worldUp[2] - forward[2] * worldUp[1];
+	right[1] = forward[2] * worldUp[0] - forward[0] * worldUp[2];
+	right[2] = forward[0] * worldUp[1] - forward[1] * worldUp[0];
+
+	float rightLen = sqrtf(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+	if (rightLen > 0.0001f) {
+		right[0] /= rightLen;
+		right[1] /= rightLen;
+		right[2] /= rightLen;
+	}
+
+	float up[3];
+	up[0] = right[1] * forward[2] - right[2] * forward[1];
+	up[1] = right[2] * forward[0] - right[0] * forward[2];
+	up[2] = right[0] * forward[1] - right[1] * forward[0];
+
+	viewMatrix[0] = right[0];
+	viewMatrix[1] = up[0];
+	viewMatrix[2] = -forward[0];
+	viewMatrix[3] = 0.0f;
+
+	viewMatrix[4] = right[1];
+	viewMatrix[5] = up[1];
+	viewMatrix[6] = -forward[1];
+	viewMatrix[7] = 0.0f;
+
+	viewMatrix[8] = right[2];
+	viewMatrix[9] = up[2];
+	viewMatrix[10] = -forward[2];
+	viewMatrix[11] = 0.0f;
+
+	viewMatrix[12] = -(right[0] * camera->ray.origin[0] + right[1] * camera->ray.origin[1] + right[2] * camera->ray.origin[2]);
+	viewMatrix[13] = -(up[0] * camera->ray.origin[0] + up[1] * camera->ray.origin[1] + up[2] * camera->ray.origin[2]);
+	viewMatrix[14] = (forward[0] * camera->ray.origin[0] + forward[1] * camera->ray.origin[1] + forward[2] * camera->ray.origin[2]);
+	viewMatrix[15] = 1.0f;
+
+	float aspect = (float)ScreenWidth / (float)ScreenHeight;
+	float fov_rad = camera->fov * M_PI / 180.0f;
+	float near = 0.1f;
+	float far = 1000.0f;
+	float f = 1.0f / tanf(fov_rad / 2.0f);
+
+	memset(projMatrix, 0, sizeof(float) * 16);
+
+	projMatrix[0] = f / aspect;
+	projMatrix[5] = f;
+	projMatrix[10] = (far + near) / (near - far);
+	projMatrix[11] = -1.0f;
+	projMatrix[14] = (2.0f * far * near) / (near - far);
+}
+
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct Particles *fireParticles, struct OpenCLContextFireSim *fireOcl) {
 	cl_int err;
 
 	// Use pre-allocated buffers instead of malloc
@@ -2037,6 +2120,10 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		velocities_data[i * 3 + 1] = particles->yVelocity[i];
 		velocities_data[i * 3 + 2] = particles->zVelocity[i];
 	}
+
+	// render fire particles
+	updateProjectionMatrix(camera);
+	renderFireParticles(fireOcl, fireParticles, ScreenWidth, ScreenHeight, viewMatrix, projMatrix);
 
 	// Write data to GPU buffers
 	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_points, CL_TRUE, 0,
@@ -2157,6 +2244,14 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	snprintf(text, sizeof(text), "Render Mode: %s", renderModesName[camera->renderMode]);
 	addTextOpenCL(ocl, font, text, 5, 5, white);
+
+	if (camera->AntiAlias) {
+		snprintf(text, sizeof(text), "AntiAlias Enabled (L)");
+		addTextOpenCL(ocl, font, text, 5, 80, white);
+	} else {
+		snprintf(text, sizeof(text), "AntiAlias Disabled (L)");
+		addTextOpenCL(ocl, font, text, 5, 80, white);
+	}
 
 #ifdef DEBUG
 	snprintf(text, sizeof(text), "Cam Pos: %.1f %.1f %.1f", camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]);
@@ -2381,9 +2476,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 #endif
 
 	if (camera->AntiAlias == true) {
-		antiAliasingOpenCL(ocl, gpuTimings, camera);
+		antiAliasingOpenCL(ocl, gpuTimings, camera, fireOcl);
 	}
-	
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
 
@@ -2427,6 +2521,14 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	case renderWireframe:
 		mode = 0;
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderFireColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &fireOcl->buffer_color);
+		break;
+	case renderFireDepth:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &fireOcl->buffer_depth);
 		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;
@@ -2957,6 +3059,60 @@ void updateMouseStates() {
 }
 
 int main() {
+	struct Particles fireParticles;
+	fireParticles.basePos[0] = 40.0f;
+	fireParticles.basePos[1] = 10.0f;
+	fireParticles.basePos[2] = 40.0f;
+	fireParticles.baseColor[0] = 1.0f;
+	fireParticles.baseColor[1] = 0.3f;
+	fireParticles.baseColor[2] = 0.0f;
+	fireParticles.fireColor[0] = 1.0f;
+	fireParticles.fireColor[1] = 0.5f;
+	fireParticles.fireColor[2] = 0.0f;
+	fireParticles.SmokeColor[0] = 0.3f;
+	fireParticles.SmokeColor[1] = 0.3f;
+	fireParticles.SmokeColor[2] = 0.3f;
+	fireParticles.maxLifeTime = 15.0f;
+	fireParticles.particleSize = 10.0f;
+
+	for (int i = 0; i < FIRE_PARTICLES; i++) {
+		fireParticles.posX[i] = fireParticles.basePos[0] + (rand_01() - 0.5f) * 10.0f;
+		fireParticles.posY[i] = fireParticles.basePos[1];
+		fireParticles.posZ[i] = fireParticles.basePos[2] + (rand_01() - 0.5f) * 10.0f;
+
+		fireParticles.velX[i] = (rand_01() - 0.5f) * 0.1f;
+		fireParticles.velY[i] = (rand_01() - 0.5f) * 0.8f;
+		fireParticles.velX[i] = (rand_01() - 0.5f) * 0.1f;
+
+		fireParticles.lifeTime[i] = rand_01() * fireParticles.maxLifeTime;
+	}
+
+	struct OpenCLContextFireSim fireOcl;
+
+	// Read the fire simulation kernel source
+	FILE *fireKernelFile = fopen("fireSim/fireSim.cl", "r");
+	if (!fireKernelFile) {
+		printf("Error: Could not open fire kernel file\n");
+		return -1;
+	}
+
+	fseek(fireKernelFile, 0, SEEK_END);
+	size_t fireKernelSize = ftell(fireKernelFile);
+	fseek(fireKernelFile, 0, SEEK_SET);
+
+	char *fireKernelSource = (char *)malloc(fireKernelSize + 1);
+	fread(fireKernelSource, 1, fireKernelSize, fireKernelFile);
+	fireKernelSource[fireKernelSize] = '\0';
+	fclose(fireKernelFile);
+
+	// Initialize fire OpenCL context
+	if (initOpenCLFireSim(&fireOcl, fireKernelSource, ScreenWidth, ScreenHeight, &fireParticles) != 0) {
+		printf("Failed to initialize fire simulation OpenCL\n");
+		free(fireKernelSource);
+		return -1;
+	}
+	free(fireKernelSource);
+
 	// load BVH
 	struct BVHLinear bvh;
 	ReadBVH(&bvh, "parseObj/encoded.bvh");
@@ -3169,7 +3325,6 @@ int main() {
 		}
 
 		updateKeyStates();
-
 		updateMouseStates();
 
 		static float yaw = 0.0f;
@@ -3222,17 +3377,17 @@ int main() {
 		clock_t startGridTime = clock();
 		if (!paused) {
 			Step(particles, 1.0f / 60.0f); // Always update grid data
+			stepFireSimulation(&fireOcl, &fireParticles, 1.0f / 60.0f);
 		}
 		clock_t endGridTime = clock();
 		dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;
 		timePartition->updateGridTime += dt1;
 
-
 		clock_t afterUpdateTime = clock();
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font);
+		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, &fireParticles, &fireOcl);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;

@@ -3,16 +3,16 @@
 
 #include <CL/cl.h>
 
-#define NUM_PARTICLES 1000
+#define FIRE_PARTICLES 1000
 
 struct Particles {
-    float posX[NUM_PARTICLES];
-    float posY[NUM_PARTICLES];
-    float posZ[NUM_PARTICLES];
-    float velX[NUM_PARTICLES];
-    float velY[NUM_PARTICLES];
-    float velZ[NUM_PARTICLES];
-    float lifeTime[NUM_PARTICLES];
+    float posX[FIRE_PARTICLES];
+    float posY[FIRE_PARTICLES];
+    float posZ[FIRE_PARTICLES];
+    float velX[FIRE_PARTICLES];
+    float velY[FIRE_PARTICLES];
+    float velZ[FIRE_PARTICLES];
+    float lifeTime[FIRE_PARTICLES];
     float basePos[3];
     float baseColor[3];
     float fireColor[3];
@@ -42,9 +42,8 @@ struct OpenCLContextFireSim {
     cl_mem buffer_temp;
 };
 
-void initFireSimulation(struct Particles* particles);
 
-int initOpenCLFireSim(struct OpenCLContextFireSim* cl, const char* kernelSource);
+int initOpenCLFireSim(struct OpenCLContextFireSim* cl, const char* kernelSource, int screenWidth, int screenHeight, struct Particles* particles);
 
 void stepFireSimulation(struct OpenCLContextFireSim* cl, struct Particles* particles, float deltaTime);
 
