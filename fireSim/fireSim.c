@@ -34,6 +34,7 @@ void renderFireParticles(struct OpenCLContextFireSim *cl, struct Particles *part
 	clSetKernelArg(cl->kernelRenderParticles, 12, sizeof(cl_int), &screenHeight);
 	clSetKernelArg(cl->kernelRenderParticles, 13, sizeof(cl_float16), &viewMat);
 	clSetKernelArg(cl->kernelRenderParticles, 14, sizeof(cl_float16), &projMat);
+	clSetKernelArg(cl->kernelRenderParticles, 15, sizeof(cl_mem), &cl->maxDepth);
 
 	clEnqueueNDRangeKernel(cl->queue, cl->kernelRenderParticles, 1, NULL, &globalSize, NULL, 0, NULL, NULL);
 
@@ -53,22 +54,46 @@ void renderFireParticles(struct OpenCLContextFireSim *cl, struct Particles *part
 	// clEnqueueNDRangeKernel(cl->queue, cl->kernelBlurFire, 2, NULL, globalSize2D, NULL, 0, NULL, NULL);
 
 	clFinish(cl->queue);
+
+	normalizeFireDepth(cl, screenWidth, screenHeight);
 }
 
-int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource, int screenWidth, int screenHeight, struct Particles *particles) {
+void normalizeFireDepth(struct OpenCLContextFireSim *cl, int screenWidth, int screenHeight) {
+	// First, reset the max depth buffer to 0
+	float zero = 0.0f;
+	clEnqueueWriteBuffer(cl->queue, cl->maxDepth, CL_TRUE, 0, sizeof(float), &zero, 0, NULL, NULL);
+
+	// Find the maximum depth value
+	clSetKernelArg(cl->kernelFindMaxDepth, 0, sizeof(cl_mem), &cl->buffer_depth);
+	clSetKernelArg(cl->kernelFindMaxDepth, 1, sizeof(cl_mem), &cl->maxDepth);
+	clSetKernelArg(cl->kernelFindMaxDepth, 2, sizeof(int), &screenWidth);
+	clSetKernelArg(cl->kernelFindMaxDepth, 3, sizeof(int), &screenHeight);
+
+	size_t globalSize2D[2] = {screenWidth, screenHeight};
+	clEnqueueNDRangeKernel(cl->queue, cl->kernelFindMaxDepth, 2, NULL, globalSize2D, NULL, 0, NULL, NULL);
+
+	// Normalize the depth values
+	clSetKernelArg(cl->kernelNormalizeDepth, 0, sizeof(cl_mem), &cl->buffer_depth);
+	clSetKernelArg(cl->kernelNormalizeDepth, 1, sizeof(cl_mem), &cl->maxDepth);
+	clSetKernelArg(cl->kernelNormalizeDepth, 2, sizeof(int), &screenWidth);
+	clSetKernelArg(cl->kernelNormalizeDepth, 3, sizeof(int), &screenHeight);
+
+	clEnqueueNDRangeKernel(cl->queue, cl->kernelNormalizeDepth, 2, NULL, globalSize2D, NULL, 0, NULL, NULL);
+
+	clFinish(cl->queue);
+}
+
+int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource, int screenWidth, int screenHeight, struct Particles *particles, cl_context sharedContext, cl_device_id sharedDevice, cl_command_queue sharedQueue) {
 	cl_int err;
 
-	err = clGetPlatformIDs(1, &cl->platform, NULL);
-	if (err != CL_SUCCESS) return -1;
+	// Use the shared OpenCL context instead of creating a new one
+	cl->context = sharedContext;
+	cl->device = sharedDevice;
+	cl->queue = sharedQueue;
 
-	err = clGetDeviceIDs(cl->platform, CL_DEVICE_TYPE_GPU, 1, &cl->device, NULL);
-	if (err != CL_SUCCESS) return -1;
-
-	cl->context = clCreateContext(NULL, 1, &cl->device, NULL, NULL, &err);
-	if (err != CL_SUCCESS) return -1;
-
-	cl->queue = clCreateCommandQueue(cl->context, cl->device, 0, &err);
-	if (err != CL_SUCCESS) return -1;
+	// Retain the shared objects so they don't get released
+	clRetainContext(cl->context);
+	clRetainCommandQueue(cl->queue);
 
 	size_t sourceLen = strlen(kernelSource);
 	cl->program = clCreateProgramWithSource(cl->context, 1, &kernelSource, &sourceLen, &err);
@@ -92,6 +117,12 @@ int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource,
 	if (err != CL_SUCCESS) return -1;
 
 	cl->kernelBlurFire = clCreateKernel(cl->program, "blurFire", &err);
+	if (err != CL_SUCCESS) return -1;
+
+	cl->kernelFindMaxDepth = clCreateKernel(cl->program, "findMaxDepth", &err);
+	if (err != CL_SUCCESS) return -1;
+
+	cl->kernelNormalizeDepth = clCreateKernel(cl->program, "normalizeDepth", &err);
 	if (err != CL_SUCCESS) return -1;
 
 	cl->posX = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, sizeof(float) * FIRE_PARTICLES, NULL, &err);
@@ -128,6 +159,13 @@ int initOpenCLFireSim(struct OpenCLContextFireSim *cl, const char *kernelSource,
 	cl->buffer_depth = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, depthBufferSize, NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Failed to create depth buffer: %d\n", err);
+		return -1;
+	}
+
+	size_t maxDepthSize = sizeof(float);
+	cl->maxDepth = clCreateBuffer(cl->context, CL_MEM_READ_WRITE, maxDepthSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create max depth buffer: %d\n", err);
 		return -1;
 	}
 
@@ -174,6 +212,8 @@ void cleanupFireSim(struct OpenCLContextFireSim *cl) {
 	if (cl->kernelUpdateParticles) clReleaseKernel(cl->kernelUpdateParticles);
 	if (cl->kernelRenderParticles) clReleaseKernel(cl->kernelRenderParticles);
 	if (cl->kernelBlurFire) clReleaseKernel(cl->kernelBlurFire);
+	if (cl->kernelFindMaxDepth) clReleaseKernel(cl->kernelFindMaxDepth);
+	if (cl->kernelNormalizeDepth) clReleaseKernel(cl->kernelNormalizeDepth);
 	if (cl->program) clReleaseProgram(cl->program);
 	if (cl->queue) clReleaseCommandQueue(cl->queue);
 	if (cl->context) clReleaseContext(cl->context);

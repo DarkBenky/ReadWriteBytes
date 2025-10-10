@@ -91,7 +91,8 @@ __kernel void renderParticles(
     const int screenWidth,
     const int screenHeight,
     const float16 viewMatrix,
-    const float16 projMatrix
+    const float16 projMatrix,
+    __global float* maxDepth
 ) {
     int id = get_global_id(0);
     
@@ -163,6 +164,45 @@ __kernel void renderParticles(
                 }
             }
         }
+    }
+}
+
+__kernel void findMaxDepth(
+    __global const float* depthBuffer,
+    __global float* maxDepth,
+    const int screenWidth,
+    const int screenHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int idx = y * screenWidth + x;
+    float depth = depthBuffer[idx];
+    
+    if (depth > 0.0f) {
+        atomic_max((volatile __global int*)maxDepth, as_int(depth));
+    }
+}
+
+__kernel void normalizeDepth(
+    __global float* depthBuffer,
+    __global const float* maxDepth,
+    const int screenWidth,
+    const int screenHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int idx = y * screenWidth + x;
+    float depth = depthBuffer[idx];
+    float maxDepthValue = *maxDepth;
+    
+    if (depth > 0.0f && maxDepthValue > 0.0f) {
+        depthBuffer[idx] = depth / maxDepthValue;
     }
 }
 

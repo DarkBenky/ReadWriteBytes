@@ -30,6 +30,8 @@ struct OpenCLContextFireSim {
     cl_kernel kernelUpdateParticles;
     cl_kernel kernelRenderParticles;
     cl_kernel kernelBlurFire;
+    cl_kernel kernelFindMaxDepth;
+    cl_kernel kernelNormalizeDepth;
     cl_mem posX;
     cl_mem posY;
     cl_mem posZ;
@@ -40,15 +42,18 @@ struct OpenCLContextFireSim {
     cl_mem buffer_color;
     cl_mem buffer_depth;
     cl_mem buffer_temp;
+    cl_mem maxDepth;
 };
 
 
-int initOpenCLFireSim(struct OpenCLContextFireSim* cl, const char* kernelSource, int screenWidth, int screenHeight, struct Particles* particles);
+int initOpenCLFireSim(struct OpenCLContextFireSim* cl, const char* kernelSource, int screenWidth, int screenHeight, struct Particles* particles, cl_context sharedContext, cl_device_id sharedDevice, cl_command_queue sharedQueue);
 
 void stepFireSimulation(struct OpenCLContextFireSim* cl, struct Particles* particles, float deltaTime);
 
 void renderFireParticles(struct OpenCLContextFireSim* cl, struct Particles* particles, 
                         int screenWidth, int screenHeight, float* viewMatrix, float* projMatrix);
+
+void normalizeFireDepth(struct OpenCLContextFireSim* cl, int screenWidth, int screenHeight);
 
 void cleanupFireSim(struct OpenCLContextFireSim* cl);
 

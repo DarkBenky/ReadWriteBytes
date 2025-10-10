@@ -118,7 +118,7 @@ char *renderModesName[] = {
 	"Color",
 	"Wireframe",
 	"renderFireColor",
-	"renderFireDistance"};
+	"renderFireDepth"};
 
 enum RenderMode {
 	renderDistance,
@@ -1978,7 +1978,7 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &fireOcl->buffer_color);
 		break;
 	case renderFireDepth:
-		mode = 0;
+		mode = 2;
 		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &fireOcl->buffer_depth);
 		break;
 	case RENDER_MODE_COUNT:
@@ -3089,30 +3089,6 @@ int main() {
 
 	struct OpenCLContextFireSim fireOcl;
 
-	// Read the fire simulation kernel source
-	FILE *fireKernelFile = fopen("fireSim/fireSim.cl", "r");
-	if (!fireKernelFile) {
-		printf("Error: Could not open fire kernel file\n");
-		return -1;
-	}
-
-	fseek(fireKernelFile, 0, SEEK_END);
-	size_t fireKernelSize = ftell(fireKernelFile);
-	fseek(fireKernelFile, 0, SEEK_SET);
-
-	char *fireKernelSource = (char *)malloc(fireKernelSize + 1);
-	fread(fireKernelSource, 1, fireKernelSize, fireKernelFile);
-	fireKernelSource[fireKernelSize] = '\0';
-	fclose(fireKernelFile);
-
-	// Initialize fire OpenCL context
-	if (initOpenCLFireSim(&fireOcl, fireKernelSource, ScreenWidth, ScreenHeight, &fireParticles) != 0) {
-		printf("Failed to initialize fire simulation OpenCL\n");
-		free(fireKernelSource);
-		return -1;
-	}
-	free(fireKernelSource);
-
 	// load BVH
 	struct BVHLinear bvh;
 	ReadBVH(&bvh, "parseObj/encoded.bvh");
@@ -3276,6 +3252,29 @@ int main() {
 	if (!useOpenCL) {
 		printf("Failed to initialize OpenCL-GL interop, falling back to CPU\n");
 	}
+
+	// Initialize fire OpenCL using the shared context
+	FILE *fireKernelFile = fopen("fireSim/fireSim.cl", "r");
+	if (!fireKernelFile) {
+		printf("Error: Could not open fire kernel file\n");
+		return -1;
+	}
+
+	fseek(fireKernelFile, 0, SEEK_END);
+	size_t fireKernelSize = ftell(fireKernelFile);
+	fseek(fireKernelFile, 0, SEEK_SET);
+
+	char *fireKernelSource = (char *)malloc(fireKernelSize + 1);
+	fread(fireKernelSource, 1, fireKernelSize, fireKernelFile);
+	fireKernelSource[fireKernelSize] = '\0';
+	fclose(fireKernelFile);
+
+	if (initOpenCLFireSim(&fireOcl, fireKernelSource, ScreenWidth, ScreenHeight, &fireParticles, ocl.context, ocl.device, ocl.queue) != 0) {
+		printf("Failed to initialize fire simulation OpenCL\n");
+		free(fireKernelSource);
+		return -1;
+	}
+	free(fireKernelSource);
 
 	camera.renderMode = renderColor;
 
