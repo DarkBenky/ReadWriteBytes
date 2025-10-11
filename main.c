@@ -23,6 +23,7 @@
 
 void *SharedMem = NULL;
 
+#define FIRE_PARTICLES 2500
 #define chartPosY 480 // Y position on screen for timing chart
 #define chartPosX 700 // X position on screen for timing chart
 #define MAX_TEXT_LENGTH 2048
@@ -272,6 +273,7 @@ struct OpenCLContext {
 	cl_kernel shadePixels_kernel;				// Pixel shading kernel
 	cl_kernel wireframe_kernel;					// Wireframe rendering kernel
 	cl_kernel copyToTexture_kernel;				// Copy buffer data to OpenGL texture kernel
+	cl_kernel fire_sim_kernel;				// Fire simulation kernel
 	// buffers
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
@@ -331,6 +333,20 @@ struct OpenCLContext {
 	cl_mem buffer_skybox_right;
 	cl_mem buffer_skybox_front;
 	cl_mem buffer_skybox_back;
+	// fire simulation particles buffers
+	cl_mem posX;
+	cl_mem posY;
+	cl_mem posZ;
+	cl_mem velX;
+	cl_mem velY;
+	cl_mem velZ;
+	cl_mem lifeTime;
+	cl_mem maxDepth;
+
+	// rendering buffers for fire simulation
+	cl_mem buffer_color;
+	cl_mem buffer_depth;
+	cl_mem buffer_temp;
 
 	// Add pre-allocated host memory buffers
 	float *host_points_data;
