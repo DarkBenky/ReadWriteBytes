@@ -95,7 +95,6 @@ __kernel void renderParticles(
     __global float* maxDepth
 ) {
     int id = get_global_id(0);
-    
     float3 worldPos = (float3)(posX[id], posY[id], posZ[id]);
     
     float4 viewPos = (float4)(

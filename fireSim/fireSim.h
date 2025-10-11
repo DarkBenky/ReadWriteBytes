@@ -1,60 +1,55 @@
 #ifndef FIRE_SIM_H
 #define FIRE_SIM_H
 
-#include <CL/cl.h>
+#include "../openGlShaders/gpuStruct.h"
 
-#define FIRE_PARTICLES 1000
+// Initialize fire simulation - all parameters passed directly
+int initOpenCLFireSim(
+    struct OpenCLContext *ocl, 
+    const char *kernelSource, 
+    int screenWidth, 
+    int screenHeight, 
+    float *basePosition,      // 3 floats: x, y, z
+    float *startingColor,     // 3 floats: r, g, b
+    float *fireColor,         // 3 floats: r, g, b
+    float *smokeColor,        // 3 floats: r, g, b
+    float maxLifeTime
+);
 
-struct Particles {
-    float posX[FIRE_PARTICLES];
-    float posY[FIRE_PARTICLES];
-    float posZ[FIRE_PARTICLES];
-    float velX[FIRE_PARTICLES];
-    float velY[FIRE_PARTICLES];
-    float velZ[FIRE_PARTICLES];
-    float lifeTime[FIRE_PARTICLES];
-    float basePos[3];
-    float baseColor[3];
-    float fireColor[3];
-    float SmokeColor[3];
-    float maxLifeTime;
-    float particleSize;
-};
+// Simulate one step - returns timing if needed
+void simulateFireStep(
+    struct OpenCLContext *ocl, 
+    int numParticles, 
+    float deltaTime, 
+    float *kernelTime
+);
 
-struct OpenCLContextFireSim {
-    cl_platform_id platform;
-    cl_device_id device;
-    cl_context context;
-    cl_command_queue queue;
-    cl_program program;
-    cl_kernel kernelUpdateParticles;
-    cl_kernel kernelRenderParticles;
-    cl_kernel kernelBlurFire;
-    cl_kernel kernelFindMaxDepth;
-    cl_kernel kernelNormalizeDepth;
-    cl_mem posX;
-    cl_mem posY;
-    cl_mem posZ;
-    cl_mem velX;
-    cl_mem velY;
-    cl_mem velZ;
-    cl_mem lifeTime;
-    cl_mem buffer_color;
-    cl_mem buffer_depth;
-    cl_mem buffer_temp;
-    cl_mem maxDepth;
-};
+// Render particles with view/projection matrices
+void renderFireParticles(
+    struct OpenCLContext *ocl, 
+    int numParticles, 
+    int screenWidth, 
+    int screenHeight,
+    float *viewMatrix,        // 16 floats
+    float *projMatrix,        // 16 floats
+    float particleSize, 
+    float *kernelTime
+);
 
+// Download rendered buffer to CPU
+void downloadFireRenderBuffer(
+    struct OpenCLContext *ocl, 
+    int screenWidth, 
+    int screenHeight, 
+    float *outputBuffer
+);
 
-int initOpenCLFireSim(struct OpenCLContextFireSim* cl, const char* kernelSource, int screenWidth, int screenHeight, struct Particles* particles, cl_context sharedContext, cl_device_id sharedDevice, cl_command_queue sharedQueue);
+// Update fire parameters at runtime
+void updateFireBasePosition(struct OpenCLContext *ocl, float *newBasePosition);
+void updateFireColors(struct OpenCLContext *ocl, float *startingColor, float *fireColor, float *smokeColor);
+void updateFireMaxLifeTime(struct OpenCLContext *ocl, float maxLifeTime);
 
-void stepFireSimulation(struct OpenCLContextFireSim* cl, struct Particles* particles, float deltaTime);
-
-void renderFireParticles(struct OpenCLContextFireSim* cl, struct Particles* particles, 
-                        int screenWidth, int screenHeight, float* viewMatrix, float* projMatrix);
-
-void normalizeFireDepth(struct OpenCLContextFireSim* cl, int screenWidth, int screenHeight);
-
-void cleanupFireSim(struct OpenCLContextFireSim* cl);
+// Cleanup
+void cleanupFireSim(struct OpenCLContext *ocl);
 
 #endif

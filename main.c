@@ -20,10 +20,10 @@
 #include <GLFW/glfw3.h>
 #include <stdio.h>
 #include "fireSim/fireSim.h"
+#include "openGlShaders/gpuStruct.h"
 
 void *SharedMem = NULL;
 
-#define FIRE_PARTICLES 2500
 #define chartPosY 480 // Y position on screen for timing chart
 #define chartPosX 700 // X position on screen for timing chart
 #define MAX_TEXT_LENGTH 2048
@@ -51,6 +51,8 @@ pthread_t threads[NUM_THREADS];
 #define MoveMultiplier 1.25f
 #define MouseSensitivity 0.25f
 #define MAX_BLUR_PASSES 1
+#define numFireParticles 10000
+#define fireParticleSize 10.0f
 #include <GLFW/glfw3native.h>
 #include <CL/cl_gl.h>
 
@@ -251,112 +253,112 @@ struct Ray {
 	float direction[3];
 };
 
-struct OpenCLContext {
-	cl_platform_id platform;
-	cl_device_id device;
-	cl_context context;
-	cl_command_queue queue;
-	cl_program program;
-	// kernels
-	cl_kernel antiAliasKernel;
-	cl_kernel drawBoundingBox_kernel;
-	cl_kernel kernel; // project particles kernel
-	cl_kernel blur_kernel;
-	cl_kernel normals_kernel;
-	cl_kernel triangle_kernel; // triangle kernel
-	cl_kernel skybox_kernel;
-	cl_kernel applyReflections_kernel;
-	cl_kernel applyRayTracedReflections_kernel; // Apply ray-traced reflections
-	cl_kernel gpuTimings_kernel;				// kernel for GPU timings
-	cl_kernel renderText_kernel;				// kernel for rendering text
-	cl_kernel calculateVertex_kernel;			// Vertex calculation kernel
-	cl_kernel shadePixels_kernel;				// Pixel shading kernel
-	cl_kernel wireframe_kernel;					// Wireframe rendering kernel
-	cl_kernel copyToTexture_kernel;				// Copy buffer data to OpenGL texture kernel
-	cl_kernel fire_sim_kernel;				// Fire simulation kernel
-	// buffers
-	cl_mem buffer_points;
-	cl_mem buffer_velocities;
+// struct OpenCLContext {
+// 	cl_platform_id platform;
+// 	cl_device_id device;
+// 	cl_context context;
+// 	cl_command_queue queue;
+// 	cl_program program;
+// 	// kernels
+// 	cl_kernel antiAliasKernel;
+// 	cl_kernel drawBoundingBox_kernel;
+// 	cl_kernel kernel; // project particles kernel
+// 	cl_kernel blur_kernel;
+// 	cl_kernel normals_kernel;
+// 	cl_kernel triangle_kernel; // triangle kernel
+// 	cl_kernel skybox_kernel;
+// 	cl_kernel applyReflections_kernel;
+// 	cl_kernel applyRayTracedReflections_kernel; // Apply ray-traced reflections
+// 	cl_kernel gpuTimings_kernel;				// kernel for GPU timings
+// 	cl_kernel renderText_kernel;				// kernel for rendering text
+// 	cl_kernel calculateVertex_kernel;			// Vertex calculation kernel
+// 	cl_kernel shadePixels_kernel;				// Pixel shading kernel
+// 	cl_kernel wireframe_kernel;					// Wireframe rendering kernel
+// 	cl_kernel copyToTexture_kernel;				// Copy buffer data to OpenGL texture kernel
+// 	cl_kernel fire_sim_kernel;				// Fire simulation kernel
+// 	// buffers
+// 	cl_mem buffer_points;
+// 	cl_mem buffer_velocities;
 
-	cl_mem buffer_distances_temp;
-	cl_mem buffer_opacities_temp;
-	cl_mem buffer_triangle_colors;
-	cl_mem buffer_projected_verts; // Pre-calculated vertex coordinates
-	cl_mem buffer_triangle_bboxes; // Pre-calculated bounding boxes
-	cl_mem buffer_valid_triangles; // Pre-calculated validity flags
+// 	cl_mem buffer_distances_temp;
+// 	cl_mem buffer_opacities_temp;
+// 	cl_mem buffer_triangle_colors;
+// 	cl_mem buffer_projected_verts; // Pre-calculated vertex coordinates
+// 	cl_mem buffer_triangle_bboxes; // Pre-calculated bounding boxes
+// 	cl_mem buffer_valid_triangles; // Pre-calculated validity flags
 
-	// Add OpenGL interop members
-	GLuint gl_texture;		  // OpenGL texture ID
-	GLuint gl_ui_texture;	  // OpenGL texture ID for UI
-	cl_mem cl_texture_buffer; // OpenCL image object from GL texture
-	cl_mem cl_ui_texture_buffer;
-	cl_mem cl_ui_texture_buffer_temp; // Temporary buffer for UI texture
+// 	// Add OpenGL interop members
+// 	GLuint gl_texture;		  // OpenGL texture ID
+// 	GLuint gl_ui_texture;	  // OpenGL texture ID for UI
+// 	cl_mem cl_texture_buffer; // OpenCL image object from GL texture
+// 	cl_mem cl_ui_texture_buffer;
+// 	cl_mem cl_ui_texture_buffer_temp; // Temporary buffer for UI texture
 
-	// rayTracing buffers
-	cl_mem buffer_bvh_nodes;
-	cl_mem buffer_bvh_triangles;
+// 	// rayTracing buffers
+// 	cl_mem buffer_bvh_nodes;
+// 	cl_mem buffer_bvh_triangles;
 
-	// buffer for rendering text
-	cl_mem buffer_font_data; // buffer for font data
+// 	// buffer for rendering text
+// 	cl_mem buffer_font_data; // buffer for font data
 
-	// Add triangle buffers
-	cl_mem buffer_triangle_v1;
-	cl_mem buffer_triangle_v2;
-	cl_mem buffer_triangle_v3;
-	cl_mem buffer_triangle_normals;
+// 	// Add triangle buffers
+// 	cl_mem buffer_triangle_v1;
+// 	cl_mem buffer_triangle_v2;
+// 	cl_mem buffer_triangle_v3;
+// 	cl_mem buffer_triangle_normals;
 
-	// screen buffers
-	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
-	cl_mem buffer_opacities;				 // ScreenWidth * ScreenHeight * sizeof(float)
-	cl_mem buffer_velocities_screen;		 // ScreenWidth * ScreenHeight * sizeof(float)
-	cl_mem buffer_normals;					 // ScreenWidth * ScreenHeight * sizeof(float) * 3
-	cl_mem buffer_screen_colors;			 // ScreenWidth * ScreenHeight * sizeof(float) * 3
-	cl_mem buffer_screen_material_roughness; // ScreenWidth * ScreenHeight * sizeof(float)
-	cl_mem buffer_screen_material_metallic;	 // ScreenWidth * ScreenHeight * sizeof(float)
-	cl_mem buffer_screen_material_emission;	 // ScreenWidth * ScreenHeight * sizeof(float)
+// 	// screen buffers
+// 	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
+// 	cl_mem buffer_opacities;				 // ScreenWidth * ScreenHeight * sizeof(float)
+// 	cl_mem buffer_velocities_screen;		 // ScreenWidth * ScreenHeight * sizeof(float)
+// 	cl_mem buffer_normals;					 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+// 	cl_mem buffer_screen_colors;			 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+// 	cl_mem buffer_screen_material_roughness; // ScreenWidth * ScreenHeight * sizeof(float)
+// 	cl_mem buffer_screen_material_metallic;	 // ScreenWidth * ScreenHeight * sizeof(float)
+// 	cl_mem buffer_screen_material_emission;	 // ScreenWidth * ScreenHeight * sizeof(float)
 
-	// Triangle properties
-	cl_mem buffer_triangle_roughness;
-	cl_mem buffer_triangle_metallic;
-	cl_mem buffer_triangle_emission;
+// 	// Triangle properties
+// 	cl_mem buffer_triangle_roughness;
+// 	cl_mem buffer_triangle_metallic;
+// 	cl_mem buffer_triangle_emission;
 
-	// font buffers
-	cl_mem buffer_text_posX;
-	cl_mem buffer_text_posY;
-	cl_mem buffer_text_chars;
-	cl_mem buffer_text_color;
+// 	// font buffers
+// 	cl_mem buffer_text_posX;
+// 	cl_mem buffer_text_posY;
+// 	cl_mem buffer_text_chars;
+// 	cl_mem buffer_text_color;
 
-	// skybox buffers
-	cl_mem buffer_skybox_top;
-	cl_mem buffer_skybox_bottom;
-	cl_mem buffer_skybox_left;
-	cl_mem buffer_skybox_right;
-	cl_mem buffer_skybox_front;
-	cl_mem buffer_skybox_back;
-	// fire simulation particles buffers
-	cl_mem posX;
-	cl_mem posY;
-	cl_mem posZ;
-	cl_mem velX;
-	cl_mem velY;
-	cl_mem velZ;
-	cl_mem lifeTime;
-	cl_mem maxDepth;
+// 	// skybox buffers
+// 	cl_mem buffer_skybox_top;
+// 	cl_mem buffer_skybox_bottom;
+// 	cl_mem buffer_skybox_left;
+// 	cl_mem buffer_skybox_right;
+// 	cl_mem buffer_skybox_front;
+// 	cl_mem buffer_skybox_back;
+// 	// fire simulation particles buffers
+// 	cl_mem posX;
+// 	cl_mem posY;
+// 	cl_mem posZ;
+// 	cl_mem velX;
+// 	cl_mem velY;
+// 	cl_mem velZ;
+// 	cl_mem lifeTime;
+// 	cl_mem maxDepth;
 
-	// rendering buffers for fire simulation
-	cl_mem buffer_color;
-	cl_mem buffer_depth;
-	cl_mem buffer_temp;
+// 	// rendering buffers for fire simulation
+// 	cl_mem buffer_color;
+// 	cl_mem buffer_depth;
+// 	cl_mem buffer_temp;
 
-	// Add pre-allocated host memory buffers
-	float *host_points_data;
-	float *host_velocities_data;
-	float *host_distances_result;
-	float *host_opacities_result;
-	float *host_velocities_result;
-	float *host_normals_result;
-	float *host_screen_colors_result;
-};
+// 	// Add pre-allocated host memory buffers
+// 	float *host_points_data;
+// 	float *host_velocities_data;
+// 	float *host_distances_result;
+// 	float *host_opacities_result;
+// 	float *host_velocities_result;
+// 	float *host_normals_result;
+// 	float *host_screen_colors_result;
+// };
 
 struct Camera {
 	struct Ray ray;
@@ -932,6 +934,8 @@ struct GPUTimings {
 	float projectParticlesTime;
 	float renderBoundingBoxTime;
 	float antiAliasingTime;
+	float fireSimulationTime;
+	float fireRenderingTime;
 };
 
 float totalTime(struct GPUTimings *gpuTimings) {
@@ -1021,7 +1025,7 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, 
 }
 
 // Function prototypes
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct Particles *fireParticles, struct OpenCLContextFireSim *oclFireSim);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font);
 
 struct Light {
 	float x;
@@ -1114,9 +1118,9 @@ float fastInvSqrt(float x) {
 	return y * (1.5f - 0.5f * x * y * y);
 };
 
-void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct Particles *fireParticles, struct OpenCLContextFireSim *oclFireSim) {
+void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	if (USE_GPU == 1) {
-		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font, fireParticles, oclFireSim);
+		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font);
 	}
 }
 
@@ -1954,7 +1958,7 @@ void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct 
 	clReleaseEvent(kernel_event);
 }
 
-void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, struct Camera *camera, struct OpenCLContextFireSim *fireOcl) {
+void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, struct Camera *camera) {
 	cl_int err;
 	cl_event kernel_event; // Add event for timing
 
@@ -1991,11 +1995,11 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 		break;
 	case renderFireColor:
 		mode = 0;
-		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &fireOcl->buffer_color);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_color);
 		break;
 	case renderFireDepth:
 		mode = 2;
-		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &fireOcl->buffer_depth);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_depth);
 		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;
@@ -2120,7 +2124,7 @@ void updateProjectionMatrix(struct Camera *camera) {
 	projMatrix[14] = (2.0f * far * near) / (near - far);
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct Particles *fireParticles, struct OpenCLContextFireSim *fireOcl) {
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font) {
 	cl_int err;
 
 	// Use pre-allocated buffers instead of malloc
@@ -2139,7 +2143,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 
 	// render fire particles
 	updateProjectionMatrix(camera);
-	renderFireParticles(fireOcl, fireParticles, ScreenWidth, ScreenHeight, viewMatrix, projMatrix);
+	renderFireParticles(ocl, numFireParticles, ScreenWidth, ScreenHeight, viewMatrix, projMatrix, 10.0f, &gpuTimings->fireRenderingTime);
 
 	// Write data to GPU buffers
 	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_points, CL_TRUE, 0,
@@ -2177,6 +2181,8 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	// === ADD TEXT TO RENDER ===
 	uint8_t white[3] = {255, 255, 255};
 	uint8_t yellow[3] = {255, 255, 0};
+	uint8_t red[3] = {255, 0, 0};
+	uint8_t green[3] = {0, 255, 0};
 
 	int chart_pos_Y = chartPosY;
 	float realFPS = totalTime(gpuTimings) > 0.001f ? (1000.0f / totalTime(gpuTimings)) : 0.0f;
@@ -2264,9 +2270,13 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	if (camera->AntiAlias) {
 		snprintf(text, sizeof(text), "AntiAlias Enabled (L)");
 		addTextOpenCL(ocl, font, text, 5, 80, white);
+		snprintf(text, sizeof(text), "Enabled");
+		addTextOpenCL(ocl, font, text, 5, 95, green);
 	} else {
 		snprintf(text, sizeof(text), "AntiAlias Disabled (L)");
 		addTextOpenCL(ocl, font, text, 5, 80, white);
+		snprintf(text, sizeof(text), "Disabled");
+		addTextOpenCL(ocl, font, text, 5, 95, white);
 	}
 
 #ifdef DEBUG
@@ -2492,7 +2502,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 #endif
 
 	if (camera->AntiAlias == true) {
-		antiAliasingOpenCL(ocl, gpuTimings, camera, fireOcl);
+		antiAliasingOpenCL(ocl, gpuTimings, camera);
 	}
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
@@ -2540,11 +2550,11 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		break;
 	case renderFireColor:
 		mode = 0;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &fireOcl->buffer_color);
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_color);
 		break;
 	case renderFireDepth:
 		mode = 0;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &fireOcl->buffer_depth);
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_depth);
 		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;
@@ -3075,36 +3085,6 @@ void updateMouseStates() {
 }
 
 int main() {
-	struct Particles fireParticles;
-	fireParticles.basePos[0] = 40.0f;
-	fireParticles.basePos[1] = 10.0f;
-	fireParticles.basePos[2] = 40.0f;
-	fireParticles.baseColor[0] = 1.0f;
-	fireParticles.baseColor[1] = 0.3f;
-	fireParticles.baseColor[2] = 0.0f;
-	fireParticles.fireColor[0] = 1.0f;
-	fireParticles.fireColor[1] = 0.5f;
-	fireParticles.fireColor[2] = 0.0f;
-	fireParticles.SmokeColor[0] = 0.3f;
-	fireParticles.SmokeColor[1] = 0.3f;
-	fireParticles.SmokeColor[2] = 0.3f;
-	fireParticles.maxLifeTime = 15.0f;
-	fireParticles.particleSize = 10.0f;
-
-	for (int i = 0; i < FIRE_PARTICLES; i++) {
-		fireParticles.posX[i] = fireParticles.basePos[0] + (rand_01() - 0.5f) * 10.0f;
-		fireParticles.posY[i] = fireParticles.basePos[1];
-		fireParticles.posZ[i] = fireParticles.basePos[2] + (rand_01() - 0.5f) * 10.0f;
-
-		fireParticles.velX[i] = (rand_01() - 0.5f) * 0.1f;
-		fireParticles.velY[i] = (rand_01() - 0.5f) * 0.8f;
-		fireParticles.velX[i] = (rand_01() - 0.5f) * 0.1f;
-
-		fireParticles.lifeTime[i] = rand_01() * fireParticles.maxLifeTime;
-	}
-
-	struct OpenCLContextFireSim fireOcl;
-
 	// load BVH
 	struct BVHLinear bvh;
 	ReadBVH(&bvh, "parseObj/encoded.bvh");
@@ -3269,7 +3249,12 @@ int main() {
 		printf("Failed to initialize OpenCL-GL interop, falling back to CPU\n");
 	}
 
-	// Initialize fire OpenCL using the shared context
+	float fireBasePos[3] = {40.0f, 10.0f, 40.0f};
+	float fireStartColor[3] = {1.0f, 0.3f, 0.0f};
+	float fireMainColor[3] = {1.0f, 0.5f, 0.0f};
+	float fireSmokeColor[3] = {0.3f, 0.3f, 0.3f};
+	float fireMaxLife = 15.0f;
+
 	FILE *fireKernelFile = fopen("fireSim/fireSim.cl", "r");
 	if (!fireKernelFile) {
 		printf("Error: Could not open fire kernel file\n");
@@ -3285,12 +3270,18 @@ int main() {
 	fireKernelSource[fireKernelSize] = '\0';
 	fclose(fireKernelFile);
 
-	if (initOpenCLFireSim(&fireOcl, fireKernelSource, ScreenWidth, ScreenHeight, &fireParticles, ocl.context, ocl.device, ocl.queue) != 0) {
-		printf("Failed to initialize fire simulation OpenCL\n");
+	// Initialize fire simulation (uses the existing ocl context)
+	if (initOpenCLFireSim(&ocl, fireKernelSource, ScreenWidth, ScreenHeight,
+						  fireBasePos, fireStartColor, fireMainColor,
+						  fireSmokeColor, fireMaxLife) != 0) {
+		printf("Failed to initialize fire simulation\n");
 		free(fireKernelSource);
 		return -1;
 	}
 	free(fireKernelSource);
+
+	printf("Fire simulation initialized successfully\n");
+
 
 	camera.renderMode = renderColor;
 
@@ -3392,7 +3383,7 @@ int main() {
 		clock_t startGridTime = clock();
 		if (!paused) {
 			Step(particles, 1.0f / 60.0f); // Always update grid data
-			stepFireSimulation(&fireOcl, &fireParticles, 1.0f / 60.0f);
+			simulateFireStep(&ocl, numFireParticles, 1.0f / 60.0f, &gpuTimings.fireSimulationTime);
 		}
 		clock_t endGridTime = clock();
 		dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;
@@ -3402,7 +3393,7 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, &fireParticles, &fireOcl);
+		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
