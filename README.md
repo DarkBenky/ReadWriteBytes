@@ -28,6 +28,7 @@ The results show that writing frames is faster than reading them, with write ope
   
 ## TODO - Base on priority
 - [ ] Move fire sim to same open cl structure
+  - [ ] Try it again
 - [X] Simulate fluid on gpu move the code to separate file
 - [X] fire sim
 ```c
