@@ -2,7 +2,7 @@
 #include <time.h>
 #include <math.h>
 #include <CL/cl.h>
-#define NUM_FIRE_PARTICLES 1000
+#define NUM_FIRE_PARTICLES 750
 #define G 9.81f
 
 float randRange(float min, float max) {
@@ -36,28 +36,28 @@ struct FireSOA {
 
 void InitializeFireParticles(struct FireSOA *particles) {
 	srand((unsigned int)time(NULL));
-	particles->buoyancy = 40.0f;
+	particles->buoyancy = 4000.0f;
 	particles->drag = 0.985f;
 	particles->turbulence = 2.5f;
-	particles->maxLifeTime = 12.0f;
+	particles->maxLifeTime = 0.8f;
 
 	particles->startingColor[0] = 1.0f;
-	particles->startingColor[1] = 0.7f;
-	particles->startingColor[2] = 0.0f; // Orange
-	particles->fireColor[0] = 0.7f;
+	particles->startingColor[1] = 0.3f;
+	particles->startingColor[2] = 0.2f; // Orange
+	particles->fireColor[0] = 0.85f;
 	particles->fireColor[1] = 0.0f;
-	particles->fireColor[2] = 0.0f; // Red
-	particles->smokeColor[0] = 0.1f;
-	particles->smokeColor[1] = 0.15f;
-	particles->smokeColor[2] = 0.25f; // Dark gray
+	particles->fireColor[2] = 0.1f; // Red
+	particles->smokeColor[0] = 0.1f / 3.0f;
+	particles->smokeColor[1] = 0.15f / 3.0f;
+	particles->smokeColor[2] = 0.25f / 3.0f; // Dark gray
 
-	particles->basePosition[0] = 0.0f;
+	particles->basePosition[0] = 100.0f;
 	particles->basePosition[1] = 0.0f;
-	particles->basePosition[2] = 0.0f;
+	particles->basePosition[2] = -350.0f;
 
 	particles->maxVelocity = 0.0f;
 	particles->maxDistance = 0.0f;
-	particles->particlesSize = 15.0f;
+	particles->particlesSize = 18.0f;
 	particles->windDirection[0] = 0.55f;
 	particles->windDirection[1] = 0.0f;
 	particles->windDirection[2] = 0.22f;
@@ -141,3 +141,85 @@ void fireSimStep(struct FireSOA *particles, float deltaTime, float *timeTook) {
 	particles->maxVelocity = sqrtf(particles->maxVelocity);
 	particles->maxDistance = sqrtf(particles->maxDistance);
 }
+
+#ifdef FIRE_BENCHMARK
+#include <stdio.h>
+
+int main(int argc, char **argv) {
+	printf("=== Fire Particle Simulation Benchmark ===\n");
+	printf("Particle count: %d\n\n", NUM_FIRE_PARTICLES);
+
+	struct FireSOA particles;
+	InitializeFireParticles(&particles);
+
+	// Warm-up
+	float warmupTime;
+	for (int i = 0; i < 10; i++) {
+		fireSimStep(&particles, 0.016f, &warmupTime);
+	}
+
+	// Benchmark parameters
+	const int NUM_ITERATIONS = 1000;
+	const float deltaTime = 0.016f; // 60 FPS target
+
+	float totalTime = 0.0f;
+	float minTime = 1e9f;
+	float maxTime = 0.0f;
+
+	printf("Running %d iterations...\n", NUM_ITERATIONS);
+
+	struct timespec benchStart, benchEnd;
+	clock_gettime(CLOCK_MONOTONIC, &benchStart);
+
+	for (int i = 0; i < NUM_ITERATIONS; i++) {
+		float stepTime;
+		fireSimStep(&particles, deltaTime, &stepTime);
+
+		totalTime += stepTime;
+		if (stepTime < minTime) minTime = stepTime;
+		if (stepTime > maxTime) maxTime = stepTime;
+
+		// Progress indicator
+		if ((i + 1) % 100 == 0) {
+			printf("  %d/%d iterations complete\r", i + 1, NUM_ITERATIONS);
+			fflush(stdout);
+		}
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &benchEnd);
+	double wallTime = (benchEnd.tv_sec - benchStart.tv_sec) * 1000.0 +
+					  (benchEnd.tv_nsec - benchStart.tv_nsec) / 1e6;
+
+	printf("\n\n=== Results ===\n");
+	printf("Total iterations: %d\n", NUM_ITERATIONS);
+	printf("Wall clock time: %.2f ms\n", wallTime);
+	printf("\nPer-step statistics:\n");
+	printf("  Average: %.4f ms (%.1f FPS)\n", totalTime / NUM_ITERATIONS, 1000.0f / (totalTime / NUM_ITERATIONS));
+	printf("  Minimum: %.4f ms (%.1f FPS)\n", minTime, 1000.0f / minTime);
+	printf("  Maximum: %.4f ms (%.1f FPS)\n", maxTime, 1000.0f / maxTime);
+
+	printf("\nParticle statistics:\n");
+	printf("  Max velocity: %.2f units/s\n", particles.maxVelocity);
+	printf("  Max distance: %.2f units\n", particles.maxDistance);
+
+	// Performance metrics
+	float avgTimePerParticle = (totalTime / NUM_ITERATIONS) / NUM_FIRE_PARTICLES;
+	float particlesPerMs = NUM_FIRE_PARTICLES / (totalTime / NUM_ITERATIONS);
+
+	printf("\nPerformance metrics:\n");
+	printf("  Time per particle: %.6f ms\n", avgTimePerParticle);
+	printf("  Particles per ms: %.2f\n", particlesPerMs);
+	printf("  Particles per second: %.2f M\n", (particlesPerMs * 1000.0f) / 1e6);
+
+	// Estimate max particles for 60 FPS
+	float targetFrameTime = 16.667f; // 60 FPS
+	int maxParticles60fps = (int)(targetFrameTime / avgTimePerParticle);
+
+	printf("\nCapacity estimates (CPU only):\n");
+	printf("  Max particles @ 60 FPS: ~%d\n", maxParticles60fps);
+	printf("  Max particles @ 30 FPS: ~%d\n", maxParticles60fps * 2);
+	printf("  Max particles @ 15 FPS: ~%d\n", maxParticles60fps * 4);
+
+	return 0;
+}
+#endif

@@ -1,6 +1,6 @@
 #ifndef FIRE_SIM_H
 #define FIRE_SIM_H
-#define NUM_FIRE_PARTICLES 1000
+#define NUM_FIRE_PARTICLES 750
 #define G 9.81f
 
 #include "../openGlShaders/gpuStruct.h"

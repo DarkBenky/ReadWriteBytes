@@ -989,7 +989,6 @@ float3 sampleScreenSpaceReflectionFiltered(
     return fallbackColor;
 }
 
-// FIX 10: Also update the reflection usage in applyReflections
 __kernel void applyReflections(
     __global float *ScreenColors,
     __global const float *ScreenDistances,
@@ -1009,7 +1008,8 @@ __kernel void applyReflections(
     __global const float *SkyBoxFront,
     __global const float *SkyBoxBack,
     const int skyBoxWidth,
-    const int skyBoxHeight
+    const int skyBoxHeight,
+    const int conservativeMode  // 0 = use materials, 1 = conservative reflections
 ) {
     int x = get_global_id(0);
     int y = get_global_id(1);
@@ -1040,13 +1040,13 @@ __kernel void applyReflections(
     float3 viewDir = normalize(camPos - worldPos);
     float3 reflectedDir = reflectVector(-viewDir, normalize(normal));
     
-    // FIX 11: Better parameters for screen space reflection
+    // Sample reflections
     float3 screenSpaceReflection = sampleScreenSpaceReflectionFiltered(
         ScreenColors, ScreenDistances, worldPos, reflectedDir, camPos, camDir, fov,
         screenWidth, screenHeight, 
-        min(500.0f, depth * 50.0f),  // Adaptive max distance
-        512,                           // Reduced steps for better performance
-        max(0.5f, depth * 0.1f)      // Adaptive step size
+        min(500.0f, depth * 50.0f),
+        512,
+        max(0.5f, depth * 0.1f)
     );
     
     float3 skyboxReflection = sampleSkybox(reflectedDir, SkyBoxTop, SkyBoxBottom,
@@ -1054,30 +1054,39 @@ __kernel void applyReflections(
                                            SkyBoxFront, SkyBoxBack,
                                            skyBoxWidth, skyBoxHeight);
     
-    // FIX 12: Better fallback logic
     float screenReflectionStrength = length(screenSpaceReflection);
     float3 environmentReflection = (screenReflectionStrength > 0.01f) ? 
                                      screenSpaceReflection : skyboxReflection;
-    
-    float roughness = ScreenMaterialRoughness[pixelIndex]; 
-    float metallic  = ScreenMaterialMetallic[pixelIndex];
-    float emission  = ScreenMaterialEmission[pixelIndex];
-    
-    float fresnel = 0.04f + (1.0f - 0.04f) * pow(1.0f - max(0.0f, dot(normal, viewDir)), 5.0f);
-    fresnel = mix(fresnel, 1.0f, metallic);
-    
-    // // FIX 13: Limit reflection strength to avoid too strong reflections
-    // float reflectionFactor = clamp(fresnel * (1.0f - roughness) * (1.0f - emission), 0.0f, 0.8f);
-
-    float metallicBoost = mix(1.0f, 2.0f, metallic); // Metals get 2x reflection strength
-    float reflectionFactor = clamp(fresnel * (1.0f - roughness) * (1.0f - emission) * metallicBoost, 0.0f, 1.0f);
     
     int colorIndex = pixelIndex * 3;
     float3 baseColor = (float3)(ScreenColors[colorIndex], 
                                 ScreenColors[colorIndex + 1], 
                                 ScreenColors[colorIndex + 2]);
     
-    float3 finalColor = mix(baseColor, environmentReflection, reflectionFactor);
+    float3 finalColor;
+    
+    if (conservativeMode == 1) {
+        // Conservative mode - ignore materials, use simple Fresnel-based reflection
+        float fresnel = 0.04f + (1.0f - 0.04f) * pow(1.0f - max(0.0f, dot(normal, viewDir)), 5.0f);
+        
+        // Conservative reflection strength (subtle)
+        float reflectionFactor = clamp(fresnel * 0.3f, 0.0f, 0.1f);  // Max 30% reflection
+        
+        finalColor = mix(baseColor, environmentReflection, reflectionFactor);
+    } else {
+        // Material-based mode (original behavior)
+        float roughness = ScreenMaterialRoughness[pixelIndex]; 
+        float metallic  = ScreenMaterialMetallic[pixelIndex];
+        float emission  = ScreenMaterialEmission[pixelIndex];
+        
+        float fresnel = 0.04f + (1.0f - 0.04f) * pow(1.0f - max(0.0f, dot(normal, viewDir)), 5.0f);
+        fresnel = mix(fresnel, 1.0f, metallic);
+        
+        float metallicBoost = mix(1.0f, 2.0f, metallic);
+        float reflectionFactor = clamp(fresnel * (1.0f - roughness) * (1.0f - emission) * metallicBoost, 0.0f, 1.0f);
+        
+        finalColor = mix(baseColor, environmentReflection, reflectionFactor);
+    }
     
     ScreenColors[colorIndex]     = clamp(finalColor.x, 0.0f, 1.0f);
     ScreenColors[colorIndex + 1] = clamp(finalColor.y, 0.0f, 1.0f);
@@ -2575,6 +2584,7 @@ __kernel void renderFire(
     __global float *ScreenDistances,
     __global float *ScreenColors,
     __global float *ScreenNormals,
+    __global float *ScreenAlphas,
     
     const int numPoints,
     const int ParticleRadius
@@ -2631,26 +2641,28 @@ __kernel void renderFire(
     float3 particleColor;
     float emissionBoost;
     
-    if (lifeRatio < 0.1f) {
-        float t = lifeRatio / 0.1f;
-        particleColor = mix((float3)(1.5f, 1.4f, 1.0f), baseColor * 1.3f, t);
-        emissionBoost = 3.5f;
-    } else if (lifeRatio < 0.25f) {
-        float t = (lifeRatio - 0.1f) / 0.15f;
-        particleColor = mix(baseColor * 1.3f, fireColor * 1.2f, t);
-        emissionBoost = 2.8f;
-    } else if (lifeRatio < 0.35f) {
-        float t = (lifeRatio - 0.25f) / 0.2f;
-        particleColor = mix(fireColor * 1.2f, fireColor * 0.8f, t);
-        emissionBoost = 2.0f;
+    float3 hotWhite = (float3)(1.5f, 1.4f, 1.0f);
+    float3 brightOrange = baseColor * 1.3f;
+    float3 darkRed = fireColor;
+    float3 darkSmoke = smokeColor;
+
+    float decayRate = 3.5f;
+    float decayFactor = exp(-decayRate * lifeRatio);
+
+    if (lifeRatio < 0.15f) {
+        float t = 1.0f - exp(-8.0f * lifeRatio / 0.15f);
+        particleColor = mix(hotWhite, brightOrange, t);
+        emissionBoost = 3.5f * decayFactor + 0.5f;
     } else if (lifeRatio < 0.45f) {
-        float t = (lifeRatio - 0.45f) / 0.2f;
-        particleColor = mix(fireColor * 0.8f, fireColor * 0.4f, t);
-        emissionBoost = 1.0f;
+        float normalizedLife = (lifeRatio - 0.15f) / 0.3f;
+        float t = 1.0f - exp(-4.0f * normalizedLife);
+        particleColor = mix(brightOrange, darkRed, t);
+        emissionBoost = (2.8f - 1.5f * normalizedLife) * decayFactor + 0.3f;
     } else {
-        float t = (lifeRatio - 0.65f) / 0.35f;
-        particleColor = mix(fireColor * 0.2f, smokeColor, t);
-        emissionBoost = 0.5f;
+        float normalizedLife = (lifeRatio - 0.45f) / 0.55f;
+        float t = 1.0f - exp(-2.5f * normalizedLife);
+        particleColor = mix(darkRed, darkSmoke, t);
+        emissionBoost = 1.0f * exp(-5.0f * normalizedLife) + 0.1f;
     }
     
     float3 colorVariation = (float3)(
@@ -2661,6 +2673,7 @@ __kernel void renderFire(
     particleColor = clamp(particleColor + colorVariation, 0.0f, 3.0f);
     particleColor *= (1.0f + velNormalized * 0.5f);
     
+    // Calculate base opacity
     float opacity;
     if (lifeRatio < 0.08f) {
         opacity = lifeRatio / 0.08f;
@@ -2714,6 +2727,10 @@ __kernel void renderFire(
             
             vstore3(newColor, 0, &ScreenColors[colorBase]);
             
+            // Store alpha value (max of existing and new)
+            float existingAlpha = ScreenAlphas[offsetIndex];
+            ScreenAlphas[offsetIndex] = max(existingAlpha, pixelOpacity * centerGlow);
+            
             if (existingDepth == 0.0f || surfaceDistance < existingDepth) {
                 ScreenDistances[offsetIndex] = surfaceDistance;
                 
@@ -2727,8 +2744,10 @@ __kernel void renderFire(
 __kernel void blurFire(
     __global const float* InputColors,
     __global const float* InputDistances,
+    __global const float* InputAlphas,
     __global float* OutputColors,
     __global float* OutputDistances,
+    __global float* OutputAlphas,
     const int screenWidth,
     const int screenHeight,
     const int blurRadius,
@@ -2742,6 +2761,7 @@ __kernel void blurFire(
     
     int centerIdx = y * screenWidth + x;
     float centerDepth = InputDistances[centerIdx];
+    float centerAlpha = InputAlphas[centerIdx];
     
     if (centerDepth <= 0.001f) {
         int colorBase = centerIdx * 3;
@@ -2749,6 +2769,7 @@ __kernel void blurFire(
         OutputColors[colorBase + 1] = InputColors[colorBase + 1];
         OutputColors[colorBase + 2] = InputColors[colorBase + 2];
         OutputDistances[centerIdx] = 0.0f;
+        OutputAlphas[centerIdx] = 0.0f;
         return;
     }
     
@@ -2765,6 +2786,7 @@ __kernel void blurFire(
     }
     
     float3 accumulatedColor = (float3)(0.0f, 0.0f, 0.0f);
+    float accumulatedAlpha = 0.0f;
     float totalWeight = 0.0f;
     float sigma = (float)blurRadius / 2.0f;
     
@@ -2780,37 +2802,54 @@ __kernel void blurFire(
             
             int neighborIdx = ny * screenWidth + nx;
             float neighborDepth = InputDistances[neighborIdx];
+            float neighborAlpha = InputAlphas[neighborIdx];
             
             if (neighborDepth <= 0.001f) continue;
             
             float3 neighborColor = vload3(0, &InputColors[neighborIdx * 3]);
             float neighborBrightness = (neighborColor.x + neighborColor.y + neighborColor.z) / 3.0f;
             
+            // Brightness-based weight
             float brightnessDiff = fabs(centerBrightness - neighborBrightness);
             float brightnessWeight = exp(-brightnessDiff * brightnessDiff / 0.5f);
             
+            // Spatial weight
             float dist = (float)(dx * dx + dy * dy);
             float spatialWeight = exp(-dist / (2.0f * sigma * sigma));
             
-            float weight = spatialWeight * brightnessWeight;
+            // // Alpha-based weight (preserve alpha discontinuities)
+            float alphaDiff = fabs(centerAlpha - neighborAlpha);
+            float alphaWeight = exp(-alphaDiff * alphaDiff / (2.0f * sigmaColor * sigmaColor));
+            
+            // Combined weight
+            float weight = spatialWeight * brightnessWeight * alphaWeight;
+            // float weight = spatialWeight * brightnessWeight;
             
             accumulatedColor += neighborColor * weight;
+            accumulatedAlpha += neighborAlpha * weight;
             totalWeight += weight;
         }
     }
     
     if (totalWeight > 0.001f) {
         float3 blurredColor = accumulatedColor / totalWeight;
+        float blurredAlpha = accumulatedAlpha / totalWeight;
         
+        // Blend between blurred and original based on blur strength
         float blendFactor = 1.0f - blurStrength;
         float3 finalColor = mix(blurredColor, centerColor, blendFactor);
+        float finalAlpha = mix(blurredAlpha, centerAlpha, blendFactor);
         
         finalColor = clamp(finalColor, 0.0f, 5.0f);
+        finalAlpha = clamp(finalAlpha, 0.0f, 1.0f);
+        
         vstore3(finalColor, 0, &OutputColors[centerIdx * 3]);
         OutputDistances[centerIdx] = centerDepth;
+        OutputAlphas[centerIdx] = finalAlpha;
     } else {
         vstore3(centerColor, 0, &OutputColors[centerIdx * 3]);
         OutputDistances[centerIdx] = centerDepth;
+        OutputAlphas[centerIdx] = centerAlpha;
     }
 }
 
@@ -2829,4 +2868,133 @@ __kernel void clearColorBuffer(
     colors[idx + 0] = backgroundColor.x;
     colors[idx + 1] = backgroundColor.y;
     colors[idx + 2] = backgroundColor.z;
+}
+
+__kernel void compositeBuffers(
+    // Input buffer 1
+    __global const float* InputColors1,
+    __global const float* InputDistances1,
+    __global const float* InputNormals1,
+    __global const float* InputAlphas1,
+    const int useAlpha1,
+    
+    // Input buffer 2
+    __global const float* InputColors2,
+    __global const float* InputDistances2,
+    __global const float* InputNormals2,
+    __global const float* InputAlphas2,
+    const int useAlpha2,
+    
+    // Output buffers
+    __global float* OutputColors,
+    __global float* OutputDistances,
+    __global float* OutputNormals,
+    
+    const int screenWidth,
+    const int screenHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int pixelIdx = y * screenWidth + x;
+    int colorIdx = pixelIdx * 3;
+    
+    // Read data from both buffers
+    float depth1 = InputDistances1[pixelIdx];
+    float depth2 = InputDistances2[pixelIdx];
+    float alpha1 = useAlpha1 ? InputAlphas1[pixelIdx] : 1.0f;
+    float alpha2 = useAlpha2 ? InputAlphas2[pixelIdx] : 1.0f;
+    
+    float3 color1 = vload3(0, &InputColors1[colorIdx]);
+    float3 color2 = vload3(0, &InputColors2[colorIdx]);
+    float3 normal1 = vload3(0, &InputNormals1[colorIdx]);
+    float3 normal2 = vload3(0, &InputNormals2[colorIdx]);
+    
+    bool valid1 = (depth1 > 0.001f);
+    bool valid2 = (depth2 > 0.001f);
+    
+    float3 finalColor;
+    float finalDepth;
+    float3 finalNormal;
+    
+    // Case 1: Both buffers empty - check for background color
+    if (!valid1 && !valid2) {
+        if (length(color1) > 0.001f) {
+            vstore3(color1, 0, &OutputColors[colorIdx]);
+            OutputDistances[pixelIdx] = 0.0f;
+            vstore3((float3)(0.0f, 0.0f, 0.0f), 0, &OutputNormals[colorIdx]);
+        } else {
+            vstore3((float3)(0.0f, 0.0f, 0.0f), 0, &OutputColors[colorIdx]);
+            OutputDistances[pixelIdx] = 0.0f;
+            vstore3((float3)(0.0f, 0.0f, 0.0f), 0, &OutputNormals[colorIdx]);
+        }
+        return;
+    }
+    
+    // Case 2: Only buffer 1 has data
+    if (valid1 && !valid2) {
+        if (useAlpha1 && alpha1 < 0.999f) {
+            // Buffer 1 is transparent, blend with background (buffer 2 color even if no depth)
+            finalColor = mix(color2, color1, alpha1);
+            finalDepth = depth1;
+            finalNormal = normal1;
+        } else {
+            // Buffer 1 is opaque
+            finalColor = color1;
+            finalDepth = depth1;
+            finalNormal = normal1;
+        }
+    }
+    // Case 3: Only buffer 2 has data
+    else if (!valid1 && valid2) {
+        if (useAlpha2 && alpha2 < 0.999f) {
+            // Buffer 2 is transparent, blend with background (buffer 1 color)
+            finalColor = mix(color1, color2, alpha2);
+            finalDepth = depth2;
+            finalNormal = normal2;
+        } else {
+            // Buffer 2 is opaque
+            finalColor = color2;
+            finalDepth = depth2;
+            finalNormal = normal2;
+        }
+    }
+    // Case 4: Both buffers have data - depth-based compositing with alpha blending
+    else {
+        // Determine which layer is in front
+        if (depth1 < depth2) {
+            // Buffer 1 is in front (fire/particles)
+            if (useAlpha1 && alpha1 < 0.999f) {
+                // Front layer is transparent - blend with back layer
+                finalColor = mix(color2, color1, alpha1);
+                finalDepth = depth1; // Use front depth
+                finalNormal = mix(normal2, normal1, alpha1); // Blend normals too
+            } else {
+                // Front layer is opaque - no blending needed
+                finalColor = color1;
+                finalDepth = depth1;
+                finalNormal = normal1;
+            }
+        } else {
+            // Buffer 2 is in front
+            if (useAlpha2 && alpha2 < 0.999f) {
+                // Front layer is transparent - blend with back layer
+                finalColor = mix(color1, color2, alpha2);
+                finalDepth = depth2;
+                finalNormal = mix(normal1, normal2, alpha2);
+            } else {
+                // Front layer is opaque
+                finalColor = color2;
+                finalDepth = depth2;
+                finalNormal = normal2;
+            }
+        }
+    }
+    
+    // Write final composited result
+    vstore3(finalColor, 0, &OutputColors[colorIdx]);
+    OutputDistances[pixelIdx] = finalDepth;
+    vstore3(finalNormal, 0, &OutputNormals[colorIdx]);
 }

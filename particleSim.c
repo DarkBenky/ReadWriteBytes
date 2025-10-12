@@ -2,7 +2,7 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
-// #include <stdlib.h> // Added for malloc and free
+#include <stdlib.h>
 #define DEBUG 1
 #define NUM_PARTICLES 15000
 #define GRAVITY 500.0f
@@ -443,57 +443,143 @@ void Step(struct PointSOA *particles, float deltaTime, float *timeTook) {
 	*timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6);
 }
 
-// Example usage and performance measurement
-// clang -O3 particleSim.c -o sim -lm -march=native ; ./sim
-// int main() {
-// 	struct PointSOA *particles = malloc(sizeof(struct PointSOA));
-// 	if (particles == NULL) {
-// 		printf("Failed to allocate memory for particles.\n");
-// 		return 1;
-// 	}
+#ifdef PARTICLE_BENCHMARK
+int main() {
+	printf("=== Particle Simulation Benchmark ===\n");
+	printf("Particle count: %d\n", NUM_PARTICLES);
+	printf("Grid resolution: %dx%dx%d (%d cells)\n\n",
+		   gridResolutionAxis, gridResolutionAxis, gridResolutionAxis, gridResolution);
 
-// 	// Initialize bounding box
-// 	particles->bBoxMin[0] = 0.0f;
-// 	particles->bBoxMin[1] = 0.0f;
-// 	particles->bBoxMin[2] = 0.0f;
-// 	particles->bBoxMax[0] = 100.0f;
-// 	particles->bBoxMax[1] = 100.0f;
-// 	particles->bBoxMax[2] = 100.0f;
+	struct PointSOA *particles = malloc(sizeof(struct PointSOA));
+	if (particles == NULL) {
+		printf("Failed to allocate memory for particles.\n");
+		return 1;
+	}
 
-// 	// Initialize particles in a grid
-// 	int particlesPerAxis = (int)cbrtf(NUM_PARTICLES);
-// 	float spacing = (particles->bBoxMax[0] - particles->bBoxMin[0]) / particlesPerAxis;
-// 	int index = 0;
-// 	for (int x = 0; x < particlesPerAxis; x++) {
-// 		for (int y = 0; y < particlesPerAxis; y++) {
-// 			for (int z = 0; z < particlesPerAxis; z++) {
-// 				if (index >= NUM_PARTICLES) break;
-// 				particles->x[index] = particles->bBoxMin[0] + x * spacing + spacing * 0.5f;
-// 				particles->y[index] = particles->bBoxMin[1] + y * spacing + spacing * 0.5f;
-// 				particles->z[index] = particles->bBoxMin[2] + z * spacing + spacing * 0.5f;
-// 				particles->xVelocity[index] = 0.0f;
-// 				particles->yVelocity[index] = 0.0f;
-// 				particles->zVelocity[index] = 0.0f;
-// 				index++;
-// 			}
-// 		}
-// 	}
+	// Initialize bounding box
+	particles->bBoxMin[0] = 0.0f;
+	particles->bBoxMin[1] = 0.0f;
+	particles->bBoxMin[2] = 0.0f;
+	particles->bBoxMax[0] = 100.0f;
+	particles->bBoxMax[1] = 100.0f;
+	particles->bBoxMax[2] = 100.0f;
 
-// 	float deltaTime = 0.016f; // ~60 FPS
+	// Initialize particles in a grid
+	int particlesPerAxis = (int)cbrtf(NUM_PARTICLES);
+	float spacing = (particles->bBoxMax[0] - particles->bBoxMin[0]) / particlesPerAxis;
+	int index = 0;
+	for (int x = 0; x < particlesPerAxis; x++) {
+		for (int y = 0; y < particlesPerAxis; y++) {
+			for (int z = 0; z < particlesPerAxis; z++) {
+				if (index >= NUM_PARTICLES) break;
+				particles->x[index] = particles->bBoxMin[0] + x * spacing + spacing * 0.5f;
+				particles->y[index] = particles->bBoxMin[1] + y * spacing + spacing * 0.5f;
+				particles->z[index] = particles->bBoxMin[2] + z * spacing + spacing * 0.5f;
+				particles->xVelocity[index] = 0.0f;
+				particles->yVelocity[index] = 0.0f;
+				particles->zVelocity[index] = 0.0f;
+				index++;
+			}
+		}
+	}
 
-// 	struct timespec start, end;
-// 	clock_gettime(CLOCK_MONOTONIC, &start);
-// 	for (int frame = 0; frame < 100; frame++) {
-// 		Step(particles, deltaTime);
-// 	}
-// 	clock_gettime(CLOCK_MONOTONIC, &end);
-// 	double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-// 	printf("Simulated 100 frames in %.3f seconds\n", elapsed);
-// 	printf("Average time per frame: %.3f ms\n", (elapsed / 100.0) * 1000.0);
-// 	printf("Average TPS: %.2f\n", 100.0 / elapsed);
-// 	printf("Number of particles: %d\n", NUM_PARTICLES);
-// 	printf("Average particle simulation time: %.3f microseconds\n", (elapsed / (100.0 * NUM_PARTICLES)) * 1e6);
+	float deltaTime = 0.016f; // ~60 FPS target
 
-// 	free(particles); // Free the allocated memory
-// 	return 0;
-// }
+	// Warm-up
+	printf("Warming up...\n");
+	float warmupTime;
+	for (int i = 0; i < 10; i++) {
+		Step(particles, deltaTime, &warmupTime);
+	}
+
+	// Benchmark parameters
+	const int NUM_FRAMES = 100;
+	float totalTime = 0.0f;
+	float minTime = 1e9f;
+	float maxTime = 0.0f;
+	float totalEnergy = 0.0f;
+
+	printf("Running %d frames...\n", NUM_FRAMES);
+
+	struct timespec benchStart, benchEnd;
+	clock_gettime(CLOCK_MONOTONIC, &benchStart);
+
+	for (int frame = 0; frame < NUM_FRAMES; frame++) {
+		float stepTime;
+		Step(particles, deltaTime, &stepTime);
+
+		totalTime += stepTime;
+		if (stepTime < minTime) minTime = stepTime;
+		if (stepTime > maxTime) maxTime = stepTime;
+
+#ifdef DEBUG
+		totalEnergy += particles->totalEnergy;
+#endif
+
+		// Progress indicator
+		if ((frame + 1) % 10 == 0) {
+			printf("  %d/%d frames complete\r", frame + 1, NUM_FRAMES);
+			fflush(stdout);
+		}
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &benchEnd);
+	double wallTime = (benchEnd.tv_sec - benchStart.tv_sec) * 1000.0 +
+					  (benchEnd.tv_nsec - benchStart.tv_nsec) / 1e6;
+
+	printf("\n\n=== Results ===\n");
+	printf("Total frames: %d\n", NUM_FRAMES);
+	printf("Wall clock time: %.2f ms\n", wallTime);
+
+	printf("\nPer-frame statistics:\n");
+	printf("  Average: %.4f ms (%.1f FPS)\n", totalTime / NUM_FRAMES, 1000.0f / (totalTime / NUM_FRAMES));
+	printf("  Minimum: %.4f ms (%.1f FPS)\n", minTime, 1000.0f / minTime);
+	printf("  Maximum: %.4f ms (%.1f FPS)\n", maxTime, 1000.0f / maxTime);
+
+#ifdef DEBUG
+	printf("\nPhysics statistics:\n");
+	printf("  Average total energy: %.2f\n", totalEnergy / NUM_FRAMES);
+#endif
+
+	// Performance metrics
+	float avgTimePerParticle = (totalTime / NUM_FRAMES) / NUM_PARTICLES;
+	float particlesPerMs = NUM_PARTICLES / (totalTime / NUM_FRAMES);
+
+	printf("\nPerformance metrics:\n");
+	printf("  Time per particle: %.6f ms\n", avgTimePerParticle);
+	printf("  Particles per ms: %.2f\n", particlesPerMs);
+	printf("  Particles per second: %.2f M\n", (particlesPerMs * 1000.0f) / 1e6);
+
+	// Estimate max particles for target frame rates
+	float targetFrameTime60 = 16.667f; // 60 FPS
+	float targetFrameTime30 = 33.333f; // 30 FPS
+	int maxParticles60fps = (int)(targetFrameTime60 / avgTimePerParticle);
+	int maxParticles30fps = (int)(targetFrameTime30 / avgTimePerParticle);
+
+	printf("\nCapacity estimates (CPU only):\n");
+	printf("  Max particles @ 60 FPS: ~%d\n", maxParticles60fps);
+	printf("  Max particles @ 30 FPS: ~%d\n", maxParticles30fps);
+
+	// Grid statistics
+	int maxParticlesPerCell = 0;
+	int nonEmptyCells = 0;
+	for (int i = 0; i < gridResolution; i++) {
+		if (particles->gridParticleCount[i] > 0) {
+			nonEmptyCells++;
+			if (particles->gridParticleCount[i] > maxParticlesPerCell) {
+				maxParticlesPerCell = particles->gridParticleCount[i];
+			}
+		}
+	}
+
+	printf("\nGrid statistics:\n");
+	printf("  Non-empty cells: %d / %d (%.1f%%)\n",
+		   nonEmptyCells, gridResolution, (float)nonEmptyCells / gridResolution * 100.0f);
+	printf("  Max particles per cell: %d\n", maxParticlesPerCell);
+	printf("  Average particles per non-empty cell: %.2f\n",
+		   (float)NUM_PARTICLES / nonEmptyCells);
+
+	free(particles);
+	return 0;
+}
+#endif

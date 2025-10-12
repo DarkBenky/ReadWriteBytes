@@ -123,6 +123,9 @@ char *renderModesName[] = {
 	"renderFireColor",
 	"renderFireDepth",
 	"renderFireNormal",
+	"renderCompositedNormal",
+	"renderCompositedColor",
+	"renderCompositedDistance",
 };
 
 enum RenderMode {
@@ -136,6 +139,9 @@ enum RenderMode {
 	renderFireColor,
 	renderFireDepth,
 	renderFireNormal,
+	renderCompositedNormal,
+	renderCompositedColor,
+	renderCompositedDistance,
 	RENDER_MODE_COUNT // Total number of render modes
 };
 
@@ -276,6 +282,80 @@ struct Triangles {
 	int count;
 };
 
+void compositeBuffersOpenCL(
+	struct OpenCLContext *ocl,
+	cl_mem inputColors1,
+	cl_mem inputDistances1,
+	cl_mem inputNormals1,
+	cl_mem inputAlphas1,
+	int useAlpha1,
+	cl_mem inputColors2,
+	cl_mem inputDistances2,
+	cl_mem inputNormals2,
+	cl_mem inputAlphas2,
+	int useAlpha2,
+	cl_mem outputColors,
+	cl_mem outputDistances,
+	cl_mem outputNormals,
+	float *gpuTimeMs) {
+	cl_int err;
+	cl_event kernel_event;
+
+	cl_int screenWidth = ScreenWidth;
+	cl_int screenHeight = ScreenHeight;
+
+	// Set all kernel arguments including alpha buffers
+	err = clSetKernelArg(ocl->composite_kernel, 0, sizeof(cl_mem), &inputColors1);
+	err |= clSetKernelArg(ocl->composite_kernel, 1, sizeof(cl_mem), &inputDistances1);
+	err |= clSetKernelArg(ocl->composite_kernel, 2, sizeof(cl_mem), &inputNormals1);
+	err |= clSetKernelArg(ocl->composite_kernel, 3, sizeof(cl_mem), &inputAlphas1); // NEW
+	err |= clSetKernelArg(ocl->composite_kernel, 4, sizeof(cl_int), &useAlpha1);	// NEW
+	err |= clSetKernelArg(ocl->composite_kernel, 5, sizeof(cl_mem), &inputColors2);
+	err |= clSetKernelArg(ocl->composite_kernel, 6, sizeof(cl_mem), &inputDistances2);
+	err |= clSetKernelArg(ocl->composite_kernel, 7, sizeof(cl_mem), &inputNormals2);
+	err |= clSetKernelArg(ocl->composite_kernel, 8, sizeof(cl_mem), &inputAlphas2); // NEW
+	err |= clSetKernelArg(ocl->composite_kernel, 9, sizeof(cl_int), &useAlpha2);	// NEW
+	err |= clSetKernelArg(ocl->composite_kernel, 10, sizeof(cl_mem), &outputColors);
+	err |= clSetKernelArg(ocl->composite_kernel, 11, sizeof(cl_mem), &outputDistances);
+	err |= clSetKernelArg(ocl->composite_kernel, 12, sizeof(cl_mem), &outputNormals);
+	err |= clSetKernelArg(ocl->composite_kernel, 13, sizeof(cl_int), &screenWidth);
+	err |= clSetKernelArg(ocl->composite_kernel, 14, sizeof(cl_int), &screenHeight);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting composite kernel arguments: %d\n", err);
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+
+	size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->composite_kernel, 2, NULL,
+								 global_work_size, NULL, 0, NULL, &kernel_event);
+
+	if (err != CL_SUCCESS) {
+		printf("Error executing composite kernel: %d\n", err);
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+
+	clFinish(ocl->queue);
+
+	if (gpuTimeMs != NULL) {
+		cl_ulong start_time, end_time;
+		err = clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START,
+									  sizeof(start_time), &start_time, NULL);
+		err |= clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END,
+									   sizeof(end_time), &end_time, NULL);
+
+		if (err == CL_SUCCESS) {
+			*gpuTimeMs = (end_time - start_time) * 1e-6f;
+		} else {
+			*gpuTimeMs = 0.0f;
+		}
+	}
+
+	clReleaseEvent(kernel_event);
+}
+
 void renderFireParticles(struct OpenCLContext *ocl, struct FireSOA *fireParticles, struct Camera *camera, float *gpuTimeMs) {
 	cl_int err;
 	cl_event kernel_event, blur_event;
@@ -306,6 +386,8 @@ void renderFireParticles(struct OpenCLContext *ocl, struct FireSOA *fireParticle
 							  ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
 	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenNormals, &zeroFloat, sizeof(float), 0,
 							   ScreenWidth * ScreenHeight * sizeof(float) * 3, 0, NULL, NULL);
+	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenAlphas, &zeroFloat, sizeof(float), 0,
+							   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
 
 	// FAST: Use a kernel to set blue background
 	cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
@@ -374,8 +456,9 @@ void renderFireParticles(struct OpenCLContext *ocl, struct FireSOA *fireParticle
 	err |= clSetKernelArg(ocl->fire_render_kernel, 19, sizeof(cl_mem), &ocl->FireScreenDistances);
 	err |= clSetKernelArg(ocl->fire_render_kernel, 20, sizeof(cl_mem), &ocl->FireScreenColors);
 	err |= clSetKernelArg(ocl->fire_render_kernel, 21, sizeof(cl_mem), &ocl->FireScreenNormals);
-	err |= clSetKernelArg(ocl->fire_render_kernel, 22, sizeof(cl_int), &numPoints);
-	err |= clSetKernelArg(ocl->fire_render_kernel, 23, sizeof(cl_int), &particleRadius);
+	err |= clSetKernelArg(ocl->fire_render_kernel, 22, sizeof(cl_mem), &ocl->FireScreenAlphas);
+	err |= clSetKernelArg(ocl->fire_render_kernel, 23, sizeof(cl_int), &numPoints);
+	err |= clSetKernelArg(ocl->fire_render_kernel, 24, sizeof(cl_int), &particleRadius);
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting fire render kernel arguments: %d\n", err);
@@ -395,67 +478,88 @@ void renderFireParticles(struct OpenCLContext *ocl, struct FireSOA *fireParticle
 
 	clFinish(ocl->queue);
 
-	const int NUM_BLUR_PASSES = 3;
-	cl_int blurRadius = 3;
-	cl_float sigmaColor = 0.8f;
-	cl_float sigmaSpace = 2.5f;
+	if (ocl->blur_fire_kernel != NULL) {
+		const int NUM_BLUR_PASSES = 3;
+		cl_int blurRadius = 3;
+		cl_float sigmaColor = 0.8f;
+		cl_float sigmaSpace = 2.5f;
 
-	cl_mem srcColors = ocl->FireScreenColors;
-	cl_mem srcDistances = ocl->FireScreenDistances;
-	cl_mem dstColors = ocl->FireScreenColorsTemp;
-	cl_mem dstDistances = ocl->FireScreenDistancesTemp;
+		cl_mem srcColors = ocl->FireScreenColors;
+		cl_mem srcDistances = ocl->FireScreenDistances;
+		cl_mem srcAlphas = ocl->FireScreenAlphas;
+		cl_mem dstColors = ocl->FireScreenColorsTemp;
+		cl_mem dstDistances = ocl->FireScreenDistancesTemp;
+		cl_mem dstAlphas = ocl->FireScreenAlphasTemp;
 
-	for (int pass = 0; pass < NUM_BLUR_PASSES; pass++) {
-		err = clSetKernelArg(ocl->blur_fire_kernel, 0, sizeof(cl_mem), &srcColors);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 1, sizeof(cl_mem), &srcDistances);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 2, sizeof(cl_mem), &dstColors);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 3, sizeof(cl_mem), &dstDistances);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 4, sizeof(cl_int), &screenWidth);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 5, sizeof(cl_int), &screenHeight);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 6, sizeof(cl_int), &blurRadius);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 7, sizeof(cl_float), &sigmaColor);
-		err |= clSetKernelArg(ocl->blur_fire_kernel, 8, sizeof(cl_float), &sigmaSpace);
+		for (int pass = 0; pass < NUM_BLUR_PASSES; pass++) {
+			err = clSetKernelArg(ocl->blur_fire_kernel, 0, sizeof(cl_mem), &srcColors);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 1, sizeof(cl_mem), &srcDistances);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 2, sizeof(cl_mem), &srcAlphas);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 3, sizeof(cl_mem), &dstColors);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 4, sizeof(cl_mem), &dstDistances);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 5, sizeof(cl_mem), &dstAlphas);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 6, sizeof(cl_int), &screenWidth);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 7, sizeof(cl_int), &screenHeight);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 8, sizeof(cl_int), &blurRadius);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 9, sizeof(cl_float), &sigmaColor);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 10, sizeof(cl_float), &sigmaSpace);
 
-		if (err != CL_SUCCESS) {
-			printf("Error setting blur kernel arguments (pass %d): %d\n", pass, err);
-			break;
+			if (err != CL_SUCCESS) {
+				printf("Error setting blur kernel arguments (pass %d): %d\n", pass, err);
+				break;
+			}
+
+			size_t blur_global_work_size[2] = {screenWidth, screenHeight};
+			err = clEnqueueNDRangeKernel(ocl->queue, ocl->blur_fire_kernel, 2, NULL,
+										 blur_global_work_size, NULL, 0, NULL, &blur_event);
+
+			if (err != CL_SUCCESS) {
+				printf("Error executing blur kernel (pass %d): %d\n", pass, err);
+				break;
+			}
+
+			clFinish(ocl->queue);
+			clReleaseEvent(blur_event);
+
+			// Swap buffers for next pass
+			cl_mem tempColors = srcColors;
+			cl_mem tempDistances = srcDistances;
+			cl_mem tempAlphas = srcAlphas;
+			srcColors = dstColors;
+			srcDistances = dstDistances;
+			srcAlphas = dstAlphas;
+			dstColors = tempColors;
+			dstDistances = tempDistances;
+			dstAlphas = tempAlphas;
 		}
 
-		size_t blur_global_work_size[2] = {screenWidth, screenHeight};
-		err = clEnqueueNDRangeKernel(ocl->queue, ocl->blur_fire_kernel, 2, NULL,
-									 blur_global_work_size, NULL, 0, NULL, &blur_event);
+		// Copy back if odd number of passes
+		if (NUM_BLUR_PASSES % 2 == 1) {
+			err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenColorsTemp, ocl->FireScreenColors,
+									  0, 0, screenWidth * screenHeight * 3 * sizeof(float),
+									  0, NULL, NULL);
+			if (err != CL_SUCCESS) {
+				printf("Error copying final blurred colors: %d\n", err);
+			}
 
-		if (err != CL_SUCCESS) {
-			printf("Error executing blur kernel (pass %d): %d\n", pass, err);
-			break;
+			err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenDistancesTemp, ocl->FireScreenDistances,
+									  0, 0, screenWidth * screenHeight * sizeof(float),
+									  0, NULL, NULL);
+			if (err != CL_SUCCESS) {
+				printf("Error copying final blurred distances: %d\n", err);
+			}
+
+			err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenAlphasTemp, ocl->FireScreenAlphas,
+									  0, 0, screenWidth * screenHeight * sizeof(float),
+									  0, NULL, NULL);
+			if (err != CL_SUCCESS) {
+				printf("Error copying final blurred alphas: %d\n", err);
+			}
+
+			clFinish(ocl->queue);
 		}
-
-		clFinish(ocl->queue);
-		clReleaseEvent(blur_event);
-
-		cl_mem tempColors = srcColors;
-		cl_mem tempDistances = srcDistances;
-		srcColors = dstColors;
-		srcDistances = dstDistances;
-		dstColors = tempColors;
-		dstDistances = tempDistances;
-	}
-
-	if (NUM_BLUR_PASSES % 2 == 1) {
-		err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenColorsTemp, ocl->FireScreenColors,
-								  0, 0, screenWidth * screenHeight * 3 * sizeof(float),
-								  0, NULL, NULL);
-		if (err != CL_SUCCESS) {
-			printf("Error copying final blurred colors: %d\n", err);
-		}
-
-		err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenDistancesTemp, ocl->FireScreenDistances,
-								  0, 0, screenWidth * screenHeight * sizeof(float),
-								  0, NULL, NULL);
-		if (err != CL_SUCCESS) {
-			printf("Error copying final blurred distances: %d\n", err);
-		}
-
+	} else {
+		printf("Blur kernel not available, skipping blur step\n");
 		clFinish(ocl->queue);
 	}
 
@@ -816,7 +920,7 @@ void renderSkyboxOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct
 	clReleaseEvent(kernel_event); // Always release events to avoid leaks
 }
 
-void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox, float *gpuTimeMs) {
+void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, struct SkyBox *skyBox, float *gpuTimeMs, bool composite) {
 	cl_int err;
 
 	// Set kernel arguments for applyReflections
@@ -828,9 +932,20 @@ void applyReflectionsOpenCL(struct OpenCLContext *ocl, struct Camera *camera, st
 	cl_int skybox_width = skyBox->top->width;
 	cl_int skybox_height = skyBox->top->height;
 
-	err = clSetKernelArg(ocl->applyReflections_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
-	err |= clSetKernelArg(ocl->applyReflections_kernel, 1, sizeof(cl_mem), &ocl->buffer_distances);
-	err |= clSetKernelArg(ocl->applyReflections_kernel, 2, sizeof(cl_mem), &ocl->buffer_normals);
+	if (composite) {
+		cl_int one = 1;
+		err = clSetKernelArg(ocl->applyReflections_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
+		err |= clSetKernelArg(ocl->applyReflections_kernel, 1, sizeof(cl_mem), &ocl->CompositedScreenDistances);
+		err |= clSetKernelArg(ocl->applyReflections_kernel, 2, sizeof(cl_mem), &ocl->CompositedScreenNormals);
+		err |= clSetKernelArg(ocl->applyReflections_kernel, 19, sizeof(cl_int), &one);
+	} else {
+		cl_int zero = 0;
+		err = clSetKernelArg(ocl->applyReflections_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		err |= clSetKernelArg(ocl->applyReflections_kernel, 1, sizeof(cl_mem), &ocl->buffer_distances);
+		err |= clSetKernelArg(ocl->applyReflections_kernel, 2, sizeof(cl_mem), &ocl->buffer_normals);
+		err |= clSetKernelArg(ocl->applyReflections_kernel, 19, sizeof(cl_int), &zero);
+	}
+
 	err |= clSetKernelArg(ocl->applyReflections_kernel, 3, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
 	err |= clSetKernelArg(ocl->applyReflections_kernel, 4, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
 	err |= clSetKernelArg(ocl->applyReflections_kernel, 5, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
@@ -1035,6 +1150,7 @@ struct GPUTimings {
 	float fireSimulationTime;
 	float fireRenderingTime;
 	float fluidSimulationTime;
+	float compositingTime;
 };
 
 float totalTime(struct GPUTimings *gpuTimings) {
@@ -1718,6 +1834,12 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	// Create all kernels
+	ocl->composite_kernel = clCreateKernel(ocl->program, "compositeBuffers", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating composite kernel: %d\n", err);
+		return 0;
+	}
+
 	ocl->antiAliasKernel = clCreateKernel(ocl->program, "antiAlias", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating antiAlias kernel: %d\n", err);
@@ -1732,7 +1854,7 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 
 	ocl->blur_fire_kernel = clCreateKernel(ocl->program, "blurFire", &err);
 	if (err != CL_SUCCESS) {
-		printf("Error creating renderFireParticles kernel: %d\n", err);
+		printf("Error creating blurFire kernel: %d\n", err);
 		return 0;
 	}
 
@@ -1835,6 +1957,20 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	ocl->FireScreenAlphas = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
+										   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating screen alphas buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->FireScreenAlphasTemp = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
+											   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating screen alphas temp buffer: %d\n", err);
+		return 0;
+	}
+
 	// BVH buffers
 	ocl->buffer_bvh_nodes = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 										   bvh->NodesCount * sizeof(struct BVHNode), NULL, &err);
@@ -1886,6 +2022,14 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		printf("Error creating valid triangles buffer: %d\n", err);
 		return 0;
 	}
+
+	// compositing buffers
+	ocl->CompositedScreenColors = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
+												 ScreenWidth * ScreenHeight * sizeof(float) * 3, NULL, &err);
+	ocl->CompositedScreenDistances = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
+													ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+	ocl->CompositedScreenNormals = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
+												  ScreenWidth * ScreenHeight * sizeof(float) * 3, NULL, &err);
 
 	// Screen fire rendering buffers
 	ocl->FireScreenColors = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
@@ -2148,6 +2292,18 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 		mode = 0;
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenNormals);
 		break;
+	case renderCompositedColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
+		break;
+	case renderCompositedDistance:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenDistances);
+		break;
+	case renderCompositedNormal:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenNormals);
+		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;
 		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
@@ -2321,7 +2477,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	chart_pos_Y += 15;
 
 	// *** Screen Space Projection Kernel and sky box ***
-	applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime);
+	applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime, false);
 
 	float reflectionsFPS = (gpuTimings->applyReflectionsTime > 0.001f) ? (1000.0f / gpuTimings->applyReflectionsTime) : 0.0f;
 	snprintf(text, sizeof(text), "Reflections %.0f FPS", reflectionsFPS);
@@ -2596,6 +2752,27 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clFinish(ocl->queue);
 #endif
 
+	compositeBuffersOpenCL(
+		ocl,
+		ocl->buffer_screen_colors,
+		ocl->buffer_distances,
+		ocl->buffer_normals,
+		ocl->FireScreenAlphas,
+		0,
+		ocl->FireScreenColors,
+		ocl->FireScreenDistances,
+		ocl->FireScreenNormals,
+		ocl->FireScreenAlphas,
+		1,
+		ocl->CompositedScreenColors,
+		ocl->CompositedScreenDistances,
+		ocl->CompositedScreenNormals,
+		&gpuTimings->compositingTime);
+
+	if (camera->renderMode == renderCompositedColor) {
+		applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime, true);
+	}
+
 	if (camera->AntiAlias == true) {
 		antiAliasingOpenCL(ocl, gpuTimings, camera);
 	}
@@ -2654,6 +2831,18 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	case renderFireNormal:
 		mode = 0;
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenNormals);
+		break;
+	case renderCompositedColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
+		break;
+	case renderCompositedDistance:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenDistances);
+		break;
+	case renderCompositedNormal:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenNormals);
 		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;

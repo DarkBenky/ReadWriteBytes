@@ -31,6 +31,7 @@ struct OpenCLContext {
 	cl_kernel fire_render_kernel;         // Fire render kernel
 	cl_kernel blur_fire_kernel;          // Fire blur kernel
 	cl_kernel clearColorBuffer_kernel;   // Clear color buffer kernel
+	cl_kernel composite_kernel;          // Compositing kernel
 	// buffers
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
@@ -103,6 +104,12 @@ struct OpenCLContext {
     cl_mem FireScreenColors;
 	cl_mem FireScreenColorsTemp;
     cl_mem FireScreenNormals;
+	cl_mem FireScreenAlphas;
+	cl_mem FireScreenAlphasTemp;
+	// compositing buffers
+	cl_mem CompositedScreenColors;
+	cl_mem CompositedScreenNormals;
+	cl_mem CompositedScreenDistances;
 
 	
 

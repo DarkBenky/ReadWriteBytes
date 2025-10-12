@@ -1,0 +1,19 @@
+CC = clang
+CFLAGS = -O3 -march=native -Wall -DPARTICLE_BENCHMARK
+LDFLAGS = -lm
+
+TARGET = particleSim_benchmark
+SRC = particleSim.c
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
+
+clean:
+	rm -f $(TARGET)
+
+run: $(TARGET)
+	./$(TARGET)
+
+.PHONY: all clean run
