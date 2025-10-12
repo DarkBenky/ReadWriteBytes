@@ -29,6 +29,8 @@ struct OpenCLContext {
 	cl_kernel fire_sim_kernel;				// Fire simulation kernel
 	cl_program fire_program;              // Fire simulation program
 	cl_kernel fire_render_kernel;         // Fire render kernel
+	cl_kernel blur_fire_kernel;          // Fire blur kernel
+	cl_kernel clearColorBuffer_kernel;   // Clear color buffer kernel
 	// buffers
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
@@ -88,7 +90,7 @@ struct OpenCLContext {
 	cl_mem buffer_skybox_right;
 	cl_mem buffer_skybox_front;
 	cl_mem buffer_skybox_back;
-	// fire simulation particles buffers
+	// fire rendering
 	cl_mem posX;
 	cl_mem posY;
 	cl_mem posZ;
@@ -96,17 +98,13 @@ struct OpenCLContext {
 	cl_mem velY;
 	cl_mem velZ;
 	cl_mem lifeTime;
-	cl_mem maxDepth;
-    cl_mem basePosition;
-    cl_mem staringColor;
-    cl_mem fireColor;
-    cl_mem smokeColor;
-    cl_mem maxLifeTime;
+    cl_mem FireScreenDistances;
+	cl_mem FireScreenDistancesTemp;
+    cl_mem FireScreenColors;
+	cl_mem FireScreenColorsTemp;
+    cl_mem FireScreenNormals;
 
-	// rendering buffers for fire simulation
-	cl_mem buffer_color;
-	cl_mem buffer_depth;
-	cl_mem buffer_temp;
+	
 
 	// Add pre-allocated host memory buffers
 	float *host_points_data;

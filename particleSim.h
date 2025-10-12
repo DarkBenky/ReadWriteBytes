@@ -38,7 +38,7 @@ struct PointSOA {
 };
 
 
-void Step(struct PointSOA *particles, float deltaTime); // Simulation step
+void Step(struct PointSOA *particles, float deltaTime, float *timeTook); // Simulation step
 void updateGridData(struct PointSOA *particles); // Update grid data
 
 #endif

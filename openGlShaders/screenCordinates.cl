@@ -2489,7 +2489,8 @@ __kernel void antiAlias(
     int screen_width,
     int screen_height,
     int mode,
-    __global float* input_normals
+    __global float* input_normals,
+    int const use_advanced
 ) {
     int x = get_global_id(0);
     int y = get_global_id(1);
@@ -2532,10 +2533,300 @@ __kernel void antiAlias(
 
     bool is_edge = detectEdge(x, y, input_colors, input_distances, input_normals, 
                              screen_width, screen_height, mode, center_distance, center_normal, center_color_full);
+
+    if (!is_edge) return;
     
-    if (is_edge) {
-        performEdgeSmoothing(x, y, input_colors, input_distances, input_normals,
-                           screen_width, screen_height, mode, 
-                           center_color, center_distance, center_normal);
+    if (use_advanced != 0) {
+        EdgeInfo edge_info = analyzeEdge(x, y, input_colors, input_distances, input_normals, 
+                                        screen_width, screen_height, mode, center_distance, center_normal, center_color_full);
+        performAdvancedEdgeSmoothing(x, y, input_colors, input_distances, input_normals, 
+                                    screen_width, screen_height, mode, center_color_full, center_distance, center_normal, edge_info);
+    } else {
+        performEdgeSmoothing(x, y, input_colors, input_distances, input_normals, 
+                            screen_width, screen_height, mode, center_color, center_distance, center_normal);
     }
+}
+
+__kernel void renderFire(
+    __global const float* posX,
+    __global const float* posY,
+    __global const float* posZ,
+    __global const float* velX,
+    __global const float* velY,
+    __global const float* velZ,
+    __global const float* lifeTime,
+    
+    const float3 baseColor,
+    const float3 fireColor,
+    const float3 smokeColor,
+    
+    const float maxLifeTime,
+    const float maxVelocity,
+    const float maxDepth,
+    
+    const float3 camPos,
+    const float3 camDir,
+    const float3 camUp,
+    const float fov,
+    
+    const int screenWidth,
+    const int screenHeight,
+    
+    __global float *ScreenDistances,
+    __global float *ScreenColors,
+    __global float *ScreenNormals,
+    
+    const int numPoints,
+    const int ParticleRadius
+) {
+    int i = get_global_id(0);
+    if (i >= numPoints) return;
+
+    float3 point = (float3)(posX[i], posY[i], posZ[i]);
+    float3 velocity = (float3)(velX[i], velY[i], velZ[i]);
+    float velMagnitude = length(velocity);
+    float velNormalized = min(1.0f, velMagnitude / sqrt(maxVelocity));
+    float lifeRatio = lifeTime[i] / maxLifeTime;
+    
+    float3 forward = normalize(camDir);
+    float3 right = normalize(cross(forward, camUp));
+    float3 up = cross(right, forward);
+
+    float3 relativePoint = point - camPos;
+    float dotProduct = dot(relativePoint, forward);
+    if (dotProduct <= 0.001f) return;
+    
+    float fovScale = 1.0f / (dotProduct * fov);
+    float screenRight = dot(relativePoint, right) * fovScale;
+    float screenUp = dot(relativePoint, up) * fovScale;
+    
+    float halfWidth = screenWidth * 0.5f;
+    float halfHeight = screenHeight * 0.5f;
+    
+    int screenX = (int)(screenRight * halfWidth + halfWidth);
+    int screenY = (int)(-screenUp * halfHeight + halfHeight);
+    
+    if (screenX < 0 || screenX >= screenWidth || screenY < 0 || screenY >= screenHeight) return;
+
+    float distance = length(relativePoint);
+    
+    float randomSeed = (float)i * 0.12345f;
+    float random1 = fract(sin(randomSeed * 12.9898f) * 43758.5453f);
+    float random2 = fract(sin(randomSeed * 78.233f) * 43758.5453f);
+    float random3 = fract(sin(randomSeed * 45.678f) * 43758.5453f);
+    float random4 = fract(sin(randomSeed * 91.234f) * 43758.5453f);
+    
+    float baseRandomSize = 0.7f + random4 * 0.6f;
+    
+    float sizeMultiplier = baseRandomSize;
+    if (lifeRatio > 0.4f) {
+        float smokePhase = (lifeRatio - 0.4f) / 0.6f;
+        sizeMultiplier = baseRandomSize * (1.0f + smokePhase * 2.0f);
+    }
+    
+    float particleRadiusBasedOnDistance = (float)ParticleRadius * sizeMultiplier / dotProduct;
+    int radiusInt = max(1, (int)particleRadiusBasedOnDistance);
+    int radiusSquared = radiusInt * radiusInt;
+    
+    float3 particleColor;
+    float emissionBoost;
+    
+    if (lifeRatio < 0.1f) {
+        float t = lifeRatio / 0.1f;
+        particleColor = mix((float3)(1.5f, 1.4f, 1.0f), baseColor * 1.3f, t);
+        emissionBoost = 3.5f;
+    } else if (lifeRatio < 0.25f) {
+        float t = (lifeRatio - 0.1f) / 0.15f;
+        particleColor = mix(baseColor * 1.3f, fireColor * 1.2f, t);
+        emissionBoost = 2.8f;
+    } else if (lifeRatio < 0.35f) {
+        float t = (lifeRatio - 0.25f) / 0.2f;
+        particleColor = mix(fireColor * 1.2f, fireColor * 0.8f, t);
+        emissionBoost = 2.0f;
+    } else if (lifeRatio < 0.45f) {
+        float t = (lifeRatio - 0.45f) / 0.2f;
+        particleColor = mix(fireColor * 0.8f, fireColor * 0.4f, t);
+        emissionBoost = 1.0f;
+    } else {
+        float t = (lifeRatio - 0.65f) / 0.35f;
+        particleColor = mix(fireColor * 0.2f, smokeColor, t);
+        emissionBoost = 0.5f;
+    }
+    
+    float3 colorVariation = (float3)(
+        random1 * 0.3f,
+        random2 * 0.2f - 0.1f,
+        random3 * 0.15f - 0.1f
+    );
+    particleColor = clamp(particleColor + colorVariation, 0.0f, 3.0f);
+    particleColor *= (1.0f + velNormalized * 0.5f);
+    
+    float opacity;
+    if (lifeRatio < 0.08f) {
+        opacity = lifeRatio / 0.08f;
+    } else if (lifeRatio > 0.7f) {
+        opacity = (1.0f - lifeRatio) / 0.3f;
+    } else {
+        opacity = 1.0f;
+    }
+    
+    if (lifeRatio > 0.5f) {
+        float smokeAmount = (lifeRatio - 0.5f) / 0.5f;
+        opacity *= (1.0f - smokeAmount * 0.8f);
+        emissionBoost *= (1.0f - smokeAmount * 0.9f);
+    }
+
+    for (int dy = -radiusInt; dy <= radiusInt; dy++) {
+        int offsetY = screenY + dy;
+        if (offsetY < 0 || offsetY >= screenHeight) continue;
+        
+        int dy2 = dy * dy;
+        if (dy2 > radiusSquared) continue;
+        
+        int maxDx = (int)sqrt((float)(radiusSquared - dy2));
+        
+        for (int dx = -maxDx; dx <= maxDx; dx++) {
+            int offsetX = screenX + dx;
+            if (offsetX < 0 || offsetX >= screenWidth) continue;
+            
+            int offsetIndex = offsetY * screenWidth + offsetX;
+            int r2 = dx*dx + dy*dy;
+            if (r2 > radiusSquared) continue;
+            
+            float normalizedR2 = (float)r2 / (float)radiusSquared;
+            float sphereDepth = sqrt(max(0.0f, 1.0f - normalizedR2));
+            float depthOffset = sphereDepth * particleRadiusBasedOnDistance;
+            float surfaceDistance = max(0.001f, distance - depthOffset);
+            
+            float edgeFalloff = pow(sphereDepth, 0.4f);
+            float pixelOpacity = opacity * edgeFalloff;
+            
+            float centerGlow = pow(1.0f - normalizedR2, 0.5f);
+            
+            float existingDepth = ScreenDistances[offsetIndex];
+            
+            int colorBase = offsetIndex * 3;
+            float3 existingColor = vload3(0, &ScreenColors[colorBase]);
+            
+            float finalEmission = emissionBoost * pixelOpacity * centerGlow;
+            float3 emittedColor = particleColor * finalEmission;
+            float3 newColor = clamp(existingColor + emittedColor, 0.0f, 5.0f);
+            
+            vstore3(newColor, 0, &ScreenColors[colorBase]);
+            
+            if (existingDepth == 0.0f || surfaceDistance < existingDepth) {
+                ScreenDistances[offsetIndex] = surfaceDistance;
+                
+                float3 normal = normalize((float3)(dx / (float)radiusInt, dy / (float)radiusInt, sphereDepth));
+                vstore3(normal, 0, &ScreenNormals[offsetIndex * 3]);
+            }
+        }
+    }
+}
+
+__kernel void blurFire(
+    __global const float* InputColors,
+    __global const float* InputDistances,
+    __global float* OutputColors,
+    __global float* OutputDistances,
+    const int screenWidth,
+    const int screenHeight,
+    const int blurRadius,
+    const float sigmaColor,
+    const float sigmaSpace
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int centerIdx = y * screenWidth + x;
+    float centerDepth = InputDistances[centerIdx];
+    
+    if (centerDepth <= 0.001f) {
+        int colorBase = centerIdx * 3;
+        OutputColors[colorBase + 0] = InputColors[colorBase + 0];
+        OutputColors[colorBase + 1] = InputColors[colorBase + 1];
+        OutputColors[colorBase + 2] = InputColors[colorBase + 2];
+        OutputDistances[centerIdx] = 0.0f;
+        return;
+    }
+    
+    float3 centerColor = vload3(0, &InputColors[centerIdx * 3]);
+    float centerBrightness = (centerColor.x + centerColor.y + centerColor.z) / 3.0f;
+    
+    float brightnessThreshold = 0.5f;
+    float blurStrength;
+    if (centerBrightness > brightnessThreshold) {
+        blurStrength = 1.0f - (centerBrightness - brightnessThreshold) / (5.0f - brightnessThreshold);
+        blurStrength = clamp(blurStrength, 0.1f, 1.0f);
+    } else {
+        blurStrength = 1.0f;
+    }
+    
+    float3 accumulatedColor = (float3)(0.0f, 0.0f, 0.0f);
+    float totalWeight = 0.0f;
+    float sigma = (float)blurRadius / 2.0f;
+    
+    int effectiveRadius = (int)((float)blurRadius * blurStrength);
+    effectiveRadius = max(1, effectiveRadius);
+    
+    for (int dy = -effectiveRadius; dy <= effectiveRadius; dy++) {
+        for (int dx = -effectiveRadius; dx <= effectiveRadius; dx++) {
+            int nx = x + dx;
+            int ny = y + dy;
+            
+            if (nx < 0 || nx >= screenWidth || ny < 0 || ny >= screenHeight) continue;
+            
+            int neighborIdx = ny * screenWidth + nx;
+            float neighborDepth = InputDistances[neighborIdx];
+            
+            if (neighborDepth <= 0.001f) continue;
+            
+            float3 neighborColor = vload3(0, &InputColors[neighborIdx * 3]);
+            float neighborBrightness = (neighborColor.x + neighborColor.y + neighborColor.z) / 3.0f;
+            
+            float brightnessDiff = fabs(centerBrightness - neighborBrightness);
+            float brightnessWeight = exp(-brightnessDiff * brightnessDiff / 0.5f);
+            
+            float dist = (float)(dx * dx + dy * dy);
+            float spatialWeight = exp(-dist / (2.0f * sigma * sigma));
+            
+            float weight = spatialWeight * brightnessWeight;
+            
+            accumulatedColor += neighborColor * weight;
+            totalWeight += weight;
+        }
+    }
+    
+    if (totalWeight > 0.001f) {
+        float3 blurredColor = accumulatedColor / totalWeight;
+        
+        float blendFactor = 1.0f - blurStrength;
+        float3 finalColor = mix(blurredColor, centerColor, blendFactor);
+        
+        finalColor = clamp(finalColor, 0.0f, 5.0f);
+        vstore3(finalColor, 0, &OutputColors[centerIdx * 3]);
+        OutputDistances[centerIdx] = centerDepth;
+    } else {
+        vstore3(centerColor, 0, &OutputColors[centerIdx * 3]);
+        OutputDistances[centerIdx] = centerDepth;
+    }
+}
+
+__kernel void clearColorBuffer(
+    __global float* colors,
+    const float3 backgroundColor,
+    const int width,
+    const int height
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= width || y >= height) return;
+    
+    int idx = (y * width + x) * 3;
+    colors[idx + 0] = backgroundColor.x;
+    colors[idx + 1] = backgroundColor.y;
+    colors[idx + 2] = backgroundColor.z;
 }

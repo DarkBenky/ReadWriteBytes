@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
-// #include <time.h>
+#include <time.h>
 // #include <stdlib.h> // Added for malloc and free
 #define DEBUG 1
 #define NUM_PARTICLES 15000
@@ -414,7 +414,9 @@ void CollideParticlesInGrid(struct PointSOA *particles) {
 	}
 }
 
-void Step(struct PointSOA *particles, float deltaTime) {
+void Step(struct PointSOA *particles, float deltaTime, float *timeTook) {
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
 	const int subSteps = 4;
 	float subDeltaTime = deltaTime / subSteps;
 
@@ -437,6 +439,8 @@ void Step(struct PointSOA *particles, float deltaTime) {
 	}
 	particles->totalEnergy = totalEnergy; // Kinetic energy
 #endif
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	*timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6);
 }
 
 // Example usage and performance measurement

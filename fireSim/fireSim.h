@@ -1,55 +1,35 @@
 #ifndef FIRE_SIM_H
 #define FIRE_SIM_H
+#define NUM_FIRE_PARTICLES 1000
+#define G 9.81f
 
 #include "../openGlShaders/gpuStruct.h"
 
-// Initialize fire simulation - all parameters passed directly
-int initOpenCLFireSim(
-    struct OpenCLContext *ocl, 
-    const char *kernelSource, 
-    int screenWidth, 
-    int screenHeight, 
-    float *basePosition,      // 3 floats: x, y, z
-    float *startingColor,     // 3 floats: r, g, b
-    float *fireColor,         // 3 floats: r, g, b
-    float *smokeColor,        // 3 floats: r, g, b
-    float maxLifeTime
-);
+struct FireSOA {
+	float x[NUM_FIRE_PARTICLES];
+	float y[NUM_FIRE_PARTICLES];
+	float z[NUM_FIRE_PARTICLES];
+	float xVelocity[NUM_FIRE_PARTICLES];
+	float yVelocity[NUM_FIRE_PARTICLES];
+	float zVelocity[NUM_FIRE_PARTICLES];
+	float lifeTime[NUM_FIRE_PARTICLES];
+	float basePosition[3];
+	float startingColor[3];
+	float fireColor[3];
+	float smokeColor[3];
+	float windDirection[3];
+	float maxLifeTime;
+	float buoyancy;
+	float drag;
+	float turbulence;
+	float maxVelocity;
+	float particlesSize;
+	float maxDistance;
+	float swirlIntensity;
+	float swirlFrequency;
+};
 
-// Simulate one step - returns timing if needed
-void simulateFireStep(
-    struct OpenCLContext *ocl, 
-    int numParticles, 
-    float deltaTime, 
-    float *kernelTime
-);
-
-// Render particles with view/projection matrices
-void renderFireParticles(
-    struct OpenCLContext *ocl, 
-    int numParticles, 
-    int screenWidth, 
-    int screenHeight,
-    float *viewMatrix,        // 16 floats
-    float *projMatrix,        // 16 floats
-    float particleSize, 
-    float *kernelTime
-);
-
-// Download rendered buffer to CPU
-void downloadFireRenderBuffer(
-    struct OpenCLContext *ocl, 
-    int screenWidth, 
-    int screenHeight, 
-    float *outputBuffer
-);
-
-// Update fire parameters at runtime
-void updateFireBasePosition(struct OpenCLContext *ocl, float *newBasePosition);
-void updateFireColors(struct OpenCLContext *ocl, float *startingColor, float *fireColor, float *smokeColor);
-void updateFireMaxLifeTime(struct OpenCLContext *ocl, float maxLifeTime);
-
-// Cleanup
-void cleanupFireSim(struct OpenCLContext *ocl);
+void InitializeFireParticles(struct FireSOA *particles);
+void fireSimStep(struct FireSOA *particles, float deltaTime, float *timeTook);
 
 #endif
