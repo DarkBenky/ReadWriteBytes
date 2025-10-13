@@ -282,6 +282,211 @@ struct Triangles {
 	int count;
 };
 
+void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs) {
+	if (!missiles || missiles->count == 0) return;
+
+	cl_int err;
+	float zeroFloat = 0.0f;
+
+	// Clear fire rendering buffers once
+	err = clEnqueueFillBuffer(ocl->queue, ocl->FireScreenDistances, &zeroFloat, sizeof(float), 0,
+							  ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenNormals, &zeroFloat, sizeof(float), 0,
+							   ScreenWidth * ScreenHeight * sizeof(float) * 3, 0, NULL, NULL);
+	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenAlphas, &zeroFloat, sizeof(float), 0,
+							   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+
+	cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
+	cl_int screenWidth = ScreenWidth;
+	cl_int screenHeight = ScreenHeight;
+
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 1, sizeof(cl_float3), &backgroundColor);
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 2, sizeof(cl_int), &screenWidth);
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 3, sizeof(cl_int), &screenHeight);
+
+	size_t global_size[2] = {ScreenWidth, ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->clearColorBuffer_kernel, 2, NULL,
+								 global_size, NULL, 0, NULL, NULL);
+	clFinish(ocl->queue);
+
+	// Render each missile's fire into the same buffers (additive blending)
+	float totalFireTime = 0.0f;
+
+	for (int i = 0; i < missiles->count; i++) {
+		struct Missile *missile = missiles->missiles[i];
+		if (!missile || !missile->fireSim) continue;
+
+		float fireRenderTime = 0.0f;
+
+		// Upload particle data for this missile
+		err = clEnqueueWriteBuffer(ocl->queue, ocl->posX, CL_FALSE, 0,
+								   NUM_FIRE_PARTICLES * sizeof(float),
+								   missile->fireSim->x, 0, NULL, NULL);
+		err |= clEnqueueWriteBuffer(ocl->queue, ocl->posY, CL_FALSE, 0,
+									NUM_FIRE_PARTICLES * sizeof(float),
+									missile->fireSim->y, 0, NULL, NULL);
+		err |= clEnqueueWriteBuffer(ocl->queue, ocl->posZ, CL_FALSE, 0,
+									NUM_FIRE_PARTICLES * sizeof(float),
+									missile->fireSim->z, 0, NULL, NULL);
+		err |= clEnqueueWriteBuffer(ocl->queue, ocl->velX, CL_FALSE, 0,
+									NUM_FIRE_PARTICLES * sizeof(float),
+									missile->fireSim->xVelocity, 0, NULL, NULL);
+		err |= clEnqueueWriteBuffer(ocl->queue, ocl->velY, CL_FALSE, 0,
+									NUM_FIRE_PARTICLES * sizeof(float),
+									missile->fireSim->yVelocity, 0, NULL, NULL);
+		err |= clEnqueueWriteBuffer(ocl->queue, ocl->velZ, CL_FALSE, 0,
+									NUM_FIRE_PARTICLES * sizeof(float),
+									missile->fireSim->zVelocity, 0, NULL, NULL);
+		err |= clEnqueueWriteBuffer(ocl->queue, ocl->lifeTime, CL_TRUE, 0,
+									NUM_FIRE_PARTICLES * sizeof(float),
+									missile->fireSim->lifeTime, 0, NULL, NULL);
+
+		if (err != CL_SUCCESS) {
+			printf("Error uploading fire data for missile %d: %d\n", i, err);
+			continue;
+		}
+
+		// Set fire rendering parameters
+		cl_float3 baseColor = {missile->fireSim->startingColor[0],
+							   missile->fireSim->startingColor[1],
+							   missile->fireSim->startingColor[2]};
+		cl_float3 fireColor = {missile->fireSim->fireColor[0],
+							   missile->fireSim->fireColor[1],
+							   missile->fireSim->fireColor[2]};
+		cl_float3 smokeColor = {missile->fireSim->smokeColor[0],
+								missile->fireSim->smokeColor[1],
+								missile->fireSim->smokeColor[2]};
+
+		cl_float maxLifeTime = missile->fireSim->maxLifeTime;
+		cl_float maxVelocity = missile->fireSim->maxVelocity;
+		cl_float maxDepth = missile->fireSim->maxDistance;
+
+		cl_float3 camPos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+		cl_float3 camDir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+		cl_float3 camUp = {0.0f, 1.0f, 0.0f};
+		cl_float fov = camera->fov;
+
+		cl_int numPoints = NUM_FIRE_PARTICLES;
+		cl_int particleRadius = (int)(missile->fireSim->particlesSize * 100.0f);
+
+		// Set kernel arguments
+		err = clSetKernelArg(ocl->fire_render_kernel, 0, sizeof(cl_mem), &ocl->posX);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 1, sizeof(cl_mem), &ocl->posY);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 2, sizeof(cl_mem), &ocl->posZ);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 3, sizeof(cl_mem), &ocl->velX);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 4, sizeof(cl_mem), &ocl->velY);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 5, sizeof(cl_mem), &ocl->velZ);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 6, sizeof(cl_mem), &ocl->lifeTime);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 7, sizeof(cl_float3), &baseColor);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 8, sizeof(cl_float3), &fireColor);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 9, sizeof(cl_float3), &smokeColor);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 10, sizeof(cl_float), &maxLifeTime);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 11, sizeof(cl_float), &maxVelocity);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 12, sizeof(cl_float), &maxDepth);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 13, sizeof(cl_float3), &camPos);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 14, sizeof(cl_float3), &camDir);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 15, sizeof(cl_float3), &camUp);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 16, sizeof(cl_float), &fov);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 17, sizeof(cl_int), &screenWidth);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 18, sizeof(cl_int), &screenHeight);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 19, sizeof(cl_mem), &ocl->FireScreenDistances);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 20, sizeof(cl_mem), &ocl->FireScreenColors);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 21, sizeof(cl_mem), &ocl->FireScreenNormals);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 22, sizeof(cl_mem), &ocl->FireScreenAlphas);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 23, sizeof(cl_int), &numPoints);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 24, sizeof(cl_int), &particleRadius);
+
+		if (err != CL_SUCCESS) {
+			printf("Error setting fire kernel args for missile %d: %d\n", i, err);
+			continue;
+		}
+
+		// Execute rendering kernel
+		cl_event kernel_event;
+		size_t work_size = NUM_FIRE_PARTICLES;
+		err = clEnqueueNDRangeKernel(ocl->queue, ocl->fire_render_kernel, 1, NULL,
+									 &work_size, NULL, 0, NULL, &kernel_event);
+
+		if (err != CL_SUCCESS) {
+			printf("Error executing fire kernel for missile %d: %d\n", i, err);
+			continue;
+		}
+
+		clFinish(ocl->queue);
+
+		// Get timing
+		cl_ulong start_time, end_time;
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START,
+								sizeof(start_time), &start_time, NULL);
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END,
+								sizeof(end_time), &end_time, NULL);
+		fireRenderTime = (end_time - start_time) * 1e-6f;
+		totalFireTime += fireRenderTime;
+
+		clReleaseEvent(kernel_event);
+	}
+
+	*timeTookMs = totalFireTime;
+
+	// Apply blur to all fires at once
+	if (ocl->blur_fire_kernel != NULL) {
+		const int NUM_BLUR_PASSES = 2;
+		cl_int blurRadius = 5;
+		cl_float sigmaColor = 0.8f;
+		cl_float sigmaSpace = 2.5f;
+
+		cl_mem srcColors = ocl->FireScreenColors;
+		cl_mem srcDistances = ocl->FireScreenDistances;
+		cl_mem srcAlphas = ocl->FireScreenAlphas;
+		cl_mem dstColors = ocl->FireScreenColorsTemp;
+		cl_mem dstDistances = ocl->FireScreenDistancesTemp;
+		cl_mem dstAlphas = ocl->FireScreenAlphasTemp;
+
+		for (int pass = 0; pass < NUM_BLUR_PASSES; pass++) {
+			err = clSetKernelArg(ocl->blur_fire_kernel, 0, sizeof(cl_mem), &srcColors);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 1, sizeof(cl_mem), &srcDistances);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 2, sizeof(cl_mem), &srcAlphas);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 3, sizeof(cl_mem), &dstColors);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 4, sizeof(cl_mem), &dstDistances);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 5, sizeof(cl_mem), &dstAlphas);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 6, sizeof(cl_int), &screenWidth);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 7, sizeof(cl_int), &screenHeight);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 8, sizeof(cl_int), &blurRadius);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 9, sizeof(cl_float), &sigmaColor);
+			err |= clSetKernelArg(ocl->blur_fire_kernel, 10, sizeof(cl_float), &sigmaSpace);
+
+			size_t blur_global_size[2] = {screenWidth, screenHeight};
+			err = clEnqueueNDRangeKernel(ocl->queue, ocl->blur_fire_kernel, 2, NULL,
+										 blur_global_size, NULL, 0, NULL, NULL);
+			clFinish(ocl->queue);
+
+			cl_mem tempColors = srcColors;
+			cl_mem tempDistances = srcDistances;
+			cl_mem tempAlphas = srcAlphas;
+			srcColors = dstColors;
+			srcDistances = dstDistances;
+			srcAlphas = dstAlphas;
+			dstColors = tempColors;
+			dstDistances = tempDistances;
+			dstAlphas = tempAlphas;
+		}
+
+		if (NUM_BLUR_PASSES % 2 == 1) {
+			err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenColorsTemp, ocl->FireScreenColors,
+									  0, 0, screenWidth * screenHeight * 3 * sizeof(float),
+									  0, NULL, NULL);
+			err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenDistancesTemp, ocl->FireScreenDistances,
+									  0, 0, screenWidth * screenHeight * sizeof(float),
+									  0, NULL, NULL);
+			err = clEnqueueCopyBuffer(ocl->queue, ocl->FireScreenAlphasTemp, ocl->FireScreenAlphas,
+									  0, 0, screenWidth * screenHeight * sizeof(float),
+									  0, NULL, NULL);
+			clFinish(ocl->queue);
+		}
+	}
+}
+
 void compositeBuffersOpenCL(
 	struct OpenCLContext *ocl,
 	cl_mem inputColors1,
@@ -381,28 +586,29 @@ void renderFireParticles(struct OpenCLContext *ocl, struct FireSOA *fireParticle
 		return;
 	}
 
-	float zeroFloat = 0.0f;
-	err = clEnqueueFillBuffer(ocl->queue, ocl->FireScreenDistances, &zeroFloat, sizeof(float), 0,
-							  ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenNormals, &zeroFloat, sizeof(float), 0,
-							   ScreenWidth * ScreenHeight * sizeof(float) * 3, 0, NULL, NULL);
-	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenAlphas, &zeroFloat, sizeof(float), 0,
-							   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+	// float zeroFloat = 0.0f;
+	// err = clEnqueueFillBuffer(ocl->queue, ocl->FireScreenDistances, &zeroFloat, sizeof(float), 0,
+	// 						  ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+	// err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenNormals, &zeroFloat, sizeof(float), 0,
+	// 						   ScreenWidth * ScreenHeight * sizeof(float) * 3, 0, NULL, NULL);
+	// err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenAlphas, &zeroFloat, sizeof(float), 0,
+	// 						   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
 
-	// FAST: Use a kernel to set blue background
-	cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
+	// cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
+	// cl_int screenWidth = ScreenWidth;
+	// cl_int screenHeight = ScreenHeight;
+	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
+	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 1, sizeof(cl_float3), &backgroundColor);
+	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 2, sizeof(cl_int), &screenWidth);
+	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 3, sizeof(cl_int), &screenHeight);
+
+	// size_t global_size[2] = {ScreenWidth, ScreenHeight};
+	// err = clEnqueueNDRangeKernel(ocl->queue, ocl->clearColorBuffer_kernel, 2, NULL,
+	// 							 global_size, NULL, 0, NULL, NULL);
+
+	// clFinish(ocl->queue);
 	cl_int screenWidth = ScreenWidth;
 	cl_int screenHeight = ScreenHeight;
-	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
-	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 1, sizeof(cl_float3), &backgroundColor);
-	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 2, sizeof(cl_int), &screenWidth);
-	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 3, sizeof(cl_int), &screenHeight);
-
-	size_t global_size[2] = {ScreenWidth, ScreenHeight};
-	err = clEnqueueNDRangeKernel(ocl->queue, ocl->clearColorBuffer_kernel, 2, NULL,
-								 global_size, NULL, 0, NULL, NULL);
-
-	clFinish(ocl->queue);
 
 	if (err != CL_SUCCESS) {
 		printf("Error clearing fire buffers: %d\n", err);
@@ -1151,6 +1357,8 @@ struct GPUTimings {
 	float fireRenderingTime;
 	float fluidSimulationTime;
 	float compositingTime;
+	float missileSimulationTime;
+	float missileRenderingTime;
 };
 
 float totalTime(struct GPUTimings *gpuTimings) {
@@ -1240,7 +1448,7 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, 
 }
 
 // Function prototypes
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles);
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles);
 
 struct Light {
 	float x;
@@ -1333,9 +1541,9 @@ float fastInvSqrt(float x) {
 	return y * (1.5f - 0.5f * x * y * y);
 };
 
-void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles) {
+void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
 	if (USE_GPU == 1) {
-		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font, fireParticles);
+		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font, fireParticles, missiles);
 	}
 }
 
@@ -2247,10 +2455,11 @@ void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct 
 
 void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, struct Camera *camera) {
 	cl_int err;
-	cl_event kernel_event; // Add event for timing
+	cl_event kernel_event;
 
 	cl_int mode = 0; // 0 = 3x float, 1 = 4x float, 2 = 1x float
 
+	// Set the input buffer for antialiasing based on render mode
 	switch (camera->renderMode) {
 	case renderDistance:
 		mode = 2;
@@ -2282,41 +2491,46 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 		break;
 	case renderFireColor:
 		mode = 0;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
 		break;
 	case renderFireDepth:
 		mode = 2;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenDistances);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->FireScreenDistances);
 		break;
 	case renderFireNormal:
 		mode = 0;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenNormals);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->FireScreenNormals);
 		break;
 	case renderCompositedColor:
 		mode = 0;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
 		break;
 	case renderCompositedDistance:
 		mode = 2;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenDistances);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->CompositedScreenDistances);
 		break;
 	case renderCompositedNormal:
 		mode = 0;
-		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenNormals);
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->CompositedScreenNormals);
 		break;
 	case RENDER_MODE_COUNT:
+	default:
 		mode = 0;
 		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
 		break;
 	}
 
-	// Simple box blur kernel execution
+	if (err != CL_SUCCESS) {
+		printf("Error setting antiAlias kernel argument 0: %d\n", err);
+		if (gpuTimings) gpuTimings->antiAliasingTime = 0.0f;
+		return;
+	}
+
+	// Set the remaining kernel arguments
 	size_t global_work_size[2] = {ScreenWidth, ScreenHeight};
-	err |= clSetKernelArg(ocl->antiAliasKernel, 1, sizeof(cl_mem), &ocl->buffer_distances);
-	cl_int screen_width = ScreenWidth;
-	cl_int screen_height = ScreenHeight;
-	err |= clSetKernelArg(ocl->antiAliasKernel, 2, sizeof(cl_int), &screen_width);
-	err |= clSetKernelArg(ocl->antiAliasKernel, 3, sizeof(cl_int), &screen_height);
+	err = clSetKernelArg(ocl->antiAliasKernel, 1, sizeof(cl_mem), &ocl->buffer_distances);
+	err |= clSetKernelArg(ocl->antiAliasKernel, 2, sizeof(cl_int), &(cl_int){ScreenWidth});
+	err |= clSetKernelArg(ocl->antiAliasKernel, 3, sizeof(cl_int), &(cl_int){ScreenHeight});
 	err |= clSetKernelArg(ocl->antiAliasKernel, 4, sizeof(cl_int), &mode);
 	err |= clSetKernelArg(ocl->antiAliasKernel, 5, sizeof(cl_mem), &ocl->buffer_normals);
 
@@ -2330,7 +2544,7 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting antiAlias kernel arguments: %d\n", err);
-		if (gpuTimings) gpuTimings->antiAliasingTime = 0.0f; // Set timing to 0 on error
+		if (gpuTimings) gpuTimings->antiAliasingTime = 0.0f;
 		return;
 	}
 
@@ -2339,7 +2553,7 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 								 global_work_size, NULL, 0, NULL, &kernel_event);
 	if (err != CL_SUCCESS) {
 		printf("Error executing antiAlias kernel: %d\n", err);
-		if (gpuTimings) gpuTimings->antiAliasingTime = 0.0f; // Set timing to 0 on error
+		if (gpuTimings) gpuTimings->antiAliasingTime = 0.0f;
 		return;
 	}
 
@@ -2354,18 +2568,16 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 									   sizeof(end_time), &end_time, NULL);
 
 		if (err == CL_SUCCESS) {
-			// Store timing in the blur time field (or add a new field for antialiasing)
-			gpuTimings->antiAliasingTime = (end_time - start_time) * 1e-6f; // Convert ns to ms
+			gpuTimings->antiAliasingTime = (end_time - start_time) * 1e-6f;
 		} else {
 			gpuTimings->antiAliasingTime = 0.0f;
 		}
 	}
 
-	// Clean up the event
 	clReleaseEvent(kernel_event);
 }
 
-void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles) {
+void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
 	cl_int err;
 
 	// Use pre-allocated buffers instead of malloc
@@ -2382,6 +2594,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		velocities_data[i * 3 + 2] = particles->zVelocity[i];
 	}
 
+	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime);
 	renderFireParticles(ocl, fireParticles, camera, &gpuTimings->fireRenderingTime);
 
 	// Write data to GPU buffers
@@ -3372,7 +3585,142 @@ void updateMouseStates() {
 	mouseState.prevRightButton = mouseState.rightButton;
 }
 
+void randomMissileMovement(struct Missiles *missiles, struct Camera *camera) {
+	if (rand_01() < 0.9f) {
+		for (int i = 0; i < missiles->count; i++) {
+			float dx = missiles->missiles[i]->position[0] - camera->ray.origin[0];
+			float dy = missiles->missiles[i]->position[1] - camera->ray.origin[1];
+			float dz = missiles->missiles[i]->position[2] - camera->ray.origin[2];
+			float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+
+			// Normalize direction vector
+			float inv_dist = (distance > 0.001f) ? (1.0f / distance) : 0.0f;
+			float norm_dx = dx * inv_dist;
+			float norm_dy = dy * inv_dist;
+			float norm_dz = dz * inv_dist;
+
+			// Different behavior based on missile index for variety
+			int behavior_type = i % 4;
+
+			if (distance < 50.0f) {
+				// Too close - fly away with different patterns
+				switch (behavior_type) {
+				case 0: // Direct retreat
+					missiles->missiles[i]->targetDirection[0] = norm_dx;
+					missiles->missiles[i]->targetDirection[1] = norm_dy;
+					missiles->missiles[i]->targetDirection[2] = norm_dz;
+					break;
+				case 1: // Spiral retreat
+					missiles->missiles[i]->targetDirection[0] = norm_dx + sinf(glfwGetTime() * 2.0f + i) * 0.3f;
+					missiles->missiles[i]->targetDirection[1] = norm_dy + cosf(glfwGetTime() * 1.5f + i) * 0.2f;
+					missiles->missiles[i]->targetDirection[2] = norm_dz;
+					break;
+				case 2: // Side-step retreat
+					missiles->missiles[i]->targetDirection[0] = norm_dx + norm_dz * 0.4f;
+					missiles->missiles[i]->targetDirection[1] = norm_dy;
+					missiles->missiles[i]->targetDirection[2] = norm_dz - norm_dx * 0.4f;
+					break;
+				case 3: // Vertical dodge retreat
+					missiles->missiles[i]->targetDirection[0] = norm_dx;
+					missiles->missiles[i]->targetDirection[1] = norm_dy + ((i % 2 == 0) ? 0.5f : -0.5f);
+					missiles->missiles[i]->targetDirection[2] = norm_dz;
+					break;
+				}
+			} else if (distance > 200.0f) {
+				// Too far - approach with different patterns
+				switch (behavior_type) {
+				case 0: // Direct approach
+					missiles->missiles[i]->targetDirection[0] = -norm_dx;
+					missiles->missiles[i]->targetDirection[1] = -norm_dy;
+					missiles->missiles[i]->targetDirection[2] = -norm_dz;
+					break;
+				case 1: // Weaving approach
+					missiles->missiles[i]->targetDirection[0] = -norm_dx + sinf(glfwGetTime() * 3.0f + i) * 0.2f;
+					missiles->missiles[i]->targetDirection[1] = -norm_dy;
+					missiles->missiles[i]->targetDirection[2] = -norm_dz + cosf(glfwGetTime() * 3.0f + i) * 0.2f;
+					break;
+				case 2: // Arc approach
+				{
+					float angle = glfwGetTime() * 1.0f + i * 1.57f; // 90 degrees apart
+					missiles->missiles[i]->targetDirection[0] = -norm_dx + sinf(angle) * 0.3f;
+					missiles->missiles[i]->targetDirection[1] = -norm_dy + cosf(angle * 0.5f) * 0.2f;
+					missiles->missiles[i]->targetDirection[2] = -norm_dz + cosf(angle) * 0.3f;
+				} break;
+				case 3: // Bobbing approach
+					missiles->missiles[i]->targetDirection[0] = -norm_dx;
+					missiles->missiles[i]->targetDirection[1] = -norm_dy + sinf(glfwGetTime() * 4.0f + i) * 0.3f;
+					missiles->missiles[i]->targetDirection[2] = -norm_dz;
+					break;
+				}
+			} else {
+				// Good distance - complex orbital/patrol patterns
+				float time = glfwGetTime();
+				float phase = i * 0.785f; // 45 degrees apart
+
+				switch (behavior_type) {
+				case 0: // Circular orbit
+				{
+					float orbit_radius = 0.4f;
+					float orbit_speed = 1.5f;
+					missiles->missiles[i]->targetDirection[0] = sinf(time * orbit_speed + phase) * orbit_radius;
+					missiles->missiles[i]->targetDirection[1] = (rand_01() * 2.0f - 1.0f) * 0.1f;
+					missiles->missiles[i]->targetDirection[2] = cosf(time * orbit_speed + phase) * orbit_radius;
+				} break;
+				case 1: // Figure-8 pattern
+				{
+					float fig8_scale = 0.3f;
+					missiles->missiles[i]->targetDirection[0] = sinf(time * 2.0f + phase) * fig8_scale;
+					missiles->missiles[i]->targetDirection[1] = sinf(time * 4.0f + phase) * fig8_scale * 0.5f;
+					missiles->missiles[i]->targetDirection[2] = cosf(time * 2.0f + phase) * fig8_scale;
+				} break;
+				case 2: // Patrol pattern (back and forth)
+				{
+					float patrol_intensity = 0.4f;
+					missiles->missiles[i]->targetDirection[0] = sinf(time * 1.2f + phase) * patrol_intensity;
+					missiles->missiles[i]->targetDirection[1] = cosf(time * 0.8f + phase) * 0.2f;
+					missiles->missiles[i]->targetDirection[2] = cosf(time * 1.2f + phase) * patrol_intensity;
+				} break;
+				case 3: // Helix pattern
+				{
+					float helix_radius = 0.3f;
+					float helix_speed = 2.0f;
+					missiles->missiles[i]->targetDirection[0] = sinf(time * helix_speed + phase) * helix_radius;
+					missiles->missiles[i]->targetDirection[1] = sinf(time * helix_speed * 0.3f + phase) * 0.4f;
+					missiles->missiles[i]->targetDirection[2] = cosf(time * helix_speed + phase) * helix_radius;
+				} break;
+				}
+
+				// Add some random variation to make it less predictable
+				missiles->missiles[i]->targetDirection[0] += (rand_01() * 2.0f - 1.0f) * 0.05f;
+				missiles->missiles[i]->targetDirection[1] += (rand_01() * 2.0f - 1.0f) * 0.05f;
+				missiles->missiles[i]->targetDirection[2] += (rand_01() * 2.0f - 1.0f) * 0.05f;
+			}
+
+			// Normalize the final direction vector
+			float len = sqrtf(missiles->missiles[i]->targetDirection[0] * missiles->missiles[i]->targetDirection[0] +
+							  missiles->missiles[i]->targetDirection[1] * missiles->missiles[i]->targetDirection[1] +
+							  missiles->missiles[i]->targetDirection[2] * missiles->missiles[i]->targetDirection[2]);
+			if (len > 0.001f) {
+				float inv_len = 1.0f / len;
+				missiles->missiles[i]->targetDirection[0] *= inv_len;
+				missiles->missiles[i]->targetDirection[1] *= inv_len;
+				missiles->missiles[i]->targetDirection[2] *= inv_len;
+			}
+
+			// Optional: Add height preference to keep missiles at reasonable altitude
+			float preferred_height = 30.0f;
+			float height_diff = missiles->missiles[i]->position[1] - preferred_height;
+			if (fabs(height_diff) > 20.0f) {
+				missiles->missiles[i]->targetDirection[1] += (height_diff > 0) ? -0.2f : 0.2f;
+			}
+		}
+	}
+}
+
 int main() {
+	struct Missiles missiles;
+	InitializeMissiles(&missiles, 8); // Create 8 missiles
+
 	// load BVH
 	struct BVHLinear bvh;
 	ReadBVH(&bvh, "parseObj/encoded.bvh");
@@ -3420,6 +3768,7 @@ int main() {
 	camera.ray.direction[0] = 0.0f;
 	camera.ray.direction[1] = 0.0f;
 	camera.ray.direction[2] = 1.0f;
+	camera.renderMode = renderCompositedColor;
 	camera.fov = 1.0f;
 
 	// initialize the particles indexes
@@ -3537,8 +3886,6 @@ int main() {
 		printf("Failed to initialize OpenCL-GL interop, falling back to CPU\n");
 	}
 
-	camera.renderMode = renderColor;
-
 	bool exit = false;
 
 	struct FireSOA *fireParticles = malloc(sizeof(struct FireSOA));
@@ -3643,12 +3990,13 @@ int main() {
 		float dt1 = (float)(endReadDataTime - readDataTime) / (float)CLOCKS_PER_SEC;
 		timePartition->readDataTime += dt1;
 
-		// Update the grid data and record timing
-		// First, update the grid data regardless of pause state
+		randomMissileMovement(&missiles, &camera);
+
 		clock_t startGridTime = clock();
 		if (!paused) {
+			UpdateAllMissiles(&missiles, 1.0f / 16.0f);
 			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime); // Always update grid data
-			fireSimStep(fireParticles, 1.0f / 12.0f, &gpuTimings.fireSimulationTime);
+			fireSimStep(fireParticles, 1.0f / 16.0f, &gpuTimings.missileSimulationTime);
 		}
 		clock_t endGridTime = clock();
 		dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;
@@ -3658,7 +4006,7 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles);
+		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles, &missiles);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
