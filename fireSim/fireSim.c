@@ -3,6 +3,7 @@
 #include <time.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <CL/cl.h>
 #define G 9.81f
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -21,20 +22,20 @@ float getAirDensity(float altitude) {
 	return SEA_LEVEL_DENSITY * expf(-altitude / SCALE_HEIGHT);
 }
 
-float getMachDragMultiplier(float mach) {
+float getMachDragMultiplier(float mach, float transsonicPeak, float supersonicFactor) {
 	if (mach < 0.8f) {
 		return 1.0f;
 	} else if (mach < 1.2f) {
 		float transsonic = (mach - 0.8f) / 0.4f;
-		return 1.0f + transsonic * 3.0f;
+		return 1.0f + transsonic * (transsonicPeak - 1.0f);
 	} else {
-		return 4.0f + (mach - 1.2f) * 0.5f;
+		return transsonicPeak + (mach - 1.2f) * supersonicFactor;
 	}
 }
 
 void InitializeMissile(struct Missile *missile) {
 	missile->position[0] = randRange(-250.0f, 250.f);
-	missile->position[1] = randRange(100.0f, 500.f);
+	missile->position[1] = randRange(100.0f, 1500.f);
 	missile->position[2] = randRange(-250.0f, 250.f);
 
 	missile->velocity[0] = 0.0f;
@@ -58,21 +59,22 @@ void InitializeMissile(struct Missile *missile) {
 	missile->transsonicDragPeak = randRange(2.8f, 4.2f);
 	missile->supersonicDragFactor = randRange(0.3f, 0.7f);
 	missile->crossSectionArea = randRange(0.015f, 0.045f);
-	missile->liftCoefficient = randRange(0.25f, 0.55f);
+	missile->liftCoefficient = randRange(0.25f, 0.75f);
 	missile->maxDynamicPressure = randRange(80000.0f, 150000.0f);
 	missile->thrustVectoringEfficiency = randRange(0.75f, 0.95f);
 	missile->momentOfInertia = randRange(1.8f, 4.5f);
 	missile->controlAuthority = randRange(0.85f, 0.98f);
 	missile->energyManagementFactor = randRange(0.6f, 0.9f);
 	missile->minEnergyThreshold = randRange(0.3f, 0.5f);
-	missile->optimalSpeed = randRange(600.0f, 900.0f);
-	missile->dryMass = randRange(60.0f, 160.0f);
+	missile->optimalSpeed = randRange(300.0f, 900.0f);
+	missile->dryMass = randRange(10.0f, 70.0f);
 	missile->fuelMass = randRange(350.0f, 900.0f);
 	missile->maxGPull = randRange(20.0f, 40.0f);
 	missile->Isp = randRange(220.0f, 280.0f);
 	missile->burning = 1;
-	missile->burnRate = randRange(8.0f, 25.0f);
-	missile->Q_spec = randRange(4.5e6f, 6.5e6f);
+	missile->burnRate = randRange(1.0f, 10.0f);
+	missile->Q_spec = randRange(4.5e6f, 6.5e18f);
+	missile->remainingTime = randRange(45.0f, 120.0f);
 
 	missile->fireSim = malloc(sizeof(struct FireSOA));
 	InitializeFireParticles(missile->fireSim);
@@ -92,9 +94,18 @@ void InitializeMissile(struct Missile *missile) {
 	}
 }
 
-void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook) {
+void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active) {
 	struct timespec start, end;
 	clock_gettime(CLOCK_MONOTONIC, &start);
+
+	missile->remainingTime -= deltaTime;
+	if (missile->remainingTime <= 0.0f) {
+		*active = false;
+		clock_gettime(CLOCK_MONOTONIC, &end);
+		*timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 +
+							(end.tv_nsec - start.tv_nsec) / 1e6);
+		return;
+	}
 
 	float totalMass = missile->dryMass + missile->fuelMass;
 
@@ -111,6 +122,14 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook) {
 		missile->fuelMass -= fuelConsumed;
 
 		thrust = massFlowRate * exhaustVelocity;
+
+		float energyReleasedPerSecond = missile->Q_spec * massFlowRate;
+		float theoreticalThrust = 2.0f * energyReleasedPerSecond / exhaustVelocity;
+		float combustionEfficiency = fminf(1.0f, thrust / (theoreticalThrust + 0.001f));
+
+		if (combustionEfficiency < 0.95f) {
+			thrust *= 1.0f + (1.0f - combustionEfficiency) * 0.1f;
+		}
 	}
 
 	float speed = sqrtf(missile->velocity[0] * missile->velocity[0] +
@@ -121,7 +140,7 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook) {
 	if (altitude < 0.0f) altitude = 0.0f;
 	float airDensity = getAirDensity(altitude);
 	float mach = speed / SPEED_OF_SOUND;
-	float machDragMult = getMachDragMultiplier(mach);
+	float machDragMult = getMachDragMultiplier(mach, missile->transsonicDragPeak, missile->supersonicDragFactor);
 	float dynamicPressure = 0.5f * airDensity * speed * speed;
 
 	float kineticEnergy = 0.5f * totalMass * speed * speed;
@@ -307,9 +326,29 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook) {
 		currentDir[2] - missile->bodyOrientation[2]};
 
 	float turnRate = 5.0f * controlEffectiveness;
-	missile->bodyOrientation[0] += orientationError[0] * turnRate * deltaTime;
-	missile->bodyOrientation[1] += orientationError[1] * turnRate * deltaTime;
-	missile->bodyOrientation[2] += orientationError[2] * turnRate * deltaTime;
+
+	float torque[3] = {
+		orientationError[0] * missile->controlAuthority * 100.0f,
+		orientationError[1] * missile->controlAuthority * 100.0f,
+		orientationError[2] * missile->controlAuthority * 100.0f};
+
+	float angularAccel[3] = {
+		torque[0] / missile->momentOfInertia,
+		torque[1] / missile->momentOfInertia,
+		torque[2] / missile->momentOfInertia};
+
+	missile->angularVelocity[0] += angularAccel[0] * deltaTime;
+	missile->angularVelocity[1] += angularAccel[1] * deltaTime;
+	missile->angularVelocity[2] += angularAccel[2] * deltaTime;
+
+	float angularDamping = 0.95f;
+	missile->angularVelocity[0] *= angularDamping;
+	missile->angularVelocity[1] *= angularDamping;
+	missile->angularVelocity[2] *= angularDamping;
+
+	missile->bodyOrientation[0] += missile->angularVelocity[0] * deltaTime;
+	missile->bodyOrientation[1] += missile->angularVelocity[1] * deltaTime;
+	missile->bodyOrientation[2] += missile->angularVelocity[2] * deltaTime;
 
 	float bodyOrientMag = sqrtf(
 		missile->bodyOrientation[0] * missile->bodyOrientation[0] +
@@ -374,7 +413,7 @@ void InitializeFireParticles(struct FireSOA *particles) {
 	particles->buoyancy = 100.0f;
 	particles->drag = 0.985f;
 	particles->turbulence = 2.5f;
-	particles->maxLifeTime = 0.5f;
+	particles->maxLifeTime = 1.25f;
 
 	particles->startingColor[0] = randRange(0.0f, 0.25f);
 	particles->startingColor[1] = randRange(0.0f, 0.25f);
@@ -396,8 +435,8 @@ void InitializeFireParticles(struct FireSOA *particles) {
 	particles->windDirection[0] = 0.0f;
 	particles->windDirection[1] = 0.0f;
 	particles->windDirection[2] = 0.0f;
-	particles->swirlIntensity = 1.0f;
-	particles->swirlFrequency = 1.5f;
+	particles->swirlIntensity = 10.0f;
+	particles->swirlFrequency = 10.5f;
 
 	for (int i = 0; i < NUM_FIRE_PARTICLES; i++) {
 		particles->x[i] = particles->basePosition[0] + randRange(-1.0f, 1.0f) * 5.0f;
@@ -477,8 +516,9 @@ void fireSimStep(struct FireSOA *particles, float deltaTime, float *timeTook) {
 	particles->maxDistance = sqrtf(particles->maxDistance);
 }
 
-void InitializeMissiles(struct Missiles *missiles, int count) {
+void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *model) {
 	missiles->count = min(count, MAX_FIRE_SIMS);
+	missiles->missileModel = model;
 
 	for (int i = 0; i < missiles->count; i++) {
 		missiles->missiles[i] = malloc(sizeof(struct Missile));
@@ -524,13 +564,15 @@ void InitializeMissiles(struct Missiles *missiles, int count) {
 			missiles->missiles[i]->targetDirection[1] /= len;
 			missiles->missiles[i]->targetDirection[2] /= len;
 		}
+
+		missiles->active[i] = true;
 	}
 }
 
 void UpdateAllMissiles(struct Missiles *missiles, float deltaTime) {
 	for (int i = 0; i < missiles->count; i++) {
 		float simTime;
-		missileSimStep(missiles->missiles[i], deltaTime, &simTime);
+		missileSimStep(missiles->missiles[i], deltaTime, &simTime, &missiles->active[i]);
 	}
 }
 

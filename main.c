@@ -44,7 +44,6 @@ int textBufferLen = 0;
 #define FrameCount 30
 #define NUM_THREADS 0
 #define USE_GPU 1
-#define NUMBER_OF_TRIANGLES 10000
 #define NUMBER_OF_CUBES 100
 pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
@@ -126,6 +125,7 @@ char *renderModesName[] = {
 	"renderCompositedNormal",
 	"renderCompositedColor",
 	"renderCompositedDistance",
+	"renderTemperatures",
 };
 
 enum RenderMode {
@@ -142,6 +142,7 @@ enum RenderMode {
 	renderCompositedNormal,
 	renderCompositedColor,
 	renderCompositedDistance,
+	renderTemperatures,
 	RENDER_MODE_COUNT // Total number of render modes
 };
 
@@ -270,17 +271,58 @@ struct Camera {
 	bool advanceAntiAlias;
 };
 
-struct Triangles {
-	float v1[NUMBER_OF_TRIANGLES * 3];
-	float v2[NUMBER_OF_TRIANGLES * 3];
-	float v3[NUMBER_OF_TRIANGLES * 3];
-	float Roughness[NUMBER_OF_TRIANGLES];
-	float Metallic[NUMBER_OF_TRIANGLES];
-	float Emission[NUMBER_OF_TRIANGLES];
-	float normals[NUMBER_OF_TRIANGLES * 3];
-	float colors[NUMBER_OF_TRIANGLES * 3]; // RGB colors for each triangle
-	int count;
-};
+void filterOverlapOpenCL(
+	struct OpenCLContext *ocl,
+	cl_mem inputBuffer,
+	cl_mem inputDistance1,
+	cl_mem inputDistance2,
+	cl_mem outputBuffer,
+	int mode // 0=RGB, 1=RGBA, 2=single channel
+) {
+	cl_int err;
+	cl_int screenWidth = ScreenWidth;
+	cl_int screenHeight = ScreenHeight;
+
+	int size = ScreenWidth * ScreenHeight * 4 * sizeof(float);
+	if (mode == 0)
+		size = ScreenWidth * ScreenHeight * 3 * sizeof(float);
+	else if (mode == 2)
+		size = ScreenWidth * ScreenHeight * sizeof(float);
+
+	// clear output buffer
+	float zeroFloat = 0.0f;
+	err = clEnqueueFillBuffer(ocl->queue, outputBuffer, &zeroFloat, sizeof(float), 0,
+							  size, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error clearing output buffer: %d\n", err);
+		return;
+	}
+
+	// Set kernel arguments
+	err = clSetKernelArg(ocl->renderFireTemperature_kernel, 0, sizeof(cl_mem), &inputBuffer);
+	err |= clSetKernelArg(ocl->renderFireTemperature_kernel, 1, sizeof(cl_mem), &inputDistance1);
+	err |= clSetKernelArg(ocl->renderFireTemperature_kernel, 2, sizeof(cl_mem), &inputDistance2);
+	err |= clSetKernelArg(ocl->renderFireTemperature_kernel, 3, sizeof(cl_mem), &outputBuffer);
+	err |= clSetKernelArg(ocl->renderFireTemperature_kernel, 4, sizeof(cl_int), &screenWidth);
+	err |= clSetKernelArg(ocl->renderFireTemperature_kernel, 5, sizeof(cl_int), &screenHeight);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting filterOverlap kernel args: %d\n", err);
+		return;
+	}
+
+	// Execute kernel
+	size_t global_size[2] = {ScreenWidth, ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderFireTemperature_kernel, 2, NULL,
+								 global_size, NULL, 0, NULL, NULL);
+
+	if (err != CL_SUCCESS) {
+		printf("Error executing filterOverlap kernel: %d\n", err);
+		return;
+	}
+
+	clFinish(ocl->queue);
+}
 
 void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs) {
 	if (!missiles || missiles->count == 0) return;
@@ -310,16 +352,83 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 								 global_size, NULL, 0, NULL, NULL);
 	clFinish(ocl->queue);
 
-	// Render each missile's fire into the same buffers (additive blending)
 	float totalFireTime = 0.0f;
+	float totalMissileRenderTime = 0.0f;
 
+	// Render each missile's body and fire
 	for (int i = 0; i < missiles->count; i++) {
 		struct Missile *missile = missiles->missiles[i];
-		if (!missile || !missile->fireSim) continue;
+		if (!missile || !missiles->active[i]) continue;
+
+		// === RENDER MISSILE BODY ===
+		cl_float3 missile_pos = {missile->position[0], missile->position[1], missile->position[2]};
+		cl_float3 missile_orient = {missile->bodyOrientation[0], missile->bodyOrientation[1], missile->bodyOrientation[2]};
+		cl_float missile_scale = 1.0f;
+
+		cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+		cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+		cl_float fov = camera->fov;
+		cl_int model_triangle_count = missiles->missileModel->count;
+
+		// Set missile rendering kernel arguments
+		err = clSetKernelArg(ocl->renderMissile_kernel, 0, sizeof(cl_mem), &ocl->buffer_missile_v1);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 1, sizeof(cl_mem), &ocl->buffer_missile_v2);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 2, sizeof(cl_mem), &ocl->buffer_missile_v3);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 3, sizeof(cl_mem), &ocl->buffer_missile_normals);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 4, sizeof(cl_mem), &ocl->missile_color_buffer);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 5, sizeof(cl_mem), &ocl->missile_roughness_buffer);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 6, sizeof(cl_mem), &ocl->missile_metallic_buffer);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 7, sizeof(cl_mem), &ocl->missile_emission_buffer);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 8, sizeof(cl_int), &model_triangle_count);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 9, sizeof(cl_float3), &missile_pos);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 10, sizeof(cl_float3), &missile_orient);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 11, sizeof(cl_float), &missile_scale);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 12, sizeof(cl_float3), &cam_pos);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 13, sizeof(cl_float3), &cam_dir);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 14, sizeof(cl_float), &fov);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 15, sizeof(cl_int), &screenWidth);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 16, sizeof(cl_int), &screenHeight);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 17, sizeof(cl_mem), &ocl->FireScreenDistances);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 18, sizeof(cl_mem), &ocl->FireScreenColors);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 19, sizeof(cl_mem), &ocl->FireScreenNormals);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 20, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 21, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 22, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 23, sizeof(cl_mem), &ocl->FireScreenAlphas);
+
+		if (err != CL_SUCCESS) {
+			printf("Error setting missile render kernel args for missile %d: %d\n", i, err);
+			continue;
+		}
+
+		// Execute missile rendering kernel
+		cl_event missile_render_event;
+		size_t missile_work_size = model_triangle_count;
+		err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderMissile_kernel, 1, NULL,
+									 &missile_work_size, NULL, 0, NULL, &missile_render_event);
+
+		if (err != CL_SUCCESS) {
+			printf("Error executing missile render kernel for missile %d: %d\n", i, err);
+			continue;
+		}
+
+		clFinish(ocl->queue);
+
+		// Get missile rendering timing
+		cl_ulong missile_start, missile_end;
+		clGetEventProfilingInfo(missile_render_event, CL_PROFILING_COMMAND_START,
+								sizeof(missile_start), &missile_start, NULL);
+		clGetEventProfilingInfo(missile_render_event, CL_PROFILING_COMMAND_END,
+								sizeof(missile_end), &missile_end, NULL);
+		totalMissileRenderTime += (missile_end - missile_start) * 1e-6f;
+		clReleaseEvent(missile_render_event);
+
+		// === RENDER MISSILE FIRE ===
+		if (!missile->fireSim) continue;
 
 		float fireRenderTime = 0.0f;
 
-		// Upload particle data for this missile
+		// Upload particle data for this missile's fire
 		err = clEnqueueWriteBuffer(ocl->queue, ocl->posX, CL_FALSE, 0,
 								   NUM_FIRE_PARTICLES * sizeof(float),
 								   missile->fireSim->x, 0, NULL, NULL);
@@ -361,16 +470,11 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 		cl_float maxLifeTime = missile->fireSim->maxLifeTime;
 		cl_float maxVelocity = missile->fireSim->maxVelocity;
 		cl_float maxDepth = missile->fireSim->maxDistance;
-
-		cl_float3 camPos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
-		cl_float3 camDir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
 		cl_float3 camUp = {0.0f, 1.0f, 0.0f};
-		cl_float fov = camera->fov;
-
 		cl_int numPoints = NUM_FIRE_PARTICLES;
 		cl_int particleRadius = (int)(missile->fireSim->particlesSize * 100.0f);
 
-		// Set kernel arguments
+		// Set fire kernel arguments
 		err = clSetKernelArg(ocl->fire_render_kernel, 0, sizeof(cl_mem), &ocl->posX);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 1, sizeof(cl_mem), &ocl->posY);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 2, sizeof(cl_mem), &ocl->posZ);
@@ -384,8 +488,8 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 		err |= clSetKernelArg(ocl->fire_render_kernel, 10, sizeof(cl_float), &maxLifeTime);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 11, sizeof(cl_float), &maxVelocity);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 12, sizeof(cl_float), &maxDepth);
-		err |= clSetKernelArg(ocl->fire_render_kernel, 13, sizeof(cl_float3), &camPos);
-		err |= clSetKernelArg(ocl->fire_render_kernel, 14, sizeof(cl_float3), &camDir);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 13, sizeof(cl_float3), &cam_pos);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 14, sizeof(cl_float3), &cam_dir);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 15, sizeof(cl_float3), &camUp);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 16, sizeof(cl_float), &fov);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 17, sizeof(cl_int), &screenWidth);
@@ -402,11 +506,11 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 			continue;
 		}
 
-		// Execute rendering kernel
-		cl_event kernel_event;
+		// Execute fire rendering kernel
+		cl_event fire_kernel_event;
 		size_t work_size = NUM_FIRE_PARTICLES;
 		err = clEnqueueNDRangeKernel(ocl->queue, ocl->fire_render_kernel, 1, NULL,
-									 &work_size, NULL, 0, NULL, &kernel_event);
+									 &work_size, NULL, 0, NULL, &fire_kernel_event);
 
 		if (err != CL_SUCCESS) {
 			printf("Error executing fire kernel for missile %d: %d\n", i, err);
@@ -415,19 +519,19 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 
 		clFinish(ocl->queue);
 
-		// Get timing
-		cl_ulong start_time, end_time;
-		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START,
-								sizeof(start_time), &start_time, NULL);
-		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END,
-								sizeof(end_time), &end_time, NULL);
-		fireRenderTime = (end_time - start_time) * 1e-6f;
+		// Get fire timing
+		cl_ulong fire_start, fire_end;
+		clGetEventProfilingInfo(fire_kernel_event, CL_PROFILING_COMMAND_START,
+								sizeof(fire_start), &fire_start, NULL);
+		clGetEventProfilingInfo(fire_kernel_event, CL_PROFILING_COMMAND_END,
+								sizeof(fire_end), &fire_end, NULL);
+		fireRenderTime = (fire_end - fire_start) * 1e-6f;
 		totalFireTime += fireRenderTime;
 
-		clReleaseEvent(kernel_event);
+		clReleaseEvent(fire_kernel_event);
 	}
 
-	*timeTookMs = totalFireTime;
+	*timeTookMs = totalFireTime + totalMissileRenderTime;
 
 	// Apply blur to all fires at once
 	if (ocl->blur_fire_kernel != NULL) {
@@ -513,13 +617,13 @@ void compositeBuffersOpenCL(
 	err = clSetKernelArg(ocl->composite_kernel, 0, sizeof(cl_mem), &inputColors1);
 	err |= clSetKernelArg(ocl->composite_kernel, 1, sizeof(cl_mem), &inputDistances1);
 	err |= clSetKernelArg(ocl->composite_kernel, 2, sizeof(cl_mem), &inputNormals1);
-	err |= clSetKernelArg(ocl->composite_kernel, 3, sizeof(cl_mem), &inputAlphas1); // NEW
-	err |= clSetKernelArg(ocl->composite_kernel, 4, sizeof(cl_int), &useAlpha1);	// NEW
+	err |= clSetKernelArg(ocl->composite_kernel, 3, sizeof(cl_mem), &inputAlphas1);
+	err |= clSetKernelArg(ocl->composite_kernel, 4, sizeof(cl_int), &useAlpha1);
 	err |= clSetKernelArg(ocl->composite_kernel, 5, sizeof(cl_mem), &inputColors2);
 	err |= clSetKernelArg(ocl->composite_kernel, 6, sizeof(cl_mem), &inputDistances2);
 	err |= clSetKernelArg(ocl->composite_kernel, 7, sizeof(cl_mem), &inputNormals2);
-	err |= clSetKernelArg(ocl->composite_kernel, 8, sizeof(cl_mem), &inputAlphas2); // NEW
-	err |= clSetKernelArg(ocl->composite_kernel, 9, sizeof(cl_int), &useAlpha2);	// NEW
+	err |= clSetKernelArg(ocl->composite_kernel, 8, sizeof(cl_mem), &inputAlphas2);
+	err |= clSetKernelArg(ocl->composite_kernel, 9, sizeof(cl_int), &useAlpha2);
 	err |= clSetKernelArg(ocl->composite_kernel, 10, sizeof(cl_mem), &outputColors);
 	err |= clSetKernelArg(ocl->composite_kernel, 11, sizeof(cl_mem), &outputDistances);
 	err |= clSetKernelArg(ocl->composite_kernel, 12, sizeof(cl_mem), &outputNormals);
@@ -1899,7 +2003,7 @@ void renderWireframeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
 
 int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangles,
 						   struct SkyBox *skyBox, struct ImageFont *imageFont,
-						   struct BVHLinear *bvh, GLFWwindow *window) {
+						   struct BVHLinear *bvh, GLFWwindow *window, struct Missiles *missiles) {
 	cl_int err;
 
 	// Make sure OpenGL context is current
@@ -2042,6 +2146,18 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	// Create all kernels
+	ocl->renderMissile_kernel = clCreateKernel(ocl->program, "renderMissile", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile render kernel: %s\n", clErrorString(err));
+		return 0;
+	}
+
+	ocl->renderFireTemperature_kernel = clCreateKernel(ocl->program, "filterOverlap", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating renderFireTemperature kernel: %d\n", err);
+		return 0;
+	}
+
 	ocl->composite_kernel = clCreateKernel(ocl->program, "compositeBuffers", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating composite kernel: %d\n", err);
@@ -2165,8 +2281,129 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	// missile triangles buffer
+	int maxMissileTriangles = missiles->missileModel->count;
+	ocl->buffer_missile_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											maxMissileTriangles * 3 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile v1 buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_missile_v1, CL_TRUE, 0,
+							   maxMissileTriangles * 3 * sizeof(float), missiles->missileModel->v1, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile v1 buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->buffer_missile_v2 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											maxMissileTriangles * 3 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile v2 buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_missile_v2, CL_TRUE, 0,
+							   maxMissileTriangles * 3 * sizeof(float), missiles->missileModel->v2, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile v2 buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->buffer_missile_v3 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											maxMissileTriangles * 3 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile v3 buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_missile_v3, CL_TRUE, 0,
+							   maxMissileTriangles * 3 * sizeof(float), missiles->missileModel->v3, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile v3 buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->buffer_missile_normals = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+												 maxMissileTriangles * 3 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile normals buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_missile_normals, CL_TRUE, 0,
+							   maxMissileTriangles * 3 * sizeof(float), missiles->missileModel->normals, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile normals buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->missile_color_buffer = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+											   maxMissileTriangles * 3 * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile color buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->missile_color_buffer, CL_TRUE, 0,
+							   maxMissileTriangles * 3 * sizeof(float), missiles->missileModel->colors, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile color buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->missile_roughness_buffer = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+												   maxMissileTriangles * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile roughness buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->missile_roughness_buffer, CL_TRUE, 0,
+							   maxMissileTriangles * sizeof(float), missiles->missileModel->Roughness, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile roughness buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->missile_metallic_buffer = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+												  maxMissileTriangles * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile metallic buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->missile_metallic_buffer, CL_TRUE, 0,
+							   maxMissileTriangles * sizeof(float), missiles->missileModel->Metallic, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile metallic buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->missile_emission_buffer = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+												  maxMissileTriangles * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile emission buffer: %d\n", err);
+		return 0;
+	}
+
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->missile_emission_buffer, CL_TRUE, 0,
+							   maxMissileTriangles * sizeof(float), missiles->missileModel->Emission, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error writing missile emission buffer: %d\n", err);
+		return 0;
+	}
+
 	ocl->FireScreenAlphas = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
 										   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating screen alphas buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->FireTemperature = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
+										  ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating screen alphas buffer: %d\n", err);
 		return 0;
@@ -2512,6 +2749,10 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 	case renderCompositedNormal:
 		mode = 0;
 		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->CompositedScreenNormals);
+		break;
+	case renderTemperatures:
+		mode = 2;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->FireTemperature);
 		break;
 	case RENDER_MODE_COUNT:
 	default:
@@ -2982,6 +3223,14 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		ocl->CompositedScreenNormals,
 		&gpuTimings->compositingTime);
 
+	filterOverlapOpenCL(
+		ocl,
+		ocl->FireScreenAlphas,
+		ocl->FireScreenDistances,
+		ocl->buffer_distances,
+		ocl->FireTemperature, // reuse buffer
+		2);
+
 	if (camera->renderMode == renderCompositedColor) {
 		applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime, true);
 	}
@@ -3056,6 +3305,10 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	case renderCompositedNormal:
 		mode = 0;
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenNormals);
+		break;
+	case renderTemperatures:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireTemperature);
 		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;
@@ -3718,8 +3971,16 @@ void randomMissileMovement(struct Missiles *missiles, struct Camera *camera) {
 }
 
 int main() {
+
+	struct Triangles *missileModel = (struct Triangles *)malloc(sizeof(struct Triangles));
+	if (!missileModel) {
+		perror("Failed to allocate memory for triangles");
+		return 1;
+	}
+	missileModel->count = 0;
+	readFileTriangles("missile/r27.bin", missileModel, 25.0f);
 	struct Missiles missiles;
-	InitializeMissiles(&missiles, 8); // Create 8 missiles
+	InitializeMissiles(&missiles, 12, missileModel); // Create 8 missiles
 
 	// load BVH
 	struct BVHLinear bvh;
@@ -3770,6 +4031,8 @@ int main() {
 	camera.ray.direction[2] = 1.0f;
 	camera.renderMode = renderCompositedColor;
 	camera.fov = 1.0f;
+	camera.AntiAlias = false;
+	camera.advanceAntiAlias = false;
 
 	// initialize the particles indexes
 	struct ParticleIndexes *particleIndexes = (struct ParticleIndexes *)malloc(sizeof(struct ParticleIndexes));
@@ -3829,8 +4092,6 @@ int main() {
 
 	clock_t lastTime = clock();
 
-	// readFileTriangles("parseObj/encoded.bin", triangles, 25.0f);
-
 	printf("Triangles count after reading: %d\n", triangles->count);
 
 	for (int i = 0; i <= NUMBER_OF_CUBES; i++) {
@@ -3881,7 +4142,7 @@ int main() {
 
 	// Now initialize OpenCL with OpenGL sharing
 	struct OpenCLContext ocl;
-	int useOpenCL = initializeOpenCLWithGL(&ocl, triangles, &skyBox, &font, &bvh, window);
+	int useOpenCL = initializeOpenCLWithGL(&ocl, triangles, &skyBox, &font, &bvh, window, &missiles);
 	if (!useOpenCL) {
 		printf("Failed to initialize OpenCL-GL interop, falling back to CPU\n");
 	}
@@ -3994,9 +4255,9 @@ int main() {
 
 		clock_t startGridTime = clock();
 		if (!paused) {
-			UpdateAllMissiles(&missiles, 1.0f / 16.0f);
+			UpdateAllMissiles(&missiles, 1 / TPS);
 			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime); // Always update grid data
-			fireSimStep(fireParticles, 1.0f / 16.0f, &gpuTimings.missileSimulationTime);
+			fireSimStep(fireParticles, 1 / TPS, &gpuTimings.missileSimulationTime);
 		}
 		clock_t endGridTime = clock();
 		dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;

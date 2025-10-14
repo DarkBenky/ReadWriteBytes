@@ -102,24 +102,81 @@ func Normalize(v Vertex) Vertex {
 	return Vertex{v.X * invLength, v.Y * invLength, v.Z * invLength}
 }
 
+// ===============================================
+// Winding Order Validation and Correction
+// ===============================================
+// These functions ensure that all triangles use counter-clockwise (CCW) winding order,
+// which is the standard for outward-facing normals in 3D graphics.
+//
+// CCW winding: When looking at the triangle from outside the mesh, vertices are ordered
+// counter-clockwise. This produces a normal vector pointing outward from the surface.
+//
+// The validation works by:
+// 1. Calculating the normal from vertex positions (v1, v2, v3)
+// 2. Comparing it to any stored normal
+// 3. If they point in opposite directions (dot product < 0), swap v2 and v3
+//    to reverse the winding order and recalculate the normal
+
+// CalculateTriangleNormal computes the normal vector for a triangle using CCW winding
+func CalculateTriangleNormal(v1, v2, v3 Vertex) Vertex {
+	edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
+	edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
+
+	// Cross product: edge1 × edge2 for counter-clockwise winding
+	normal := Vertex{
+		edge1.Y*edge2.Z - edge1.Z*edge2.Y,
+		edge1.Z*edge2.X - edge1.X*edge2.Z,
+		edge1.X*edge2.Y - edge1.Y*edge2.X,
+	}
+	return Normalize(normal)
+}
+
+// ValidateAndFixWindingOrder ensures the triangle has correct CCW winding
+// If the stored normal and calculated normal point in opposite directions, swap v2 and v3
+func ValidateAndFixWindingOrder(tri *Triangle) bool {
+	calculatedNormal := CalculateTriangleNormal(tri.Vertex1, tri.Vertex2, tri.Vertex3)
+
+	// If triangle has no normal set, just use the calculated one
+	if tri.Normal.X == 0 && tri.Normal.Y == 0 && tri.Normal.Z == 0 {
+		tri.Normal = calculatedNormal
+		return true
+	}
+
+	// Calculate dot product between stored normal and calculated normal
+	dot := calculatedNormal.X*tri.Normal.X + calculatedNormal.Y*tri.Normal.Y + calculatedNormal.Z*tri.Normal.Z
+
+	// If dot product is negative, normals point in opposite directions - need to flip winding
+	if dot < 0 {
+		// Swap v2 and v3 to reverse winding order
+		tri.Vertex2, tri.Vertex3 = tri.Vertex3, tri.Vertex2
+		// Recalculate normal with corrected winding
+		tri.Normal = CalculateTriangleNormal(tri.Vertex1, tri.Vertex2, tri.Vertex3)
+		return false // Indicate that winding was corrected
+	}
+
+	// Winding is correct, but normalize the stored normal to be safe
+	tri.Normal = calculatedNormal
+	return true // Winding was already correct
+}
+
+// EnsureConsistentWinding validates and fixes winding order for all triangles in a mesh
+func EnsureConsistentWinding(triangles []Triangle) int {
+	fixedCount := 0
+	for i := range triangles {
+		if !ValidateAndFixWindingOrder(&triangles[i]) {
+			fixedCount++
+		}
+	}
+	return fixedCount
+}
+
 func Triangulate(v []Vertex) []Triangle {
 	if len(v) < 3 {
 		return nil
 	}
 	if len(v) == 3 {
-		// FIXED: Calculate proper normal for simple triangle
-		edge1 := Vertex{v[1].X - v[0].X, v[1].Y - v[0].Y, v[1].Z - v[0].Z}
-		edge2 := Vertex{v[2].X - v[0].X, v[2].Y - v[0].Y, v[2].Z - v[0].Z}
-
-		normal := Vertex{
-			edge1.Y*edge2.Z - edge1.Z*edge2.Y,
-			edge1.Z*edge2.X - edge1.X*edge2.Z,
-			edge1.X*edge2.Y - edge1.Y*edge2.X,
-		}
-		normal = Normalize(normal)
-
-		// Keep normal as calculated (outward-facing for CCW winding)
-		// normal = Vertex{normal.X, normal.Y, normal.Z}
+		// Simple triangle case - calculate normal
+		normal := CalculateTriangleNormal(v[0], v[1], v[2])
 
 		return []Triangle{{
 			Vertex1: v[0],
@@ -148,23 +205,12 @@ func Triangulate(v []Vertex) []Triangle {
 			next := (i + 1) % len(indices)
 
 			if isEar(vertices, indices[prev], indices[curr], indices[next]) {
-				// FIXED: Calculate proper normal for ear triangle
+				// Create ear triangle
 				v1 := vertices[indices[prev]]
 				v2 := vertices[indices[curr]]
 				v3 := vertices[indices[next]]
 
-				edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
-				edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
-
-				normal := Vertex{
-					edge1.Y*edge2.Z - edge1.Z*edge2.Y,
-					edge1.Z*edge2.X - edge1.X*edge2.Z,
-					edge1.X*edge2.Y - edge1.Y*edge2.X,
-				}
-				normal = Normalize(normal)
-
-				// Keep normal as calculated (outward-facing for CCW winding)
-				// normal = Vertex{normal.X, normal.Y, normal.Z}
+				normal := CalculateTriangleNormal(v1, v2, v3)
 
 				triangle := Triangle{
 					Vertex1: v1,
@@ -190,23 +236,12 @@ func Triangulate(v []Vertex) []Triangle {
 	}
 
 	if len(indices) == 3 {
-		// FIXED: Calculate proper normal for final triangle
+		// Final triangle
 		v1 := vertices[indices[0]]
 		v2 := vertices[indices[1]]
 		v3 := vertices[indices[2]]
 
-		edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
-		edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
-
-		normal := Vertex{
-			edge1.Y*edge2.Z - edge1.Z*edge2.Y,
-			edge1.Z*edge2.X - edge1.X*edge2.Z,
-			edge1.X*edge2.Y - edge1.Y*edge2.X,
-		}
-		normal = Normalize(normal)
-
-		// Keep normal as calculated (outward-facing for CCW winding)
-		// normal = Vertex{normal.X, normal.Y, normal.Z}
+		normal := CalculateTriangleNormal(v1, v2, v3)
 
 		triangle := Triangle{
 			Vertex1: v1,
@@ -496,28 +531,14 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 				face[1] >= 0 && face[1] < len(vertices) &&
 				face[2] >= 0 && face[2] < len(vertices) {
 
-				// FIXED: Calculate face normal with correct winding order
+				// Calculate face normal with correct winding order
 				v1, v2, v3 := vertices[face[0]], vertices[face[1]], vertices[face[2]]
-
-				// Use counter-clockwise winding order for outward-facing normals
-				edge1 := Vertex{v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z}
-				edge2 := Vertex{v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z}
-
-				// Cross product: edge1 × edge2 for counter-clockwise winding
-				normal := Vertex{
-					edge1.Y*edge2.Z - edge1.Z*edge2.Y,
-					edge1.Z*edge2.X - edge1.X*edge2.Z,
-					edge1.X*edge2.Y - edge1.Y*edge2.X,
-				}
-				normal = Normalize(normal)
-
-				// Keep normal as calculated (outward-facing for CCW winding)
-				// normal = Vertex{normal.X, normal.Y, normal.Z}
+				normal := CalculateTriangleNormal(v1, v2, v3)
 
 				triangle := Triangle{
-					Vertex1:   vertices[face[0]],
-					Vertex2:   vertices[face[1]],
-					Vertex3:   vertices[face[2]],
+					Vertex1:   v1,
+					Vertex2:   v2,
+					Vertex3:   v3,
 					Normal:    normal,
 					Roughness: material.Roughness,
 					Metallic:  material.Metallic,
@@ -529,7 +550,7 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 				triangleIndex++
 			}
 		} else if len(face) > 3 {
-			// FIXED: Polygon case - triangulate with consistent winding order
+			// Polygon case - triangulate with consistent winding order
 			faceVertices := make([]Vertex, len(face))
 			valid := true
 			for i, idx := range face {
@@ -543,25 +564,12 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 			if valid {
 				triangles := Triangulate(faceVertices)
 				for _, tri := range triangles {
-					// Recalculate normal for triangulated face to ensure consistency
-					edge1 := Vertex{tri.Vertex2.X - tri.Vertex1.X, tri.Vertex2.Y - tri.Vertex1.Y, tri.Vertex2.Z - tri.Vertex1.Z}
-					edge2 := Vertex{tri.Vertex3.X - tri.Vertex1.X, tri.Vertex3.Y - tri.Vertex1.Y, tri.Vertex3.Z - tri.Vertex1.Z}
-
-					normal := Vertex{
-						edge1.Y*edge2.Z - edge1.Z*edge2.Y,
-						edge1.Z*edge2.X - edge1.X*edge2.Z,
-						edge1.X*edge2.Y - edge1.Y*edge2.X,
-					}
-					normal = Normalize(normal)
-
-					// Keep normal as calculated (outward-facing for CCW winding)
-					// normal = Vertex{normal.X, normal.Y, normal.Z}
-
+					// Use the normal calculated by Triangulate
 					triangle := Triangle{
 						Vertex1:   tri.Vertex1,
 						Vertex2:   tri.Vertex2,
 						Vertex3:   tri.Vertex3,
-						Normal:    normal,
+						Normal:    tri.Normal,
 						Roughness: material.Roughness,
 						Metallic:  material.Metallic,
 						Emission:  material.Emission,
@@ -573,6 +581,15 @@ func parseObjFile(filename string, additionFieldsNames []string) (*FileObject, e
 				}
 			}
 		}
+	}
+
+	// Validate and fix winding order for all triangles
+	fmt.Printf("Validating winding order for %d triangles...\n", len(allTriangles))
+	fixedCount := EnsureConsistentWinding(allTriangles)
+	if fixedCount > 0 {
+		fmt.Printf("Fixed winding order for %d triangles (%.1f%%)\n", fixedCount, float32(fixedCount)*100.0/float32(len(allTriangles)))
+	} else {
+		fmt.Printf("All triangles have correct winding order\n")
 	}
 
 	fileObj := &FileObject{
@@ -637,7 +654,7 @@ func bytesToFloat32(b []byte) float32 {
 	return *(*float32)(unsafe.Pointer(&bits))
 }
 
-func writeFile(filename string, obj *FileObject) error {
+func writeFile(filename string, obj *FileObject, color *[3]float32) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
@@ -670,9 +687,16 @@ func writeFile(filename string, obj *FileObject) error {
 		w.Write(float32ToBytes(tri.Roughness))
 		w.Write(float32ToBytes(tri.Metallic))
 		w.Write(float32ToBytes(tri.Emission))
-		w.Write(float32ToBytes(tri.Color[0]))
-		w.Write(float32ToBytes(tri.Color[1]))
-		w.Write(float32ToBytes(tri.Color[2]))
+		if color != nil {
+			// Override color if provided
+			w.Write(float32ToBytes(clamp(color[0], 0, 1)))
+			w.Write(float32ToBytes(clamp(color[1], 0, 1)))
+			w.Write(float32ToBytes(clamp(color[2], 0, 1)))
+		} else {
+			w.Write(float32ToBytes(tri.Color[0]))
+			w.Write(float32ToBytes(tri.Color[1]))
+			w.Write(float32ToBytes(tri.Color[2]))
+		}
 		// Triangle index
 		w.Write(uint32ToBytes(uint32(tri.index)))
 	}
@@ -1343,55 +1367,61 @@ func ReadBVHFromFile(filename string) (*BVHLinear, error) {
 }
 
 func main() {
-	// obj1, err := parseObjFile("monkey.obj", nil)
+	obj1, err := parseObjFile("../missile/r27.obj", nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// color := [3]float32{0.9, 0.2, 0.2}
+	err = writeFile("../missile/r27.bin", obj1, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// obj, err := readFile("triangles.bin")
 	// if err != nil {
 	// 	panic(err)
 	// }
 
-	obj, err := readFile("triangles.bin")
-	if err != nil {
-		panic(err)
-	}
+	// // add triangles from obj1 to obj
+	// // obj.Triangles = append(obj.Triangles, obj1.Triangles...)
 
-	// add triangles from obj1 to obj
-	// obj.Triangles = append(obj.Triangles, obj1.Triangles...)
+	// // Build BVH
+	// bvhLinear := &BVHLinear{}
+	// bvhLinear.BuildLinearBVH(obj.Triangles)
+	// fmt.Printf("Built BVH with %d nodes\n", len(bvhLinear.Nodes))
 
-	// Build BVH
-	bvhLinear := &BVHLinear{}
-	bvhLinear.BuildLinearBVH(obj.Triangles)
-	fmt.Printf("Built BVH with %d nodes\n", len(bvhLinear.Nodes))
+	// for i, node := range bvhLinear.Nodes {
+	// 	fmt.Println("Node", i)
+	// 	fmt.Println("Left Index:", node.LeftIndex)
+	// 	fmt.Println("Right Index:", node.RightIndex)
+	// 	if i == 3 {
+	// 		break
+	// 	}
+	// }
 
-	for i, node := range bvhLinear.Nodes {
-		fmt.Println("Node", i)
-		fmt.Println("Left Index:", node.LeftIndex)
-		fmt.Println("Right Index:", node.RightIndex)
-		if i == 3 {
-			break
-		}
-	}
+	// // Write BVH to binary file
+	// err = bvhLinear.WriteBVHToFile("encoded.bvh")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// fmt.Println("BVH written to output.bvh")
 
-	// Write BVH to binary file
-	err = bvhLinear.WriteBVHToFile("encoded.bvh")
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("BVH written to output.bvh")
+	// err = writeFile("encoded.bin", obj)
+	// if err != nil {
+	// 	panic(err)
+	// }
 
-	err = writeFile("encoded.bin", obj)
-	if err != nil {
-		panic(err)
-	}
+	// realFileSize, err := getFileSize("encoded.bin")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// encodedFileSize, err := getEncodedFileSize("encoded.bin")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// fmt.Println("Encoded file size:", encodedFileSize)
+	// fmt.Println("Real file size:", realFileSize)
 
-	realFileSize, err := getFileSize("encoded.bin")
-	if err != nil {
-		panic(err)
-	}
-	encodedFileSize, err := getEncodedFileSize("encoded.bin")
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Encoded file size:", encodedFileSize)
-	fmt.Println("Real file size:", realFileSize)
-
-	println("Number of triangles:", len(obj.Triangles))
+	// println("Number of triangles:", len(obj.Triangles))
 }

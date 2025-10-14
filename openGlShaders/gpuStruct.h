@@ -1,5 +1,6 @@
 #ifndef OPEN_CL_STRUCT_H
 #define OPEN_CL_STRUCT_H
+#define NUMBER_OF_TRIANGLES 10000
 
 #include <CL/cl.h>
 #include <GL/gl.h>
@@ -32,6 +33,8 @@ struct OpenCLContext {
 	cl_kernel blur_fire_kernel;          // Fire blur kernel
 	cl_kernel clearColorBuffer_kernel;   // Clear color buffer kernel
 	cl_kernel composite_kernel;          // Compositing kernel
+	cl_kernel renderMissile_kernel;      // Missile rendering kernel
+	cl_kernel renderFireTemperature_kernel; // Fire temperature rendering kernel
 	// buffers
 	cl_mem buffer_points;
 	cl_mem buffer_velocities;
@@ -62,6 +65,15 @@ struct OpenCLContext {
 	cl_mem buffer_triangle_v2;
 	cl_mem buffer_triangle_v3;
 	cl_mem buffer_triangle_normals;
+	// triangle buffers for missile model
+	cl_mem buffer_missile_v1;
+	cl_mem buffer_missile_v2;
+	cl_mem buffer_missile_v3;
+	cl_mem buffer_missile_normals;
+	cl_mem missile_color_buffer;
+	cl_mem missile_roughness_buffer;
+	cl_mem missile_metallic_buffer;
+	cl_mem missile_emission_buffer;	
 
 	// screen buffers
 	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
@@ -106,10 +118,12 @@ struct OpenCLContext {
     cl_mem FireScreenNormals;
 	cl_mem FireScreenAlphas;
 	cl_mem FireScreenAlphasTemp;
+	cl_mem FireTemperature;
 	// compositing buffers
 	cl_mem CompositedScreenColors;
 	cl_mem CompositedScreenNormals;
 	cl_mem CompositedScreenDistances;
+	
 
 	
 
@@ -121,5 +135,17 @@ struct OpenCLContext {
 	float *host_velocities_result;
 	float *host_normals_result;
 	float *host_screen_colors_result;
+};
+
+struct Triangles {
+	float v1[NUMBER_OF_TRIANGLES * 3];
+	float v2[NUMBER_OF_TRIANGLES * 3];
+	float v3[NUMBER_OF_TRIANGLES * 3];
+	float Roughness[NUMBER_OF_TRIANGLES];
+	float Metallic[NUMBER_OF_TRIANGLES];
+	float Emission[NUMBER_OF_TRIANGLES];
+	float normals[NUMBER_OF_TRIANGLES * 3];
+	float colors[NUMBER_OF_TRIANGLES * 3]; // RGB colors for each triangle
+	int count;
 };
 #endif

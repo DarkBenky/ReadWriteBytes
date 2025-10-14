@@ -1,11 +1,12 @@
 #ifndef FIRE_SIM_H
 #define FIRE_SIM_H
 
-#define NUM_FIRE_PARTICLES 250
+#define NUM_FIRE_PARTICLES 750
 #define MAX_FIRE_SIMS 128
 #define G 9.81f
 
 #include "../openGlShaders/gpuStruct.h"
+#include <stdbool.h>
 
 struct FireSOA {
     float x[NUM_FIRE_PARTICLES];
@@ -57,11 +58,14 @@ struct Missile {
     int burning;                          // Engine state: 1=on, 0=off
     float burnRate;                       // Fuel consumption rate (kg/s)
     float Q_spec;                         // Energy per kg of fuel (J/kg)
+    float remainingTime;                  // Remaining simulation time (s)
     struct FireSOA *fireSim;              // Exhaust plume particles
 };
 
 struct Missiles {
     struct Missile *missiles[MAX_FIRE_SIMS];
+    struct Triangles *missileModel;
+    bool active[MAX_FIRE_SIMS];
     int count;
 };
 
@@ -69,11 +73,11 @@ void InitializeFireParticles(struct FireSOA *particles);
 void fireSimStep(struct FireSOA *particles, float deltaTime, float *timeTook);
 
 void InitializeMissile(struct Missile *missile);
-void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook);
+void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active);
 void setMissileTarget(struct Missile *missile, float targetPos[3]);
 void cleanupMissile(struct Missile *missile);
 
-void InitializeMissiles(struct Missiles *missiles, int count);
+void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *missileModel);
 void UpdateAllMissiles(struct Missiles *missiles, float deltaTime);
 void CleanupMissiles(struct Missiles *missiles);
 

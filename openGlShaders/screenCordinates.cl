@@ -2763,6 +2763,17 @@ __kernel void blurFire(
     float centerDepth = InputDistances[centerIdx];
     float centerAlpha = InputAlphas[centerIdx];
     
+    // Skip blurring if alpha is negative (solid object like missile)
+    if (centerAlpha < 0.0f) {
+        int colorBase = centerIdx * 3;
+        OutputColors[colorBase + 0] = InputColors[colorBase + 0];
+        OutputColors[colorBase + 1] = InputColors[colorBase + 1];
+        OutputColors[colorBase + 2] = InputColors[colorBase + 2];
+        OutputDistances[centerIdx] = centerDepth;
+        OutputAlphas[centerIdx] = centerAlpha;
+        return;
+    }
+    
     if (centerDepth <= 0.001f) {
         int colorBase = centerIdx * 3;
         OutputColors[colorBase + 0] = InputColors[colorBase + 0];
@@ -2804,26 +2815,22 @@ __kernel void blurFire(
             float neighborDepth = InputDistances[neighborIdx];
             float neighborAlpha = InputAlphas[neighborIdx];
             
-            if (neighborDepth <= 0.001f) continue;
+            // Skip solid objects (negative alpha) in blur sampling
+            if (neighborDepth <= 0.001f || neighborAlpha < 0.0f) continue;
             
             float3 neighborColor = vload3(0, &InputColors[neighborIdx * 3]);
             float neighborBrightness = (neighborColor.x + neighborColor.y + neighborColor.z) / 3.0f;
             
-            // Brightness-based weight
             float brightnessDiff = fabs(centerBrightness - neighborBrightness);
             float brightnessWeight = exp(-brightnessDiff * brightnessDiff / 0.5f);
             
-            // Spatial weight
             float dist = (float)(dx * dx + dy * dy);
             float spatialWeight = exp(-dist / (2.0f * sigma * sigma));
             
-            // // Alpha-based weight (preserve alpha discontinuities)
             float alphaDiff = fabs(centerAlpha - neighborAlpha);
             float alphaWeight = exp(-alphaDiff * alphaDiff / (2.0f * sigmaColor * sigmaColor));
             
-            // Combined weight
             float weight = spatialWeight * brightnessWeight * alphaWeight;
-            // float weight = spatialWeight * brightnessWeight;
             
             accumulatedColor += neighborColor * weight;
             accumulatedAlpha += neighborAlpha * weight;
@@ -2835,7 +2842,6 @@ __kernel void blurFire(
         float3 blurredColor = accumulatedColor / totalWeight;
         float blurredAlpha = accumulatedAlpha / totalWeight;
         
-        // Blend between blurred and original based on blur strength
         float blendFactor = 1.0f - blurStrength;
         float3 finalColor = mix(blurredColor, centerColor, blendFactor);
         float finalAlpha = mix(blurredAlpha, centerAlpha, blendFactor);
@@ -2901,11 +2907,18 @@ __kernel void compositeBuffers(
     int pixelIdx = y * screenWidth + x;
     int colorIdx = pixelIdx * 3;
     
-    // Read data from both buffers
     float depth1 = InputDistances1[pixelIdx];
     float depth2 = InputDistances2[pixelIdx];
     float alpha1 = useAlpha1 ? InputAlphas1[pixelIdx] : 1.0f;
     float alpha2 = useAlpha2 ? InputAlphas2[pixelIdx] : 1.0f;
+    
+    // Store original alpha signs for special handling
+    bool alpha1_is_solid = (alpha1 < 0.0f);
+    bool alpha2_is_solid = (alpha2 < 0.0f);
+    
+    // Treat negative alpha values as fully opaque (solid objects like missiles)
+    if (alpha1_is_solid) alpha1 = 1.0f;
+    if (alpha2_is_solid) alpha2 = 1.0f;
     
     float3 color1 = vload3(0, &InputColors1[colorIdx]);
     float3 color2 = vload3(0, &InputColors2[colorIdx]);
@@ -2919,7 +2932,7 @@ __kernel void compositeBuffers(
     float finalDepth;
     float3 finalNormal;
     
-    // Case 1: Both buffers empty - check for background color
+    // Case 1: Both buffers empty
     if (!valid1 && !valid2) {
         if (length(color1) > 0.001f) {
             vstore3(color1, 0, &OutputColors[colorIdx]);
@@ -2935,13 +2948,11 @@ __kernel void compositeBuffers(
     
     // Case 2: Only buffer 1 has data
     if (valid1 && !valid2) {
-        if (useAlpha1 && alpha1 < 0.999f) {
-            // Buffer 1 is transparent, blend with background (buffer 2 color even if no depth)
+        if (useAlpha1 && alpha1 < 0.999f && !alpha1_is_solid) {
             finalColor = mix(color2, color1, alpha1);
             finalDepth = depth1;
             finalNormal = normal1;
         } else {
-            // Buffer 1 is opaque
             finalColor = color1;
             finalDepth = depth1;
             finalNormal = normal1;
@@ -2949,43 +2960,36 @@ __kernel void compositeBuffers(
     }
     // Case 3: Only buffer 2 has data
     else if (!valid1 && valid2) {
-        if (useAlpha2 && alpha2 < 0.999f) {
-            // Buffer 2 is transparent, blend with background (buffer 1 color)
+        if (useAlpha2 && alpha2 < 0.999f && !alpha2_is_solid) {
             finalColor = mix(color1, color2, alpha2);
             finalDepth = depth2;
             finalNormal = normal2;
         } else {
-            // Buffer 2 is opaque
             finalColor = color2;
             finalDepth = depth2;
             finalNormal = normal2;
         }
     }
-    // Case 4: Both buffers have data - depth-based compositing with alpha blending
+    // Case 4: Both buffers have data
     else {
-        // Determine which layer is in front
         if (depth1 < depth2) {
-            // Buffer 1 is in front (fire/particles)
-            if (useAlpha1 && alpha1 < 0.999f) {
-                // Front layer is transparent - blend with back layer
+            // Buffer 1 is in front
+            if (useAlpha1 && alpha1 < 0.999f && !alpha1_is_solid) {
                 finalColor = mix(color2, color1, alpha1);
-                finalDepth = depth1; // Use front depth
-                finalNormal = mix(normal2, normal1, alpha1); // Blend normals too
+                finalDepth = depth1;
+                finalNormal = mix(normal2, normal1, alpha1);
             } else {
-                // Front layer is opaque - no blending needed
                 finalColor = color1;
                 finalDepth = depth1;
                 finalNormal = normal1;
             }
         } else {
             // Buffer 2 is in front
-            if (useAlpha2 && alpha2 < 0.999f) {
-                // Front layer is transparent - blend with back layer
+            if (useAlpha2 && alpha2 < 0.999f && !alpha2_is_solid) {
                 finalColor = mix(color1, color2, alpha2);
                 finalDepth = depth2;
                 finalNormal = mix(normal1, normal2, alpha2);
             } else {
-                // Front layer is opaque
                 finalColor = color2;
                 finalDepth = depth2;
                 finalNormal = normal2;
@@ -2997,4 +3001,222 @@ __kernel void compositeBuffers(
     vstore3(finalColor, 0, &OutputColors[colorIdx]);
     OutputDistances[pixelIdx] = finalDepth;
     vstore3(finalNormal, 0, &OutputNormals[colorIdx]);
+}
+
+__kernel void renderMissile(
+    // Missile model data
+    __global const float* model_v1,
+    __global const float* model_v2,
+    __global const float* model_v3,
+    __global const float* model_normals,
+    __global const float* model_colors,
+    __global const float* model_roughness,
+    __global const float* model_metallic,
+    __global const float* model_emission,
+    const int model_triangle_count,
+    
+    // Missile instance data
+    const float3 missile_position,
+    const float3 missile_orientation,  // bodyOrientation[3] - forward direction
+    const float missile_scale,
+    
+    // Camera and screen parameters
+    const float3 camPos,
+    const float3 camDir,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight,
+    
+    // Output buffers
+    __global float* ScreenDistances,
+    __global float* ScreenColors,
+    __global float* ScreenNormals,
+    __global float* ScreenMaterialRoughness,
+    __global float* ScreenMaterialMetallic,
+    __global float* ScreenMaterialEmission,
+    __global float *ScreenAlphas
+) {
+    int triangleId = get_global_id(0);
+    if (triangleId >= model_triangle_count) return;
+
+    // Load triangle vertices from model
+    int idx = triangleId * 3;
+    float3 model_p1 = (float3)(model_v1[idx], model_v1[idx + 1], model_v1[idx + 2]);
+    float3 model_p2 = (float3)(model_v2[idx], model_v2[idx + 1], model_v2[idx + 2]);
+    float3 model_p3 = (float3)(model_v3[idx], model_v3[idx + 1], model_v3[idx + 2]);
+    float3 model_normal = (float3)(model_normals[idx], model_normals[idx + 1], model_normals[idx + 2]);
+
+    // Create rotation matrix to align missile with bodyOrientation
+    // Assume model's default forward is +X axis
+    float3 model_forward = (float3)(1.0f, 0.0f, 0.0f);
+    float3 target_forward = normalize(missile_orientation);
+    
+    // Calculate rotation axis and angle
+    float3 rotation_axis = cross(model_forward, target_forward);
+    float rotation_angle = acos(clamp(dot(model_forward, target_forward), -1.0f, 1.0f));
+    
+    // Build rotation matrix using Rodrigues' rotation formula
+    // Represent rotation matrix as three float3 vectors (rows)
+    float3 row0, row1, row2;
+    if (length(rotation_axis) > 0.001f) {
+        rotation_axis = normalize(rotation_axis);
+        float c = cos(rotation_angle);
+        float s = sin(rotation_angle);
+        float t = 1.0f - c;
+        float x = rotation_axis.x;
+        float y = rotation_axis.y;
+        float z = rotation_axis.z;
+        
+        // Construct 3x3 rotation matrix rows
+        row0 = (float3)(t * x * x + c,      t * x * y - s * z,    t * x * z + s * y);
+        row1 = (float3)(t * x * y + s * z,  t * y * y + c,        t * y * z - s * x);
+        row2 = (float3)(t * x * z - s * y,  t * y * z + s * x,    t * z * z + c);
+        
+        // Transform vertices to world space
+        float3 world_p1 = (float3)(
+            dot(row0, model_p1),
+            dot(row1, model_p1),
+            dot(row2, model_p1)
+        ) * missile_scale + missile_position;
+        float3 world_p2 = (float3)(
+            dot(row0, model_p2),
+            dot(row1, model_p2),
+            dot(row2, model_p2)
+        ) * missile_scale + missile_position;
+        float3 world_p3 = (float3)(
+            dot(row0, model_p3),
+            dot(row1, model_p3),
+            dot(row2, model_p3)
+        ) * missile_scale + missile_position;
+        
+        // Rotate normal (no translation, no scale)
+        float3 world_normal = normalize((float3)(
+            dot(row0, model_normal),
+            dot(row1, model_normal),
+            dot(row2, model_normal)
+        ));
+        
+        // Backface culling
+        float3 tri_center = (world_p1 + world_p2 + world_p3) / 3.0f;
+        float3 to_camera = normalize(camPos - tri_center);
+        if (dot(world_normal, to_camera) <= 0.0f) return;
+        
+        // Camera basis
+        float3 forward = normalize(camDir);
+        float3 up = (float3)(0.0f, 1.0f, 0.0f);
+        float3 right = normalize(cross(forward, up));
+        up = cross(right, forward);
+        
+        // Project vertices to screen space
+        float3 vertices[3] = {world_p1, world_p2, world_p3};
+        float3 projected[3];
+        float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+        
+        for (int i = 0; i < 3; i++) {
+            float3 rel = vertices[i] - camPos;
+            float depth = dot(rel, forward);
+            
+            if (depth <= 0.01f) return;
+            
+            float scale = 1.0f / (depth * fov);
+            float x = dot(rel, right) * scale;
+            float y = dot(rel, up) * scale;
+            
+            float sx = x * screenWidth * 0.5f + screenWidth * 0.5f;
+            float sy = -y * screenHeight * 0.5f + screenHeight * 0.5f;
+            
+            projected[i] = (float3)(sx, sy, depth);
+            
+            minX = fmin(minX, sx);
+            maxX = fmax(maxX, sx);
+            minY = fmin(minY, sy);
+            maxY = fmax(maxY, sy);
+        }
+        
+        // Check triangle area
+        float area = fabs((projected[1].x - projected[0].x) * (projected[2].y - projected[0].y) - 
+                         (projected[2].x - projected[0].x) * (projected[1].y - projected[0].y)) * 0.5f;
+        if (area < 0.5f) return;
+        
+        // Clamp bounding box
+        int x0 = max(0, (int)minX);
+        int x1 = min(screenWidth - 1, (int)maxX);
+        int y0 = max(0, (int)minY);
+        int y1 = min(screenHeight - 1, (int)maxY);
+        
+        // Barycentric setup
+        float2 v0 = projected[1].xy - projected[0].xy;
+        float2 v1 = projected[2].xy - projected[0].xy;
+        float d00 = dot(v0, v0);
+        float d01 = dot(v0, v1);
+        float d11 = dot(v1, v1);
+        float invDenom = 1.0f / (d00 * d11 - d01 * d01);
+        
+        // Rasterize
+        for (int y = y0; y <= y1; y++) {
+            for (int x = x0; x <= x1; x++) {
+                float2 p = (float2)(x + 0.5f, y + 0.5f) - projected[0].xy;
+                float d20 = dot(p, v0);
+                float d21 = dot(p, v1);
+                
+                float v = (d11 * d20 - d01 * d21) * invDenom;
+                float w = (d00 * d21 - d01 * d20) * invDenom;
+                float u = 1.0f - v - w;
+                
+                if (u >= -0.001f && v >= -0.001f && w >= -0.001f) {
+                    float depth = u * projected[0].z + v * projected[1].z + w * projected[2].z;
+                    
+                    int pixelIdx = y * screenWidth + x;
+                    
+                    if (ScreenDistances[pixelIdx] == 0.0f || depth < ScreenDistances[pixelIdx]) {
+                        ScreenDistances[pixelIdx] = depth;
+                        
+                        // Store normal
+                        int normalIdx = pixelIdx * 3;
+                        ScreenNormals[normalIdx] = world_normal.x;
+                        ScreenNormals[normalIdx + 1] = world_normal.y;
+                        ScreenNormals[normalIdx + 2] = world_normal.z;
+                        
+                        // Store color with simple lighting
+                        float3 color = (float3)(model_colors[idx], model_colors[idx + 1], model_colors[idx + 2]);
+                        float lighting = max(0.3f, dot(world_normal, normalize((float3)(0.3f, 0.7f, 0.5f))));
+                        float3 final_color = color * lighting;
+                        
+                        int colorIdx = pixelIdx * 3;
+                        ScreenColors[colorIdx] = clamp(final_color.x, 0.0f, 1.0f);
+                        ScreenColors[colorIdx + 1] = clamp(final_color.y, 0.0f, 1.0f);
+                        ScreenColors[colorIdx + 2] = clamp(final_color.z, 0.0f, 1.0f);
+                        
+                        // Store material properties
+                        ScreenMaterialRoughness[pixelIdx] = model_roughness[triangleId];
+                        ScreenMaterialMetallic[pixelIdx] = model_metallic[triangleId];
+                        ScreenMaterialEmission[pixelIdx] = model_emission[triangleId];
+                        ScreenAlphas[pixelIdx] = -1.0f;
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+__kernel void filterOverlap(
+    __global const float* InputBuffer1,
+    __global const float* InputDistance1,
+    __global const float* InputDistance2,
+    __global float* OutputBuffer,
+    const int screenWidth,
+    const int screenHeight
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= screenWidth || y >= screenHeight) return;
+    
+    int pixelIdx = y * screenWidth + x;
+    if (InputDistance1[pixelIdx] > InputDistance2[pixelIdx] && InputDistance2[pixelIdx] > 0.001f && InputDistance1[pixelIdx] > 0.001f) {
+        OutputBuffer[pixelIdx] = 0.0f; // Set to black
+    } else {
+        OutputBuffer[pixelIdx] = InputBuffer1[pixelIdx];
+    }
 }
