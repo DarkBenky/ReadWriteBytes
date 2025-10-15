@@ -1291,7 +1291,7 @@ void setMissileTarget(struct Missile *missile, float targetPos[3]) {
     }
 }
 
-void setMissileTargetDirection(struct Missile *missile, float targetDir[3]) {
+void setMissileTargetDirection(struct Missile *missile, float targetDir[3], float *targetDist) {
     // Normalize the direction
     float mag = sqrtf(targetDir[0] * targetDir[0] +
                       targetDir[1] * targetDir[1] +
@@ -1302,9 +1302,13 @@ void setMissileTargetDirection(struct Missile *missile, float targetDir[3]) {
         missile->targetDirection[1] = targetDir[1] / mag;
         missile->targetDirection[2] = targetDir[2] / mag;
         
-        // For direction-only guidance, we need to create a "virtual" target position
-        // Place it far away in the target direction from current position
-        float virtualTargetDistance = 10000.0f; // 10km virtual target
+        // For direction-only guidance, create a "virtual" target position
+        float virtualTargetDistance = 10000.0f; // 10km default virtual target
+        
+        if (targetDist != NULL) {
+            virtualTargetDistance = *targetDist;
+        }
+        
         missile->targetPosition[0] = missile->position[0] + missile->targetDirection[0] * virtualTargetDistance;
         missile->targetPosition[1] = missile->position[1] + missile->targetDirection[1] * virtualTargetDistance;
         missile->targetPosition[2] = missile->position[2] + missile->targetDirection[2] * virtualTargetDistance;
