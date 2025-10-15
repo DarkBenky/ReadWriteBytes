@@ -1264,20 +1264,56 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 }
 
 void setMissileTarget(struct Missile *missile, float targetPos[3]) {
-	float dirToTarget[3] = {
-		targetPos[0] - missile->position[0],
-		targetPos[1] - missile->position[1],
-		targetPos[2] - missile->position[2]};
+    // Set the target position (needed for proper PN guidance)
+    missile->targetPosition[0] = targetPos[0];
+    missile->targetPosition[1] = targetPos[1];
+    missile->targetPosition[2] = targetPos[2];
+    
+    // Also calculate and set the initial target direction
+    float dirToTarget[3] = {
+        targetPos[0] - missile->position[0],
+        targetPos[1] - missile->position[1],
+        targetPos[2] - missile->position[2]};
 
-	float mag = sqrtf(dirToTarget[0] * dirToTarget[0] +
-					  dirToTarget[1] * dirToTarget[1] +
-					  dirToTarget[2] * dirToTarget[2]);
+    float mag = sqrtf(dirToTarget[0] * dirToTarget[0] +
+                      dirToTarget[1] * dirToTarget[1] +
+                      dirToTarget[2] * dirToTarget[2]);
 
-	if (mag > 0.01f) {
-		missile->targetDirection[0] = dirToTarget[0] / mag;
-		missile->targetDirection[1] = dirToTarget[1] / mag;
-		missile->targetDirection[2] = dirToTarget[2] / mag;
-	}
+    if (mag > 0.01f) {
+        missile->targetDirection[0] = dirToTarget[0] / mag;
+        missile->targetDirection[1] = dirToTarget[1] / mag;
+        missile->targetDirection[2] = dirToTarget[2] / mag;
+        
+        // Initialize previous LOS for proper PN guidance
+        missile->prevLOS[0] = missile->targetDirection[0];
+        missile->prevLOS[1] = missile->targetDirection[1];
+        missile->prevLOS[2] = missile->targetDirection[2];
+    }
+}
+
+void setMissileTargetDirection(struct Missile *missile, float targetDir[3]) {
+    // Normalize the direction
+    float mag = sqrtf(targetDir[0] * targetDir[0] +
+                      targetDir[1] * targetDir[1] +
+                      targetDir[2] * targetDir[2]);
+    
+    if (mag > 0.01f) {
+        missile->targetDirection[0] = targetDir[0] / mag;
+        missile->targetDirection[1] = targetDir[1] / mag;
+        missile->targetDirection[2] = targetDir[2] / mag;
+        
+        // For direction-only guidance, we need to create a "virtual" target position
+        // Place it far away in the target direction from current position
+        float virtualTargetDistance = 10000.0f; // 10km virtual target
+        missile->targetPosition[0] = missile->position[0] + missile->targetDirection[0] * virtualTargetDistance;
+        missile->targetPosition[1] = missile->position[1] + missile->targetDirection[1] * virtualTargetDistance;
+        missile->targetPosition[2] = missile->position[2] + missile->targetDirection[2] * virtualTargetDistance;
+        
+        // Initialize previous LOS
+        missile->prevLOS[0] = missile->targetDirection[0];
+        missile->prevLOS[1] = missile->targetDirection[1];
+        missile->prevLOS[2] = missile->targetDirection[2];
+    }
 }
 
 void cleanupMissile(struct Missile *missile) {
