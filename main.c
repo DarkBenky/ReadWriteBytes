@@ -128,24 +128,6 @@ char *renderModesName[] = {
 	"renderTemperatures",
 };
 
-enum RenderMode {
-	renderDistance,
-	renderVelocity,
-	renderOpacity,
-	renderNormal,
-	renderFluid,
-	renderColor,
-	renderWireframe,
-	renderFireColor,
-	renderFireDepth,
-	renderFireNormal,
-	renderCompositedNormal,
-	renderCompositedColor,
-	renderCompositedDistance,
-	renderTemperatures,
-	RENDER_MODE_COUNT // Total number of render modes
-};
-
 struct RawImage {
 	unsigned char *data; // RGB pixel data
 	int width, height, components;
@@ -257,19 +239,6 @@ bool loadSkyBox(struct SkyBox *skyBox) { // Changed from void to bool
 
 	return true; // Return true on success
 }
-
-struct Ray {
-	float origin[3];
-	float direction[3];
-};
-
-struct Camera {
-	struct Ray ray;
-	float fov;
-	enum RenderMode renderMode;
-	bool AntiAlias;
-	bool advanceAntiAlias;
-};
 
 void filterOverlapOpenCL(
 	struct OpenCLContext *ocl,
@@ -536,7 +505,7 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 	// Apply blur to all fires at once
 	if (ocl->blur_fire_kernel != NULL) {
 		const int NUM_BLUR_PASSES = 2;
-		cl_int blurRadius = 5;
+		cl_int blurRadius = 3;
 		cl_float sigmaColor = 0.8f;
 		cl_float sigmaSpace = 2.5f;
 

@@ -54,6 +54,16 @@ void InitializeMissile(struct Missile *missile) {
 	missile->angularVelocity[1] = 0.0f;
 	missile->angularVelocity[2] = 0.0f;
 
+	missile->seeker.seekerCamera.ray.origin[0] = missile->position[0];
+	missile->seeker.seekerCamera.ray.origin[1] = missile->position[1];
+	missile->seeker.seekerCamera.ray.origin[2] = missile->position[2];
+	missile->seeker.seekerCamera.ray.direction[0] = missile->bodyOrientation[0];
+	missile->seeker.seekerCamera.ray.direction[1] = missile->bodyOrientation[1];
+	missile->seeker.seekerCamera.ray.direction[2] = missile->bodyOrientation[2];
+	missile->seeker.seekerCamera.fov = 8.5f;
+	missile->seeker.lockState = Searching;
+	missile->seeker.seekerFov = 60.0f;
+
 	missile->drag = randRange(0.012f, 0.025f);
 	missile->inducedDragFactor = randRange(0.08f, 0.18f);
 	missile->transsonicDragPeak = randRange(2.8f, 4.2f);
@@ -92,6 +102,58 @@ void InitializeMissile(struct Missile *missile) {
 		missile->fireSim->windDirection[1] = -missile->velocity[1] * 10.0f;
 		missile->fireSim->windDirection[2] = -missile->velocity[2] * 10.0f;
 	}
+}
+
+void missileSeekStep(struct Missile *missile) {
+	if (missile->seeker.lockState == Searching) {
+		// Convert FOV and gimbal limit from degrees to radians
+		float fovRad = missile->seeker.seekerCamera.fov * (M_PI / 180.0f);
+		float maxGimbalRad = missile->seeker.seekerFov * (M_PI / 180.0f) / 2.0f;
+
+		// Get current camera ray direction
+		float *rayDir = missile->seeker.seekerCamera.ray.direction;
+		float *rayOrigin = missile->seeker.seekerCamera.ray.start;
+
+		// Calculate current angles relative to missile body (forward = +Z)
+		float currentPitch = atan2f(rayDir[1], sqrtf(rayDir[0] * rayDir[0] + rayDir[2] * rayDir[2]));
+		float currentYaw = atan2f(rayDir[0], rayDir[2]);
+
+		// Move camera by one FOV step horizontally
+		currentYaw += fovRad;
+
+		// Check if we exceeded gimbal limit
+		if (currentYaw > maxGimbalRad) {
+			currentYaw = -maxGimbalRad; // Reset to left edge
+			currentPitch += fovRad;		// Step down by one FOV
+
+			// If exceeded vertical gimbal limit, reset to top
+			if (currentPitch > maxGimbalRad) {
+				currentPitch = -maxGimbalRad;
+			}
+		}
+
+		// Convert angles back to direction vector
+		float cosPitch = cosf(currentPitch);
+		rayDir[0] = sinf(currentYaw) * cosPitch;
+		rayDir[1] = sinf(currentPitch);
+		rayDir[2] = cosf(currentYaw) * cosPitch;
+
+		// Normalize direction vector
+		float length = sqrtf(rayDir[0] * rayDir[0] + rayDir[1] * rayDir[1] + rayDir[2] * rayDir[2]);
+		rayDir[0] /= length;
+		rayDir[1] /= length;
+		rayDir[2] /= length;
+
+		// Update camera origin to missile position
+		rayOrigin[0] = missile->position[0];
+		rayOrigin[1] = missile->position[1];
+		rayOrigin[2] = missile->position[2];
+
+	} else if (missile->seeker.lockState == Tracking) {
+		// kernel will provide center of the bounding box of the target in screen space that we can use to adjust the seeker camera direction if found no bounding box we switch back to searching mode
+		return;
+	}
+	return;
 }
 
 void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active) {

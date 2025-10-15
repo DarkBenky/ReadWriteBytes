@@ -32,7 +32,21 @@ struct FireSOA {
     float swirlFrequency;         // Rotation speed (Hz)
 };
 
+enum MissileLock{
+    Searching,
+    Tracking,
+};
+
+struct Seeker {
+    struct Camera seekerCamera;
+    float seekerFov; // Seeker gimbal limit (degrees)
+    int seekerSteps; // Number of steps preferred in one simulation step
+    enum  MissileLock lockState;
+
+};
+
 struct Missile {
+    struct Seeker seeker;
     float position[3];                    // Current position in world space (m)
     float velocity[3];                    // Current velocity vector (m/s)
     float targetDirection[3];             // Desired flight direction (unit vector)
@@ -61,6 +75,7 @@ struct Missile {
     float remainingTime;                  // Remaining simulation time (s)
     struct FireSOA *fireSim;              // Exhaust plume particles
 };
+
 
 struct Missiles {
     struct Missile *missiles[MAX_FIRE_SIMS];

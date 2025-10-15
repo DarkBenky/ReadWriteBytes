@@ -148,4 +148,36 @@ struct Triangles {
 	float colors[NUMBER_OF_TRIANGLES * 3]; // RGB colors for each triangle
 	int count;
 };
+
+enum RenderMode {
+	renderDistance,
+	renderVelocity,
+	renderOpacity,
+	renderNormal,
+	renderFluid,
+	renderColor,
+	renderWireframe,
+	renderFireColor,
+	renderFireDepth,
+	renderFireNormal,
+	renderCompositedNormal,
+	renderCompositedColor,
+	renderCompositedDistance,
+	renderTemperatures,
+	RENDER_MODE_COUNT // Total number of render modes
+};
+
+struct Ray {
+	float origin[3];
+	float direction[3];
+};
+
+struct Camera {
+	struct Ray ray;
+	float fov;
+	enum RenderMode renderMode;
+	bool AntiAlias;
+	bool advanceAntiAlias;
+};
+
 #endif
