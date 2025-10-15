@@ -156,295 +156,707 @@ void missileSeekStep(struct Missile *missile) {
 	return;
 }
 
+// void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active) {
+// 	struct timespec start, end;
+// 	clock_gettime(CLOCK_MONOTONIC, &start);
+
+// 	missile->remainingTime -= deltaTime;
+// 	if (missile->remainingTime <= 0.0f) {
+// 		*active = false;
+// 		clock_gettime(CLOCK_MONOTONIC, &end);
+// 		*timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 +
+// 							(end.tv_nsec - start.tv_nsec) / 1e6);
+// 		return;
+// 	}
+
+// 	float totalMass = missile->dryMass + missile->fuelMass;
+
+// 	float thrust = 0.0f;
+// 	if (missile->burning && missile->fuelMass > 0.0f) {
+// 		float exhaustVelocity = missile->Isp * G;
+// 		float massFlowRate = missile->burnRate;
+
+// 		float fuelConsumed = massFlowRate * deltaTime;
+// 		if (fuelConsumed > missile->fuelMass) {
+// 			fuelConsumed = missile->fuelMass;
+// 			missile->burning = 0;
+// 		}
+// 		missile->fuelMass -= fuelConsumed;
+
+// 		thrust = massFlowRate * exhaustVelocity;
+
+// 		float energyReleasedPerSecond = missile->Q_spec * massFlowRate;
+// 		float theoreticalThrust = 2.0f * energyReleasedPerSecond / exhaustVelocity;
+// 		float combustionEfficiency = fminf(1.0f, thrust / (theoreticalThrust + 0.001f));
+
+// 		if (combustionEfficiency < 0.95f) {
+// 			thrust *= 1.0f + (1.0f - combustionEfficiency) * 0.1f;
+// 		}
+// 	}
+
+// 	float speed = sqrtf(missile->velocity[0] * missile->velocity[0] +
+// 						missile->velocity[1] * missile->velocity[1] +
+// 						missile->velocity[2] * missile->velocity[2]);
+
+// 	float altitude = missile->position[1];
+// 	if (altitude < 0.0f) altitude = 0.0f;
+// 	float airDensity = getAirDensity(altitude);
+// 	float mach = speed / SPEED_OF_SOUND;
+// 	float machDragMult = getMachDragMultiplier(mach, missile->transsonicDragPeak, missile->supersonicDragFactor);
+// 	float dynamicPressure = 0.5f * airDensity * speed * speed;
+
+// 	float kineticEnergy = 0.5f * totalMass * speed * speed;
+// 	float potentialEnergy = totalMass * G * altitude;
+// 	float totalEnergy = kineticEnergy + potentialEnergy;
+// 	float maxPossibleKE = 0.5f * totalMass * missile->optimalSpeed * missile->optimalSpeed;
+// 	float energyRatio = kineticEnergy / maxPossibleKE;
+
+// 	float currentDir[3] = {0.0f, 0.0f, 0.0f};
+// 	if (speed > 0.1f) {
+// 		currentDir[0] = missile->velocity[0] / speed;
+// 		currentDir[1] = missile->velocity[1] / speed;
+// 		currentDir[2] = missile->velocity[2] / speed;
+// 	}
+
+// 	float errorDir[3] = {
+// 		missile->targetDirection[0] - currentDir[0],
+// 		missile->targetDirection[1] - currentDir[1],
+// 		missile->targetDirection[2] - currentDir[2]};
+
+// 	float errorMag = sqrtf(errorDir[0] * errorDir[0] +
+// 						   errorDir[1] * errorDir[1] +
+// 						   errorDir[2] * errorDir[2]);
+
+// 	if (errorMag > 0.01f) {
+// 		errorDir[0] /= errorMag;
+// 		errorDir[1] /= errorMag;
+// 		errorDir[2] /= errorMag;
+// 	}
+
+// 	float maxLateralAccel = missile->maxGPull * G;
+
+// 	if (dynamicPressure > missile->maxDynamicPressure) {
+// 		float qLimit = missile->maxDynamicPressure / dynamicPressure;
+// 		maxLateralAccel *= qLimit;
+// 	}
+
+// 	float controlEffectiveness = (airDensity / SEA_LEVEL_DENSITY) * missile->controlAuthority;
+// 	if (speed < 50.0f) {
+// 		controlEffectiveness *= (speed / 50.0f);
+// 	}
+// 	maxLateralAccel *= controlEffectiveness;
+
+// 	maxLateralAccel *= (airDensity / SEA_LEVEL_DENSITY);
+
+// 	if (energyRatio < missile->minEnergyThreshold) {
+// 		float energyLimitFactor = energyRatio / missile->minEnergyThreshold;
+// 		maxLateralAccel *= (0.3f + 0.7f * energyLimitFactor);
+// 	} else if (energyRatio < 0.7f) {
+// 		float conservationFactor = missile->energyManagementFactor +
+// 								   (1.0f - missile->energyManagementFactor) *
+// 									   ((energyRatio - missile->minEnergyThreshold) / (0.7f - missile->minEnergyThreshold));
+// 		maxLateralAccel *= conservationFactor;
+// 	}
+
+// 	float speedRatio = speed / missile->optimalSpeed;
+// 	if (speedRatio < 0.5f) {
+// 		maxLateralAccel *= (0.4f + 0.6f * (speedRatio / 0.5f));
+// 	}
+
+// 	float guidanceGain = 3.0f;
+
+// 	float dotProduct = currentDir[0] * missile->targetDirection[0] +
+// 					   currentDir[1] * missile->targetDirection[1] +
+// 					   currentDir[2] * missile->targetDirection[2];
+// 	float angleError = acosf(fmaxf(-1.0f, fminf(1.0f, dotProduct)));
+
+// 	if (angleError < 0.2f && energyRatio > 0.8f) {
+// 		guidanceGain = 2.0f;
+// 	} else if (angleError > 1.0f && energyRatio < 0.5f) {
+// 		guidanceGain = 1.5f;
+// 	}
+
+// 	float lateralAccel[3] = {
+// 		errorDir[0] * maxLateralAccel * guidanceGain,
+// 		errorDir[1] * maxLateralAccel * guidanceGain,
+// 		errorDir[2] * maxLateralAccel * guidanceGain};
+
+// 	float lateralAccelMag = sqrtf(lateralAccel[0] * lateralAccel[0] +
+// 								  lateralAccel[1] * lateralAccel[1] +
+// 								  lateralAccel[2] * lateralAccel[2]);
+// 	if (lateralAccelMag > maxLateralAccel) {
+// 		float scale = maxLateralAccel / lateralAccelMag;
+// 		lateralAccel[0] *= scale;
+// 		lateralAccel[1] *= scale;
+// 		lateralAccel[2] *= scale;
+// 	}
+
+// 	float dragForce[3] = {
+// 		-missile->drag * machDragMult * airDensity * missile->velocity[0] * speed,
+// 		-missile->drag * machDragMult * airDensity * missile->velocity[1] * speed,
+// 		-missile->drag * machDragMult * airDensity * missile->velocity[2] * speed};
+
+// 	float inducedDragMag = missile->inducedDragFactor * lateralAccelMag / G * speed * airDensity;
+// 	float inducedDragForce[3] = {
+// 		-missile->velocity[0] * inducedDragMag / (speed + 0.001f),
+// 		-missile->velocity[1] * inducedDragMag / (speed + 0.001f),
+// 		-missile->velocity[2] * inducedDragMag / (speed + 0.001f)};
+
+// 	float liftForce[3] = {0.0f, 0.0f, 0.0f};
+// 	if (speed > 10.0f) {
+// 		float dotProduct = currentDir[0] * missile->bodyOrientation[0] +
+// 						   currentDir[1] * missile->bodyOrientation[1] +
+// 						   currentDir[2] * missile->bodyOrientation[2];
+// 		float aoa = acosf(fmaxf(-1.0f, fminf(1.0f, dotProduct)));
+
+// 		if (aoa > 0.01f && aoa < 0.5f) {
+// 			float liftMag = missile->liftCoefficient * dynamicPressure *
+// 							missile->crossSectionArea * sinf(aoa);
+
+// 			float liftDir[3];
+// 			liftDir[0] = missile->bodyOrientation[1] * currentDir[2] -
+// 						 missile->bodyOrientation[2] * currentDir[1];
+// 			liftDir[1] = missile->bodyOrientation[2] * currentDir[0] -
+// 						 missile->bodyOrientation[0] * currentDir[2];
+// 			liftDir[2] = missile->bodyOrientation[0] * currentDir[1] -
+// 						 missile->bodyOrientation[1] * currentDir[0];
+
+// 			float liftDirMag = sqrtf(liftDir[0] * liftDir[0] +
+// 									 liftDir[1] * liftDir[1] +
+// 									 liftDir[2] * liftDir[2]);
+
+// 			if (liftDirMag > 0.001f) {
+// 				liftForce[0] = (liftDir[0] / liftDirMag) * liftMag;
+// 				liftForce[1] = (liftDir[1] / liftDirMag) * liftMag;
+// 				liftForce[2] = (liftDir[2] / liftDirMag) * liftMag;
+// 			}
+// 		}
+// 	}
+
+// 	float thrustAccel[3] = {0.0f, 0.0f, 0.0f};
+// 	if (speed > 0.1f && thrust > 0.0f) {
+// 		float thrustMag = thrust / totalMass;
+
+// 		float altitudeFactor = airDensity / SEA_LEVEL_DENSITY;
+// 		thrustMag *= (0.7f + 0.3f * altitudeFactor);
+
+// 		float dotProduct = currentDir[0] * missile->targetDirection[0] +
+// 						   currentDir[1] * missile->targetDirection[1] +
+// 						   currentDir[2] * missile->targetDirection[2];
+// 		float angleOfAttack = acosf(fmaxf(-1.0f, fminf(1.0f, dotProduct)));
+// 		float thrustEfficiency = missile->thrustVectoringEfficiency +
+// 								 (1.0f - missile->thrustVectoringEfficiency) * cosf(angleOfAttack);
+
+// 		if (energyRatio < 0.6f && speedRatio < 0.8f) {
+// 			float energyBoost = 1.0f + (1.0f - energyRatio) * 0.3f;
+// 			thrustMag *= energyBoost;
+// 		}
+
+// 		thrustAccel[0] = currentDir[0] * thrustMag * thrustEfficiency;
+// 		thrustAccel[1] = currentDir[1] * thrustMag * thrustEfficiency;
+// 		thrustAccel[2] = currentDir[2] * thrustMag * thrustEfficiency;
+// 	}
+
+// 	float dragAccel[3] = {
+// 		(dragForce[0] + inducedDragForce[0]) / totalMass,
+// 		(dragForce[1] + inducedDragForce[1]) / totalMass,
+// 		(dragForce[2] + inducedDragForce[2]) / totalMass};
+
+// 	float liftAccel[3] = {
+// 		liftForce[0] / totalMass,
+// 		liftForce[1] / totalMass,
+// 		liftForce[2] / totalMass};
+
+// 	float gravityAccel[3] = {0.0f, -G, 0.0f};
+
+// 	float totalAccel[3] = {
+// 		thrustAccel[0] + dragAccel[0] + lateralAccel[0] + liftAccel[0] + gravityAccel[0],
+// 		thrustAccel[1] + dragAccel[1] + lateralAccel[1] + liftAccel[1] + gravityAccel[1],
+// 		thrustAccel[2] + dragAccel[2] + lateralAccel[2] + liftAccel[2] + gravityAccel[2]};
+
+// 	missile->velocity[0] += totalAccel[0] * deltaTime;
+// 	missile->velocity[1] += totalAccel[1] * deltaTime;
+// 	missile->velocity[2] += totalAccel[2] * deltaTime;
+
+// 	missile->position[0] += missile->velocity[0] * deltaTime;
+// 	missile->position[1] += missile->velocity[1] * deltaTime;
+// 	missile->position[2] += missile->velocity[2] * deltaTime;
+
+// 	float orientationError[3] = {
+// 		currentDir[0] - missile->bodyOrientation[0],
+// 		currentDir[1] - missile->bodyOrientation[1],
+// 		currentDir[2] - missile->bodyOrientation[2]};
+
+// 	float turnRate = 5.0f * controlEffectiveness;
+
+// 	float torque[3] = {
+// 		orientationError[0] * missile->controlAuthority * 100.0f,
+// 		orientationError[1] * missile->controlAuthority * 100.0f,
+// 		orientationError[2] * missile->controlAuthority * 100.0f};
+
+// 	float angularAccel[3] = {
+// 		torque[0] / missile->momentOfInertia,
+// 		torque[1] / missile->momentOfInertia,
+// 		torque[2] / missile->momentOfInertia};
+
+// 	missile->angularVelocity[0] += angularAccel[0] * deltaTime;
+// 	missile->angularVelocity[1] += angularAccel[1] * deltaTime;
+// 	missile->angularVelocity[2] += angularAccel[2] * deltaTime;
+
+// 	float angularDamping = 0.95f;
+// 	missile->angularVelocity[0] *= angularDamping;
+// 	missile->angularVelocity[1] *= angularDamping;
+// 	missile->angularVelocity[2] *= angularDamping;
+
+// 	missile->bodyOrientation[0] += missile->angularVelocity[0] * deltaTime;
+// 	missile->bodyOrientation[1] += missile->angularVelocity[1] * deltaTime;
+// 	missile->bodyOrientation[2] += missile->angularVelocity[2] * deltaTime;
+
+// 	float bodyOrientMag = sqrtf(
+// 		missile->bodyOrientation[0] * missile->bodyOrientation[0] +
+// 		missile->bodyOrientation[1] * missile->bodyOrientation[1] +
+// 		missile->bodyOrientation[2] * missile->bodyOrientation[2]);
+
+// 	if (bodyOrientMag > 0.001f) {
+// 		missile->bodyOrientation[0] /= bodyOrientMag;
+// 		missile->bodyOrientation[1] /= bodyOrientMag;
+// 		missile->bodyOrientation[2] /= bodyOrientMag;
+// 	}
+
+// 	if (missile->fireSim) {
+// 		missile->fireSim->basePosition[0] = missile->position[0];
+// 		missile->fireSim->basePosition[1] = missile->position[1];
+// 		missile->fireSim->basePosition[2] = missile->position[2];
+
+// 		float newSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
+// 							   missile->velocity[1] * missile->velocity[1] +
+// 							   missile->velocity[2] * missile->velocity[2]);
+
+// 		if (newSpeed > 0.1f) {
+// 			missile->fireSim->windDirection[0] = -missile->velocity[0] * 10.0f;
+// 			missile->fireSim->windDirection[1] = -missile->velocity[1] * 10.0f;
+// 			missile->fireSim->windDirection[2] = -missile->velocity[2] * 10.0f;
+// 		}
+
+// 		float fireStepTime;
+// 		fireSimStep(missile->fireSim, deltaTime, &fireStepTime);
+// 	}
+
+// 	clock_gettime(CLOCK_MONOTONIC, &end);
+// 	*timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 +
+// 						(end.tv_nsec - start.tv_nsec) / 1e6);
+// }
+
 void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active) {
-	struct timespec start, end;
-	clock_gettime(CLOCK_MONOTONIC, &start);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-	missile->remainingTime -= deltaTime;
-	if (missile->remainingTime <= 0.0f) {
-		*active = false;
-		clock_gettime(CLOCK_MONOTONIC, &end);
-		*timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 +
-							(end.tv_nsec - start.tv_nsec) / 1e6);
-		return;
-	}
+    missile->remainingTime -= deltaTime;
+    if (missile->remainingTime <= 0.0f) {
+        *active = false;
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        *timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 +
+                            (end.tv_nsec - start.tv_nsec) / 1e6);
+        return;
+    }
 
-	float totalMass = missile->dryMass + missile->fuelMass;
+    // Update mass and cache values
+    missile->totalMass = missile->dryMass + missile->fuelMass;
+    float speed = sqrtf(missile->velocity[0] * missile->velocity[0] +
+                        missile->velocity[1] * missile->velocity[1] +
+                        missile->velocity[2] * missile->velocity[2]);
+    
+    float altitude = fmaxf(0.0f, missile->position[1]);
+    float airDensity = getAirDensity(altitude);
+    missile->machNumber = speed / SPEED_OF_SOUND;
+    missile->dynamicPressure = 0.5f * airDensity * speed * speed;
 
-	float thrust = 0.0f;
-	if (missile->burning && missile->fuelMass > 0.0f) {
-		float exhaustVelocity = missile->Isp * G;
-		float massFlowRate = missile->burnRate;
+    // REALISTIC PROPULSION SYSTEM
+    missile->thrust = 0.0f;
+    if (missile->burning && missile->fuelMass > 0.0f) {
+        float massFlowRate = missile->burnRate;
+        float fuelConsumed = massFlowRate * deltaTime;
+        
+        if (fuelConsumed > missile->fuelMass) {
+            fuelConsumed = missile->fuelMass;
+            missile->burning = 0;
+        }
+        missile->fuelMass -= fuelConsumed;
 
-		float fuelConsumed = massFlowRate * deltaTime;
-		if (fuelConsumed > missile->fuelMass) {
-			fuelConsumed = missile->fuelMass;
-			missile->burning = 0;
-		}
-		missile->fuelMass -= fuelConsumed;
+        // Rocket thrust: F = ṁ * Ve + (Pe - Pamb) * Ae
+        float exhaustVelocity = missile->Isp * G;
+        missile->thrust = massFlowRate * exhaustVelocity;
+        
+        // Altitude compensation (nozzle expansion)
+        float ambientPressure = airDensity * 287.0f * 288.0f; // P = ρRT approx
+        float seaLevelPressure = 101325.0f; // Standard sea level pressure
+        float pressureRatio = 1.0f - (ambientPressure / seaLevelPressure) * 0.2f;
+        missile->thrust *= (1.0f + pressureRatio * 0.25f); // Up to 25% thrust increase
+    }
 
-		thrust = massFlowRate * exhaustVelocity;
+    // AERODYNAMIC ANGLES CALCULATION
+    float currentDir[3];
+    if (speed > 0.1f) {
+        currentDir[0] = missile->velocity[0] / speed;
+        currentDir[1] = missile->velocity[1] / speed;
+        currentDir[2] = missile->velocity[2] / speed;
+    } else {
+        currentDir[0] = missile->bodyOrientation[0];
+        currentDir[1] = missile->bodyOrientation[1];
+        currentDir[2] = missile->bodyOrientation[2];
+    }
 
-		float energyReleasedPerSecond = missile->Q_spec * massFlowRate;
-		float theoreticalThrust = 2.0f * energyReleasedPerSecond / exhaustVelocity;
-		float combustionEfficiency = fminf(1.0f, thrust / (theoreticalThrust + 0.001f));
+    // Calculate angle of attack and sideslip
+    float bodyDotVelocity = missile->bodyOrientation[0] * currentDir[0] +
+                           missile->bodyOrientation[1] * currentDir[1] +
+                           missile->bodyOrientation[2] * currentDir[2];
+    missile->angleOfAttack = acosf(fmaxf(-1.0f, fminf(1.0f, bodyDotVelocity)));
+    
+    // Simple sideslip approximation
+    float sideDir[3] = {
+        missile->bodyOrientation[1] * currentDir[2] - missile->bodyOrientation[2] * currentDir[1],
+        missile->bodyOrientation[2] * currentDir[0] - missile->bodyOrientation[0] * currentDir[2],
+        missile->bodyOrientation[0] * currentDir[1] - missile->bodyOrientation[1] * currentDir[0]
+    };
+    missile->sideslipAngle = asinf(fmaxf(-1.0f, fminf(1.0f, sqrtf(sideDir[0]*sideDir[0] + sideDir[1]*sideDir[1] + sideDir[2]*sideDir[2]))));
 
-		if (combustionEfficiency < 0.95f) {
-			thrust *= 1.0f + (1.0f - combustionEfficiency) * 0.1f;
-		}
-	}
+    // PROPORTIONAL NAVIGATION GUIDANCE
+    float losRate[3] = {0.0f, 0.0f, 0.0f};
+    
+    // Calculate line-of-sight to target
+    float los[3] = {
+        missile->targetPosition[0] - missile->position[0],
+        missile->targetPosition[1] - missile->position[1],
+        missile->targetPosition[2] - missile->position[2]
+    };
+    
+    float losDistance = sqrtf(los[0]*los[0] + los[1]*los[1] + los[2]*los[2]);
+    if (losDistance > 0.1f) {
+        los[0] /= losDistance;
+        los[1] /= losDistance;
+        los[2] /= losDistance;
+        
+        // Simple LOS rate approximation
+        losRate[0] = los[0] - missile->targetDirection[0];
+        losRate[1] = los[1] - missile->targetDirection[1];
+        losRate[2] = los[2] - missile->targetDirection[2];
+        
+        // Update target direction
+        missile->targetDirection[0] = los[0];
+        missile->targetDirection[1] = los[1];
+        missile->targetDirection[2] = los[2];
+    }
+    
+    // Proportional navigation command
+    float closingSpeed = fmaxf(speed, 100.0f); // Minimum for guidance
+    float navGain = missile->guidanceGain * closingSpeed;
+    
+    float commandedAccel[3] = {
+        navGain * losRate[0],
+        navGain * losRate[1],
+        navGain * losRate[2]
+    };
 
-	float speed = sqrtf(missile->velocity[0] * missile->velocity[0] +
-						missile->velocity[1] * missile->velocity[1] +
-						missile->velocity[2] * missile->velocity[2]);
+    // Remove component along velocity to get pure lateral acceleration
+    float parallelComp = commandedAccel[0]*currentDir[0] + commandedAccel[1]*currentDir[1] + commandedAccel[2]*currentDir[2];
+    commandedAccel[0] -= parallelComp * currentDir[0];
+    commandedAccel[1] -= parallelComp * currentDir[1];
+    commandedAccel[2] -= parallelComp * currentDir[2];
 
-	float altitude = missile->position[1];
-	if (altitude < 0.0f) altitude = 0.0f;
-	float airDensity = getAirDensity(altitude);
-	float mach = speed / SPEED_OF_SOUND;
-	float machDragMult = getMachDragMultiplier(mach, missile->transsonicDragPeak, missile->supersonicDragFactor);
-	float dynamicPressure = 0.5f * airDensity * speed * speed;
+    // AERODYNAMIC PERFORMANCE LIMITS
+    float maxAvailableG = missile->maxGPull * G;
+    
+    // Dynamic pressure limits
+    if (missile->dynamicPressure > missile->maxDynamicPressure) {
+        float qFactor = missile->maxDynamicPressure / (missile->dynamicPressure + 0.001f);
+        maxAvailableG *= qFactor * qFactor; // Quadratic scaling for structural limits
+    }
+    
+    // AoA limits - stall prevention
+    float aoaLimit = fminf(missile->maxAoA, 0.35f); // ~20 degrees max
+    float aoaFactor = 1.0f - fmaxf(0.0f, (missile->angleOfAttack - aoaLimit * 0.7f) / (aoaLimit * 0.3f));
+    maxAvailableG *= fmaxf(0.1f, aoaFactor);
+    
+    // Control effectiveness (air density and speed dependent)
+    float controlEffectiveness = (airDensity / SEA_LEVEL_DENSITY) * missile->controlAuthority;
+    if (speed < 50.0f) {
+        controlEffectiveness *= (speed / 50.0f);
+    }
+    maxAvailableG *= controlEffectiveness;
 
-	float kineticEnergy = 0.5f * totalMass * speed * speed;
-	float potentialEnergy = totalMass * G * altitude;
-	float totalEnergy = kineticEnergy + potentialEnergy;
-	float maxPossibleKE = 0.5f * totalMass * missile->optimalSpeed * missile->optimalSpeed;
-	float energyRatio = kineticEnergy / maxPossibleKE;
+    // Limit commanded acceleration
+    float commandedAccelMag = sqrtf(commandedAccel[0]*commandedAccel[0] + 
+                                   commandedAccel[1]*commandedAccel[1] + 
+                                   commandedAccel[2]*commandedAccel[2]);
+    
+    if (commandedAccelMag > maxAvailableG && commandedAccelMag > 0.001f) {
+        float scale = maxAvailableG / commandedAccelMag;
+        commandedAccel[0] *= scale;
+        commandedAccel[1] *= scale;
+        commandedAccel[2] *= scale;
+        commandedAccelMag = maxAvailableG;
+    }
 
-	float currentDir[3] = {0.0f, 0.0f, 0.0f};
-	if (speed > 0.1f) {
-		currentDir[0] = missile->velocity[0] / speed;
-		currentDir[1] = missile->velocity[1] / speed;
-		currentDir[2] = missile->velocity[2] / speed;
-	}
+    // FIN CONTROL SYSTEM
+    // Convert acceleration command to fin deflections
+    float lateralDir[3];
+    if (commandedAccelMag > 0.1f) {
+        lateralDir[0] = commandedAccel[0] / commandedAccelMag;
+        lateralDir[1] = commandedAccel[1] / commandedAccelMag;
+        lateralDir[2] = commandedAccel[2] / commandedAccelMag;
+    } else {
+        lateralDir[0] = lateralDir[1] = lateralDir[2] = 0.0f;
+    }
+    
+    // Calculate required fin deflections
+    // For simplicity: 4 fins in + configuration, controlling pitch and yaw
+    float pitchDemand = lateralDir[1];  // Simplified
+    float yawDemand = lateralDir[0];    // Simplified
+    
+    // Limit fin deflections
+    missile->finDeflection[0] = fmaxf(-missile->finMaxDeflection, fminf(missile->finMaxDeflection, pitchDemand + yawDemand));
+    missile->finDeflection[1] = fmaxf(-missile->finMaxDeflection, fminf(missile->finMaxDeflection, -pitchDemand + yawDemand));
+    missile->finDeflection[2] = fmaxf(-missile->finMaxDeflection, fminf(missile->finMaxDeflection, -pitchDemand - yawDemand));
+    missile->finDeflection[3] = fmaxf(-missile->finMaxDeflection, fminf(missile->finMaxDeflection, pitchDemand - yawDemand));
 
-	float errorDir[3] = {
-		missile->targetDirection[0] - currentDir[0],
-		missile->targetDirection[1] - currentDir[1],
-		missile->targetDirection[2] - currentDir[2]};
+    // THRUST VECTORING CONTROL
+    // Calculate gimbal angles based on acceleration demand
+    if (missile->thrust > 0.0f && missile->maxGimbalAngle > 0.001f) {
+        float tvGain = 0.5f; // Thrust vectoring gain
+        
+        missile->gimbalAngle[0] = fmaxf(-missile->maxGimbalAngle, 
+                                       fminf(missile->maxGimbalAngle, pitchDemand * tvGain));
+        missile->gimbalAngle[1] = fmaxf(-missile->maxGimbalAngle, 
+                                       fminf(missile->maxGimbalAngle, yawDemand * tvGain));
+    } else {
+        missile->gimbalAngle[0] = missile->gimbalAngle[1] = 0.0f;
+    }
 
-	float errorMag = sqrtf(errorDir[0] * errorDir[0] +
-						   errorDir[1] * errorDir[1] +
-						   errorDir[2] * errorDir[2]);
+    // REALISTIC AERODYNAMIC FORCES
+    // Lift coefficient calculation with fin contribution
+    float baseLiftCoeff = missile->liftSlope * missile->angleOfAttack;
+    float finLiftCoeff = missile->finEffectiveness * (missile->finDeflection[0] + missile->finDeflection[1] + 
+                                                     missile->finDeflection[2] + missile->finDeflection[3]) / 4.0f;
+    
+    float totalLiftCoeff = baseLiftCoeff + finLiftCoeff;
+    totalLiftCoeff = fmaxf(-missile->maxLiftCoeff, fminf(missile->maxLiftCoeff, totalLiftCoeff));
+    
+    // Drag coefficient calculation
+    float inducedDragCoeff = (totalLiftCoeff * totalLiftCoeff) / 
+                            (3.14159f * missile->aspectRatio * missile->oswaldEfficiency);
+    float totalDragCoeff = missile->zeroLiftDrag + inducedDragCoeff + 
+                          missile->dragSlope * missile->angleOfAttack * missile->angleOfAttack;
 
-	if (errorMag > 0.01f) {
-		errorDir[0] /= errorMag;
-		errorDir[1] /= errorMag;
-		errorDir[2] /= errorMag;
-	}
+    // Mach effects on coefficients
+    float mach = missile->machNumber;
+    float machCorrection = 1.0f;
+    if (mach > 0.8f && mach < 1.2f) {
+        machCorrection = 1.0f + (mach - 0.8f) * 2.0f; // Transonic drag rise
+    } else if (mach >= 1.2f) {
+        machCorrection = 1.8f - (mach - 1.2f) * 0.3f; // Supersonic drag
+    }
+    totalDragCoeff *= machCorrection;
 
-	float maxLateralAccel = missile->maxGPull * G;
+    // Calculate forces
+    float liftMagnitude = totalLiftCoeff * missile->dynamicPressure * missile->wingArea;
+    float dragMagnitude = totalDragCoeff * missile->dynamicPressure * missile->crossSectionArea;
 
-	if (dynamicPressure > missile->maxDynamicPressure) {
-		float qLimit = missile->maxDynamicPressure / dynamicPressure;
-		maxLateralAccel *= qLimit;
-	}
+    // Lift direction (perpendicular to velocity and body)
+    float liftDir[3];
+    if (speed > 1.0f) {
+        liftDir[0] = missile->bodyOrientation[1] * currentDir[2] - missile->bodyOrientation[2] * currentDir[1];
+        liftDir[1] = missile->bodyOrientation[2] * currentDir[0] - missile->bodyOrientation[0] * currentDir[2];
+        liftDir[2] = missile->bodyOrientation[0] * currentDir[1] - missile->bodyOrientation[1] * currentDir[0];
+        
+        float liftDirMag = sqrtf(liftDir[0]*liftDir[0] + liftDir[1]*liftDir[1] + liftDir[2]*liftDir[2]);
+        if (liftDirMag > 0.001f) {
+            liftDir[0] /= liftDirMag;
+            liftDir[1] /= liftDirMag;
+            liftDir[2] /= liftDirMag;
+        }
+    } else {
+        liftDir[0] = liftDir[1] = liftDir[2] = 0.0f;
+    }
 
-	float controlEffectiveness = (airDensity / SEA_LEVEL_DENSITY) * missile->controlAuthority;
-	if (speed < 50.0f) {
-		controlEffectiveness *= (speed / 50.0f);
-	}
-	maxLateralAccel *= controlEffectiveness;
+    float liftForce[3] = {
+        liftDir[0] * liftMagnitude,
+        liftDir[1] * liftMagnitude,
+        liftDir[2] * liftMagnitude
+    };
 
-	maxLateralAccel *= (airDensity / SEA_LEVEL_DENSITY);
+    float dragForce[3] = {
+        -dragMagnitude * currentDir[0],
+        -dragMagnitude * currentDir[1],
+        -dragMagnitude * currentDir[2]
+    };
 
-	if (energyRatio < missile->minEnergyThreshold) {
-		float energyLimitFactor = energyRatio / missile->minEnergyThreshold;
-		maxLateralAccel *= (0.3f + 0.7f * energyLimitFactor);
-	} else if (energyRatio < 0.7f) {
-		float conservationFactor = missile->energyManagementFactor +
-								   (1.0f - missile->energyManagementFactor) *
-									   ((energyRatio - missile->minEnergyThreshold) / (0.7f - missile->minEnergyThreshold));
-		maxLateralAccel *= conservationFactor;
-	}
+    // THRUST FORCE WITH VECTORING
+    float thrustForce[3] = {0.0f, 0.0f, 0.0f};
+    if (missile->thrust > 0.0f) {
+        // Apply gimbal angles to thrust direction
+        float thrustDir[3] = {
+            missile->bodyOrientation[0],
+            missile->bodyOrientation[1],
+            missile->bodyOrientation[2]
+        };
+        
+        // Apply pitch gimbal (rotation around local X-axis)
+        float cosPitch = cosf(missile->gimbalAngle[0]);
+        float sinPitch = sinf(missile->gimbalAngle[0]);
+        float newY = thrustDir[1] * cosPitch - thrustDir[2] * sinPitch;
+        float newZ = thrustDir[1] * sinPitch + thrustDir[2] * cosPitch;
+        thrustDir[1] = newY;
+        thrustDir[2] = newZ;
+        
+        // Apply yaw gimbal (rotation around local Y-axis)
+        float cosYaw = cosf(missile->gimbalAngle[1]);
+        float sinYaw = sinf(missile->gimbalAngle[1]);
+        float newX = thrustDir[0] * cosYaw + thrustDir[2] * sinYaw;
+        newZ = -thrustDir[0] * sinYaw + thrustDir[2] * cosYaw;
+        thrustDir[0] = newX;
+        thrustDir[2] = newZ;
+        
+        thrustForce[0] = thrustDir[0] * missile->thrust;
+        thrustForce[1] = thrustDir[1] * missile->thrust;
+        thrustForce[2] = thrustDir[2] * missile->thrust;
+    }
 
-	float speedRatio = speed / missile->optimalSpeed;
-	if (speedRatio < 0.5f) {
-		maxLateralAccel *= (0.4f + 0.6f * (speedRatio / 0.5f));
-	}
+    // GRAVITY FORCE
+    float gravityForce[3] = {0.0f, -missile->totalMass * G, 0.0f};
 
-	float guidanceGain = 3.0f;
+    // TOTAL FORCES AND ACCELERATION
+    float totalForce[3] = {
+        thrustForce[0] + dragForce[0] + liftForce[0] + gravityForce[0],
+        thrustForce[1] + dragForce[1] + liftForce[1] + gravityForce[1],
+        thrustForce[2] + dragForce[2] + liftForce[2] + gravityForce[2]
+    };
 
-	float dotProduct = currentDir[0] * missile->targetDirection[0] +
-					   currentDir[1] * missile->targetDirection[1] +
-					   currentDir[2] * missile->targetDirection[2];
-	float angleError = acosf(fmaxf(-1.0f, fminf(1.0f, dotProduct)));
+    float totalAccel[3] = {
+        totalForce[0] / missile->totalMass,
+        totalForce[1] / missile->totalMass,
+        totalForce[2] / missile->totalMass
+    };
 
-	if (angleError < 0.2f && energyRatio > 0.8f) {
-		guidanceGain = 2.0f;
-	} else if (angleError > 1.0f && energyRatio < 0.5f) {
-		guidanceGain = 1.5f;
-	}
+    // Add guidance acceleration (simplified as direct force)
+    totalAccel[0] += commandedAccel[0];
+    totalAccel[1] += commandedAccel[1];
+    totalAccel[2] += commandedAccel[2];
 
-	float lateralAccel[3] = {
-		errorDir[0] * maxLateralAccel * guidanceGain,
-		errorDir[1] * maxLateralAccel * guidanceGain,
-		errorDir[2] * maxLateralAccel * guidanceGain};
+    // Store acceleration for guidance
+    missile->acceleration[0] = totalAccel[0];
+    missile->acceleration[1] = totalAccel[1];
+    missile->acceleration[2] = totalAccel[2];
 
-	float lateralAccelMag = sqrtf(lateralAccel[0] * lateralAccel[0] +
-								  lateralAccel[1] * lateralAccel[1] +
-								  lateralAccel[2] * lateralAccel[2]);
-	if (lateralAccelMag > maxLateralAccel) {
-		float scale = maxLateralAccel / lateralAccelMag;
-		lateralAccel[0] *= scale;
-		lateralAccel[1] *= scale;
-		lateralAccel[2] *= scale;
-	}
+    // INTEGRATE MOTION (Verlet integration for better stability)
+    missile->velocity[0] += totalAccel[0] * deltaTime;
+    missile->velocity[1] += totalAccel[1] * deltaTime;
+    missile->velocity[2] += totalAccel[2] * deltaTime;
 
-	float dragForce[3] = {
-		-missile->drag * machDragMult * airDensity * missile->velocity[0] * speed,
-		-missile->drag * machDragMult * airDensity * missile->velocity[1] * speed,
-		-missile->drag * machDragMult * airDensity * missile->velocity[2] * speed};
+    missile->position[0] += missile->velocity[0] * deltaTime;
+    missile->position[1] += missile->velocity[1] * deltaTime;
+    missile->position[2] += missile->velocity[2] * deltaTime;
 
-	float inducedDragMag = missile->inducedDragFactor * lateralAccelMag / G * speed * airDensity;
-	float inducedDragForce[3] = {
-		-missile->velocity[0] * inducedDragMag / (speed + 0.001f),
-		-missile->velocity[1] * inducedDragMag / (speed + 0.001f),
-		-missile->velocity[2] * inducedDragMag / (speed + 0.001f)};
+    // BODY ORIENTATION DYNAMICS
+    // Missile naturally aligns with velocity vector due to aerodynamics
+    float desiredOrientation[3] = {currentDir[0], currentDir[1], currentDir[2]};
+    
+    // Add control input from fins
+    float finControlTorque = missile->finEffectiveness * missile->dynamicPressure * 0.1f;
+    float controlInput[3] = {
+        lateralDir[0] * finControlTorque,
+        lateralDir[1] * finControlTorque,
+        lateralDir[2] * finControlTorque
+    };
 
-	float liftForce[3] = {0.0f, 0.0f, 0.0f};
-	if (speed > 10.0f) {
-		float dotProduct = currentDir[0] * missile->bodyOrientation[0] +
-						   currentDir[1] * missile->bodyOrientation[1] +
-						   currentDir[2] * missile->bodyOrientation[2];
-		float aoa = acosf(fmaxf(-1.0f, fminf(1.0f, dotProduct)));
+    // Aerodynamic restoring torque (weathervaning)
+    float aoaTorque = -missile->angleOfAttack * missile->dynamicPressure * 0.05f;
+    float restoringTorque[3] = {
+        aoaTorque * sideDir[0],
+        aoaTorque * sideDir[1],
+        aoaTorque * sideDir[2]
+    };
 
-		if (aoa > 0.01f && aoa < 0.5f) {
-			float liftMag = missile->liftCoefficient * dynamicPressure *
-							missile->crossSectionArea * sinf(aoa);
+    // Damping torque
+    float dampingTorque[3] = {
+        -missile->angularVelocity[0] * missile->rollDamping,
+        -missile->angularVelocity[1] * missile->rollDamping,
+        -missile->angularVelocity[2] * missile->rollDamping
+    };
 
-			float liftDir[3];
-			liftDir[0] = missile->bodyOrientation[1] * currentDir[2] -
-						 missile->bodyOrientation[2] * currentDir[1];
-			liftDir[1] = missile->bodyOrientation[2] * currentDir[0] -
-						 missile->bodyOrientation[0] * currentDir[2];
-			liftDir[2] = missile->bodyOrientation[0] * currentDir[1] -
-						 missile->bodyOrientation[1] * currentDir[0];
+    // Total torque
+    float totalTorque[3] = {
+        controlInput[0] + restoringTorque[0] + dampingTorque[0],
+        controlInput[1] + restoringTorque[1] + dampingTorque[1],
+        controlInput[2] + restoringTorque[2] + dampingTorque[2]
+    };
 
-			float liftDirMag = sqrtf(liftDir[0] * liftDir[0] +
-									 liftDir[1] * liftDir[1] +
-									 liftDir[2] * liftDir[2]);
+    // Angular acceleration
+    float angularAccel[3] = {
+        totalTorque[0] / missile->momentOfInertia,
+        totalTorque[1] / missile->momentOfInertia,
+        totalTorque[2] / missile->momentOfInertia
+    };
 
-			if (liftDirMag > 0.001f) {
-				liftForce[0] = (liftDir[0] / liftDirMag) * liftMag;
-				liftForce[1] = (liftDir[1] / liftDirMag) * liftMag;
-				liftForce[2] = (liftDir[2] / liftDirMag) * liftMag;
-			}
-		}
-	}
+    // Integrate angular velocity and orientation
+    missile->angularVelocity[0] += angularAccel[0] * deltaTime;
+    missile->angularVelocity[1] += angularAccel[1] * deltaTime;
+    missile->angularVelocity[2] += angularAccel[2] * deltaTime;
 
-	float thrustAccel[3] = {0.0f, 0.0f, 0.0f};
-	if (speed > 0.1f && thrust > 0.0f) {
-		float thrustMag = thrust / totalMass;
+    // Apply orientation change
+    float rotation[3] = {
+        missile->angularVelocity[0] * deltaTime,
+        missile->angularVelocity[1] * deltaTime,
+        missile->angularVelocity[2] * deltaTime
+    };
 
-		float altitudeFactor = airDensity / SEA_LEVEL_DENSITY;
-		thrustMag *= (0.7f + 0.3f * altitudeFactor);
+    // Simple rotation using small angle approximation
+    float rotationMag = sqrtf(rotation[0]*rotation[0] + rotation[1]*rotation[1] + rotation[2]*rotation[2]);
+    if (rotationMag > 0.001f) {
+        float axis[3] = {rotation[0]/rotationMag, rotation[1]/rotationMag, rotation[2]/rotationMag};
+        float sinHalf = sinf(rotationMag * 0.5f);
+        float cosHalf = cosf(rotationMag * 0.5f);
+        
+        // Quaternion rotation (simplified)
+        float newOrientation[3] = {
+            missile->bodyOrientation[0] * cosHalf + (axis[1] * missile->bodyOrientation[2] - axis[2] * missile->bodyOrientation[1]) * sinHalf,
+            missile->bodyOrientation[1] * cosHalf + (axis[2] * missile->bodyOrientation[0] - axis[0] * missile->bodyOrientation[2]) * sinHalf,
+            missile->bodyOrientation[2] * cosHalf + (axis[0] * missile->bodyOrientation[1] - axis[1] * missile->bodyOrientation[0]) * sinHalf
+        };
+        
+        missile->bodyOrientation[0] = newOrientation[0];
+        missile->bodyOrientation[1] = newOrientation[1];
+        missile->bodyOrientation[2] = newOrientation[2];
+        
+        // Normalize
+        float mag = sqrtf(missile->bodyOrientation[0]*missile->bodyOrientation[0] +
+                         missile->bodyOrientation[1]*missile->bodyOrientation[1] +
+                         missile->bodyOrientation[2]*missile->bodyOrientation[2]);
+        if (mag > 0.001f) {
+            missile->bodyOrientation[0] /= mag;
+            missile->bodyOrientation[1] /= mag;
+            missile->bodyOrientation[2] /= mag;
+        }
+    }
 
-		float dotProduct = currentDir[0] * missile->targetDirection[0] +
-						   currentDir[1] * missile->targetDirection[1] +
-						   currentDir[2] * missile->targetDirection[2];
-		float angleOfAttack = acosf(fmaxf(-1.0f, fminf(1.0f, dotProduct)));
-		float thrustEfficiency = missile->thrustVectoringEfficiency +
-								 (1.0f - missile->thrustVectoringEfficiency) * cosf(angleOfAttack);
+    // Update fire simulation
+    if (missile->fireSim) {
+        missile->fireSim->basePosition[0] = missile->position[0];
+        missile->fireSim->basePosition[1] = missile->position[1];
+        missile->fireSim->basePosition[2] = missile->position[2];
 
-		if (energyRatio < 0.6f && speedRatio < 0.8f) {
-			float energyBoost = 1.0f + (1.0f - energyRatio) * 0.3f;
-			thrustMag *= energyBoost;
-		}
+        if (speed > 0.1f) {
+            missile->fireSim->windDirection[0] = -missile->velocity[0] * 5.0f;
+            missile->fireSim->windDirection[1] = -missile->velocity[1] * 5.0f;
+            missile->fireSim->windDirection[2] = -missile->velocity[2] * 5.0f;
+        }
 
-		thrustAccel[0] = currentDir[0] * thrustMag * thrustEfficiency;
-		thrustAccel[1] = currentDir[1] * thrustMag * thrustEfficiency;
-		thrustAccel[2] = currentDir[2] * thrustMag * thrustEfficiency;
-	}
+        float fireStepTime;
+        fireSimStep(missile->fireSim, deltaTime, &fireStepTime);
+    }
 
-	float dragAccel[3] = {
-		(dragForce[0] + inducedDragForce[0]) / totalMass,
-		(dragForce[1] + inducedDragForce[1]) / totalMass,
-		(dragForce[2] + inducedDragForce[2]) / totalMass};
-
-	float liftAccel[3] = {
-		liftForce[0] / totalMass,
-		liftForce[1] / totalMass,
-		liftForce[2] / totalMass};
-
-	float gravityAccel[3] = {0.0f, -G, 0.0f};
-
-	float totalAccel[3] = {
-		thrustAccel[0] + dragAccel[0] + lateralAccel[0] + liftAccel[0] + gravityAccel[0],
-		thrustAccel[1] + dragAccel[1] + lateralAccel[1] + liftAccel[1] + gravityAccel[1],
-		thrustAccel[2] + dragAccel[2] + lateralAccel[2] + liftAccel[2] + gravityAccel[2]};
-
-	missile->velocity[0] += totalAccel[0] * deltaTime;
-	missile->velocity[1] += totalAccel[1] * deltaTime;
-	missile->velocity[2] += totalAccel[2] * deltaTime;
-
-	missile->position[0] += missile->velocity[0] * deltaTime;
-	missile->position[1] += missile->velocity[1] * deltaTime;
-	missile->position[2] += missile->velocity[2] * deltaTime;
-
-	float orientationError[3] = {
-		currentDir[0] - missile->bodyOrientation[0],
-		currentDir[1] - missile->bodyOrientation[1],
-		currentDir[2] - missile->bodyOrientation[2]};
-
-	float turnRate = 5.0f * controlEffectiveness;
-
-	float torque[3] = {
-		orientationError[0] * missile->controlAuthority * 100.0f,
-		orientationError[1] * missile->controlAuthority * 100.0f,
-		orientationError[2] * missile->controlAuthority * 100.0f};
-
-	float angularAccel[3] = {
-		torque[0] / missile->momentOfInertia,
-		torque[1] / missile->momentOfInertia,
-		torque[2] / missile->momentOfInertia};
-
-	missile->angularVelocity[0] += angularAccel[0] * deltaTime;
-	missile->angularVelocity[1] += angularAccel[1] * deltaTime;
-	missile->angularVelocity[2] += angularAccel[2] * deltaTime;
-
-	float angularDamping = 0.95f;
-	missile->angularVelocity[0] *= angularDamping;
-	missile->angularVelocity[1] *= angularDamping;
-	missile->angularVelocity[2] *= angularDamping;
-
-	missile->bodyOrientation[0] += missile->angularVelocity[0] * deltaTime;
-	missile->bodyOrientation[1] += missile->angularVelocity[1] * deltaTime;
-	missile->bodyOrientation[2] += missile->angularVelocity[2] * deltaTime;
-
-	float bodyOrientMag = sqrtf(
-		missile->bodyOrientation[0] * missile->bodyOrientation[0] +
-		missile->bodyOrientation[1] * missile->bodyOrientation[1] +
-		missile->bodyOrientation[2] * missile->bodyOrientation[2]);
-
-	if (bodyOrientMag > 0.001f) {
-		missile->bodyOrientation[0] /= bodyOrientMag;
-		missile->bodyOrientation[1] /= bodyOrientMag;
-		missile->bodyOrientation[2] /= bodyOrientMag;
-	}
-
-	if (missile->fireSim) {
-		missile->fireSim->basePosition[0] = missile->position[0];
-		missile->fireSim->basePosition[1] = missile->position[1];
-		missile->fireSim->basePosition[2] = missile->position[2];
-
-		float newSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
-							   missile->velocity[1] * missile->velocity[1] +
-							   missile->velocity[2] * missile->velocity[2]);
-
-		if (newSpeed > 0.1f) {
-			missile->fireSim->windDirection[0] = -missile->velocity[0] * 10.0f;
-			missile->fireSim->windDirection[1] = -missile->velocity[1] * 10.0f;
-			missile->fireSim->windDirection[2] = -missile->velocity[2] * 10.0f;
-		}
-
-		float fireStepTime;
-		fireSimStep(missile->fireSim, deltaTime, &fireStepTime);
-	}
-
-	clock_gettime(CLOCK_MONOTONIC, &end);
-	*timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 +
-						(end.tv_nsec - start.tv_nsec) / 1e6);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    *timeTook = (float)((end.tv_sec - start.tv_sec) * 1000.0 +
+                        (end.tv_nsec - start.tv_nsec) / 1e6);
 }
 
 void setMissileTarget(struct Missile *missile, float targetPos[3]) {
