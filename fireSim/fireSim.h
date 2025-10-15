@@ -8,28 +8,94 @@
 #include "../openGlShaders/gpuStruct.h"
 #include <stdbool.h>
 
-struct FireSOA {
-    float x[NUM_FIRE_PARTICLES];
-    float y[NUM_FIRE_PARTICLES];
-    float z[NUM_FIRE_PARTICLES];
-    float xVelocity[NUM_FIRE_PARTICLES];
-    float yVelocity[NUM_FIRE_PARTICLES];
-    float zVelocity[NUM_FIRE_PARTICLES];
-    float lifeTime[NUM_FIRE_PARTICLES];
-    float basePosition[3];        // Spawn point for particles
-    float startingColor[3];       // Initial particle color (RGB 0-1)
-    float fireColor[3];           // Hot flame color (RGB 0-1)
-    float smokeColor[3];          // Cool smoke color (RGB 0-1)
-    float windDirection[3];       // Environmental wind vector
-    float maxLifeTime;            // Particle lifetime before respawn (s)
-    float buoyancy;               // Upward force from heat (m/s²)
-    float drag;                   // Air resistance coefficient (0=none, 1=full stop)
-    float turbulence;             // Random motion intensity
-    float maxVelocity;            // Peak velocity reached (m/s)
-    float particlesSize;          // Render size of particles
-    float maxDistance;            // Farthest distance from base (m)
-    float swirlIntensity;         // Circular motion strength
-    float swirlFrequency;         // Rotation speed (Hz)
+// struct FireSOA {
+//     float x[NUM_FIRE_PARTICLES];
+//     float y[NUM_FIRE_PARTICLES];
+//     float z[NUM_FIRE_PARTICLES];
+//     float xVelocity[NUM_FIRE_PARTICLES];
+//     float yVelocity[NUM_FIRE_PARTICLES];
+//     float zVelocity[NUM_FIRE_PARTICLES];
+//     float lifeTime[NUM_FIRE_PARTICLES];
+//     float basePosition[3];        // Spawn point for particles
+//     float startingColor[3];       // Initial particle color (RGB 0-1)
+//     float fireColor[3];           // Hot flame color (RGB 0-1)
+//     float smokeColor[3];          // Cool smoke color (RGB 0-1)
+//     float windDirection[3];       // Environmental wind vector
+//     float maxLifeTime;            // Particle lifetime before respawn (s)
+//     float buoyancy;               // Upward force from heat (m/s²)
+//     float drag;                   // Air resistance coefficient (0=none, 1=full stop)
+//     float turbulence;             // Random motion intensity
+//     float maxVelocity;            // Peak velocity reached (m/s)
+//     float particlesSize;          // Render size of particles
+//     float maxDistance;            // Farthest distance from base (m)
+//     float swirlIntensity;         // Circular motion strength
+//     float swirlFrequency;         // Rotation speed (Hz)
+// };
+
+struct Missile {
+    // Core simulation
+    struct Seeker seeker;                 // Target seeking system (must keep)
+    float position[3];                    // Current position (m)
+    float velocity[3];                    // Current velocity (m/s)
+    float acceleration[3];                // NEW: Current acceleration (m/s²) for guidance
+    float targetPosition[3];              // NEW: Target position in world space
+    float targetDirection[3];             // Desired flight direction (unit vector)
+    
+    // Aerodynamic state
+    float bodyOrientation[3];             // Physical body alignment (unit vector)
+    float angularVelocity[3];             // Rotation rate (rad/s)
+    float angleOfAttack;                  // NEW: Current AoA (radians)
+    float sideslipAngle;                  // NEW: Current sideslip (radians)
+    
+    // Mass properties
+    float dryMass;                        // Empty weight (kg)
+    float fuelMass;                       // Remaining propellant (kg)
+    float totalMass;                      // NEW: Cached total mass
+    float momentOfInertia;                // Resistance to rotation (kg·m²)
+    
+    // Propulsion
+    float thrust;                         // NEW: Current thrust (N)
+    float Isp;                            // Specific impulse (s)
+    int burning;                          // Engine state
+    float burnRate;                       // Fuel consumption (kg/s)
+    float maxGimbalAngle;                 // NEW: Thrust vectoring limit (radians)
+    float gimbalAngle[2];                 // NEW: Current gimbal angles (pitch, yaw)
+    
+    // Aerodynamic coefficients
+    float zeroLiftDrag;                   // NEW: Cd0 - zero lift drag coefficient
+    float liftSlope;                      // NEW: dCl/dα (per radian)
+    float maxLiftCoeff;                   // NEW: Maximum lift coefficient
+    float dragSlope;                      // NEW: dCd/dα² (drag due to AoA)
+    float crossSectionArea;               // Frontal area (m²)
+    float wingArea;                       // NEW: Wing/fin reference area (m²)
+    float aspectRatio;                    // NEW: Wing aspect ratio
+    float oswaldEfficiency;               // NEW: Wing efficiency factor (0.8-0.95)
+    
+    // Control surfaces
+    float finMaxDeflection;               // NEW: Maximum fin deflection (radians)
+    float finDeflection[4];               // NEW: Individual fin deflections (rad)
+    float finEffectiveness;               // NEW: Fin control power
+    float rollDamping;                    // NEW: Natural roll damping
+    
+    // Performance limits
+    float maxGPull;                       // Maximum lateral acceleration (g)
+    float maxDynamicPressure;             // Structural limit (Pa)
+    float maxAoA;                         // NEW: Maximum angle of attack (rad)
+    float maxLoadFactor;                  // NEW: Maximum structural g-load
+    
+    // Guidance & control
+    float guidanceGain;                   // Proportional navigation gain
+    float controlAuthority;               // Control surface effectiveness
+    float energyManagementFactor;         // Energy conservation
+    float optimalSpeed;                   // Target cruise speed (m/s)
+    
+    // Simulation
+    float remainingTime;                  // Remaining simulation time (s)
+    struct FireSOA *fireSim;              // Exhaust plume particles (must keep)
+    
+    // NEW: Cached values for efficiency
+    float machNumber;                     // Current Mach number
+    float dynamicPressure;                // Current dynamic pressure (Pa)
 };
 
 enum MissileLock{
