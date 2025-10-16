@@ -27,7 +27,9 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
-- [ ] Move guidanceGain to missile struct
+- [ ] misslie view display
+- [ ] missiel lunch ( lock -> lunch -> if loss lock scan -> target )
+- [X] Move guidanceGain to missile struct
 - [ ] Move fire sim to same open cl structure
   - [ ] Try it again
 - [X] Simulate fluid on gpu move the code to separate file
