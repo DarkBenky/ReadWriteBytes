@@ -83,14 +83,14 @@ void InitializeMissile(struct Missile *missile) {
 	missile->dryMass = randRange(10.0f, 70.0f);
 	missile->fuelMass = randRange(350.0f, 900.0f);
 	missile->totalMass = missile->dryMass + missile->fuelMass;
-	missile->momentOfInertia = randRange(1.8f, 4.5f);
+	missile->momentOfInertia = randRange(1.8f, 7.5f);
 
 	// Propulsion
 	missile->thrust = 0.0f;
-	missile->Isp = randRange(220.0f, 280.0f);
+	missile->Isp = randRange(220.0f, 350.0f);
 	missile->burning = 1;
-	missile->burnRate = randRange(1.0f, 10.0f);
-	missile->maxGimbalAngle = randRange(0.05f, 0.25f);
+	missile->burnRate = randRange(1.0f, 15.0f);
+	missile->maxGimbalAngle = randRange(0.00f, 0.45f);
 	missile->gimbalAngle[0] = 0.0f;
 	missile->gimbalAngle[1] = 0.0f;
 
@@ -100,7 +100,7 @@ void InitializeMissile(struct Missile *missile) {
 	missile->maxLiftCoeff = randRange(1.2f, 2.0f);
 	missile->dragSlope = randRange(0.02f, 0.08f);
 	missile->crossSectionArea = randRange(0.015f, 0.045f);
-	missile->wingArea = randRange(0.12f, 0.25f);
+	missile->wingArea = randRange(0.12f, 0.85f);
 	missile->aspectRatio = randRange(2.0f, 5.0f);
 	missile->oswaldEfficiency = randRange(0.7f, 0.95f);
 
@@ -112,15 +112,15 @@ void InitializeMissile(struct Missile *missile) {
 	missile->rollDamping = randRange(0.05f, 0.2f);
 
 	// Performance limits
-	missile->maxGPull = randRange(20.0f, 40.0f);
-	missile->maxDynamicPressure = randRange(80000.0f, 150000.0f);
-	missile->maxAoA = randRange(0.25f, 0.35f);
+	missile->maxGPull = randRange(5.0f, 50.0f);
+	missile->maxDynamicPressure = randRange(80000.0f, 250000.0f);
+	missile->maxAoA = randRange(0.25f, 0.75f);
 	missile->maxLoadFactor = randRange(30.0f, 60.0f);
 
 	// Guidance & control
-	missile->guidanceGain = randRange(2.0f, 4.0f);
+	missile->guidanceGain = randRange(1.5f, 7.5f);
 	missile->controlAuthority = randRange(0.85f, 0.98f);
-	missile->energyManagementFactor = randRange(0.6f, 0.9f);
+	missile->energyManagementFactor = randRange(0.6f, 0.95f);
 	missile->optimalSpeed = randRange(300.0f, 900.0f);
 
 	// Simulation
@@ -573,7 +573,7 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 			missile->fireSim->windDirection[2] = -missile->velocity[2] * 8.0f;
 		}
 
-		fireSimStep(missile->fireSim, deltaTime, &fireSimulationTime);
+		fireSimStep(missile->fireSim, deltaTime, fireSimulationTime);
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &end);
@@ -667,7 +667,7 @@ void InitializeFireParticles(struct FireSOA *particles) {
 
 	particles->maxVelocity = 0.0f;
 	particles->maxDistance = 0.0f;
-	particles->particlesSize = 6.0f;
+	particles->particlesSize = 12.0f;
 	particles->windDirection[0] = 0.0f;
 	particles->windDirection[1] = 0.0f;
 	particles->windDirection[2] = 0.0f;

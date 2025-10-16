@@ -3816,6 +3816,10 @@ void randomMissileMovement(struct Missiles *missiles, struct Camera *camera) {
 									  camera->ray.origin[1] + randRange(0.0f, 200.0f),
 									  camera->ray.origin[2] + randRange(-200.0f, 200.0f)};
 
+				// float dist = 500.0f;
+
+				// setMissileTargetDirection(missiles->missiles[i], camera->ray.direction, &dist);
+
 				setMissileTarget(missiles->missiles[i], cameraPos);
 				// float dx = missiles->missiles[i]->position[0] - camera->ray.origin[0];
 				// float dy = missiles->missiles[i]->position[1] - camera->ray.origin[1];
