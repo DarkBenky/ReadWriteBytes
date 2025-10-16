@@ -1431,6 +1431,7 @@ struct GPUTimings {
 	float fluidSimulationTime;
 	float compositingTime;
 	float missileSimulationTime;
+	float missileFireSimulationTime;
 	float missileRenderingTime;
 };
 
@@ -3808,132 +3809,139 @@ void updateMouseStates() {
 }
 
 void randomMissileMovement(struct Missiles *missiles, struct Camera *camera) {
-	if (rand_01() < 0.9f) {
+	if (rand_01() < 0.25f) {
 		for (int i = 0; i < missiles->count; i++) {
-			float dx = missiles->missiles[i]->position[0] - camera->ray.origin[0];
-			float dy = missiles->missiles[i]->position[1] - camera->ray.origin[1];
-			float dz = missiles->missiles[i]->position[2] - camera->ray.origin[2];
-			float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+			if (missiles->active[i]) {
+				float cameraPos[3] = {camera->ray.origin[0] + randRange(-200.0f, 200.0f),
+									  camera->ray.origin[1] + randRange(0.0f, 200.0f),
+									  camera->ray.origin[2] + randRange(-200.0f, 200.0f)};
 
-			// Normalize direction vector
-			float inv_dist = (distance > 0.001f) ? (1.0f / distance) : 0.0f;
-			float norm_dx = dx * inv_dist;
-			float norm_dy = dy * inv_dist;
-			float norm_dz = dz * inv_dist;
+				setMissileTarget(missiles->missiles[i], cameraPos);
+				// float dx = missiles->missiles[i]->position[0] - camera->ray.origin[0];
+				// float dy = missiles->missiles[i]->position[1] - camera->ray.origin[1];
+				// float dz = missiles->missiles[i]->position[2] - camera->ray.origin[2];
+				// float distance = sqrtf(dx * dx + dy * dy + dz * dz);
 
-			// Different behavior based on missile index for variety
-			int behavior_type = i % 4;
+				// // Normalize direction vector
+				// float inv_dist = (distance > 0.001f) ? (1.0f / distance) : 0.0f;
+				// float norm_dx = dx * inv_dist;
+				// float norm_dy = dy * inv_dist;
+				// float norm_dz = dz * inv_dist;
 
-			if (distance < 50.0f) {
-				// Too close - fly away with different patterns
-				switch (behavior_type) {
-				case 0: // Direct retreat
-					missiles->missiles[i]->targetDirection[0] = norm_dx;
-					missiles->missiles[i]->targetDirection[1] = norm_dy;
-					missiles->missiles[i]->targetDirection[2] = norm_dz;
-					break;
-				case 1: // Spiral retreat
-					missiles->missiles[i]->targetDirection[0] = norm_dx + sinf(glfwGetTime() * 2.0f + i) * 0.3f;
-					missiles->missiles[i]->targetDirection[1] = norm_dy + cosf(glfwGetTime() * 1.5f + i) * 0.2f;
-					missiles->missiles[i]->targetDirection[2] = norm_dz;
-					break;
-				case 2: // Side-step retreat
-					missiles->missiles[i]->targetDirection[0] = norm_dx + norm_dz * 0.4f;
-					missiles->missiles[i]->targetDirection[1] = norm_dy;
-					missiles->missiles[i]->targetDirection[2] = norm_dz - norm_dx * 0.4f;
-					break;
-				case 3: // Vertical dodge retreat
-					missiles->missiles[i]->targetDirection[0] = norm_dx;
-					missiles->missiles[i]->targetDirection[1] = norm_dy + ((i % 2 == 0) ? 0.5f : -0.5f);
-					missiles->missiles[i]->targetDirection[2] = norm_dz;
-					break;
-				}
-			} else if (distance > 200.0f) {
-				// Too far - approach with different patterns
-				switch (behavior_type) {
-				case 0: // Direct approach
-					missiles->missiles[i]->targetDirection[0] = -norm_dx;
-					missiles->missiles[i]->targetDirection[1] = -norm_dy;
-					missiles->missiles[i]->targetDirection[2] = -norm_dz;
-					break;
-				case 1: // Weaving approach
-					missiles->missiles[i]->targetDirection[0] = -norm_dx + sinf(glfwGetTime() * 3.0f + i) * 0.2f;
-					missiles->missiles[i]->targetDirection[1] = -norm_dy;
-					missiles->missiles[i]->targetDirection[2] = -norm_dz + cosf(glfwGetTime() * 3.0f + i) * 0.2f;
-					break;
-				case 2: // Arc approach
-				{
-					float angle = glfwGetTime() * 1.0f + i * 1.57f; // 90 degrees apart
-					missiles->missiles[i]->targetDirection[0] = -norm_dx + sinf(angle) * 0.3f;
-					missiles->missiles[i]->targetDirection[1] = -norm_dy + cosf(angle * 0.5f) * 0.2f;
-					missiles->missiles[i]->targetDirection[2] = -norm_dz + cosf(angle) * 0.3f;
-				} break;
-				case 3: // Bobbing approach
-					missiles->missiles[i]->targetDirection[0] = -norm_dx;
-					missiles->missiles[i]->targetDirection[1] = -norm_dy + sinf(glfwGetTime() * 4.0f + i) * 0.3f;
-					missiles->missiles[i]->targetDirection[2] = -norm_dz;
-					break;
-				}
-			} else {
-				// Good distance - complex orbital/patrol patterns
-				float time = glfwGetTime();
-				float phase = i * 0.785f; // 45 degrees apart
+				// // Different behavior based on missile index for variety
+				// int behavior_type = i % 4;
 
-				switch (behavior_type) {
-				case 0: // Circular orbit
-				{
-					float orbit_radius = 0.4f;
-					float orbit_speed = 1.5f;
-					missiles->missiles[i]->targetDirection[0] = sinf(time * orbit_speed + phase) * orbit_radius;
-					missiles->missiles[i]->targetDirection[1] = (rand_01() * 2.0f - 1.0f) * 0.1f;
-					missiles->missiles[i]->targetDirection[2] = cosf(time * orbit_speed + phase) * orbit_radius;
-				} break;
-				case 1: // Figure-8 pattern
-				{
-					float fig8_scale = 0.3f;
-					missiles->missiles[i]->targetDirection[0] = sinf(time * 2.0f + phase) * fig8_scale;
-					missiles->missiles[i]->targetDirection[1] = sinf(time * 4.0f + phase) * fig8_scale * 0.5f;
-					missiles->missiles[i]->targetDirection[2] = cosf(time * 2.0f + phase) * fig8_scale;
-				} break;
-				case 2: // Patrol pattern (back and forth)
-				{
-					float patrol_intensity = 0.4f;
-					missiles->missiles[i]->targetDirection[0] = sinf(time * 1.2f + phase) * patrol_intensity;
-					missiles->missiles[i]->targetDirection[1] = cosf(time * 0.8f + phase) * 0.2f;
-					missiles->missiles[i]->targetDirection[2] = cosf(time * 1.2f + phase) * patrol_intensity;
-				} break;
-				case 3: // Helix pattern
-				{
-					float helix_radius = 0.3f;
-					float helix_speed = 2.0f;
-					missiles->missiles[i]->targetDirection[0] = sinf(time * helix_speed + phase) * helix_radius;
-					missiles->missiles[i]->targetDirection[1] = sinf(time * helix_speed * 0.3f + phase) * 0.4f;
-					missiles->missiles[i]->targetDirection[2] = cosf(time * helix_speed + phase) * helix_radius;
-				} break;
-				}
+				// if (distance < 50.0f) {
+				// 	// Too close - fly away with different patterns
+				// 	switch (behavior_type) {
+				// 	case 0: // Direct retreat
+				// 		missiles->missiles[i]->targetDirection[0] = norm_dx;
+				// 		missiles->missiles[i]->targetDirection[1] = norm_dy;
+				// 		missiles->missiles[i]->targetDirection[2] = norm_dz;
+				// 		break;
+				// 	case 1: // Spiral retreat
+				// 		missiles->missiles[i]->targetDirection[0] = norm_dx + sinf(glfwGetTime() * 2.0f + i) * 0.3f;
+				// 		missiles->missiles[i]->targetDirection[1] = norm_dy + cosf(glfwGetTime() * 1.5f + i) * 0.2f;
+				// 		missiles->missiles[i]->targetDirection[2] = norm_dz;
+				// 		break;
+				// 	case 2: // Side-step retreat
+				// 		missiles->missiles[i]->targetDirection[0] = norm_dx + norm_dz * 0.4f;
+				// 		missiles->missiles[i]->targetDirection[1] = norm_dy;
+				// 		missiles->missiles[i]->targetDirection[2] = norm_dz - norm_dx * 0.4f;
+				// 		break;
+				// 	case 3: // Vertical dodge retreat
+				// 		missiles->missiles[i]->targetDirection[0] = norm_dx;
+				// 		missiles->missiles[i]->targetDirection[1] = norm_dy + ((i % 2 == 0) ? 0.5f : -0.5f);
+				// 		missiles->missiles[i]->targetDirection[2] = norm_dz;
+				// 		break;
+				// 	}
+				// } else if (distance > 200.0f) {
+				// 	// Too far - approach with different patterns
+				// 	switch (behavior_type) {
+				// 	case 0: // Direct approach
+				// 		missiles->missiles[i]->targetDirection[0] = -norm_dx;
+				// 		missiles->missiles[i]->targetDirection[1] = -norm_dy;
+				// 		missiles->missiles[i]->targetDirection[2] = -norm_dz;
+				// 		break;
+				// 	case 1: // Weaving approach
+				// 		missiles->missiles[i]->targetDirection[0] = -norm_dx + sinf(glfwGetTime() * 3.0f + i) * 0.2f;
+				// 		missiles->missiles[i]->targetDirection[1] = -norm_dy;
+				// 		missiles->missiles[i]->targetDirection[2] = -norm_dz + cosf(glfwGetTime() * 3.0f + i) * 0.2f;
+				// 		break;
+				// 	case 2: // Arc approach
+				// 	{
+				// 		float angle = glfwGetTime() * 1.0f + i * 1.57f; // 90 degrees apart
+				// 		missiles->missiles[i]->targetDirection[0] = -norm_dx + sinf(angle) * 0.3f;
+				// 		missiles->missiles[i]->targetDirection[1] = -norm_dy + cosf(angle * 0.5f) * 0.2f;
+				// 		missiles->missiles[i]->targetDirection[2] = -norm_dz + cosf(angle) * 0.3f;
+				// 	} break;
+				// 	case 3: // Bobbing approach
+				// 		missiles->missiles[i]->targetDirection[0] = -norm_dx;
+				// 		missiles->missiles[i]->targetDirection[1] = -norm_dy + sinf(glfwGetTime() * 4.0f + i) * 0.3f;
+				// 		missiles->missiles[i]->targetDirection[2] = -norm_dz;
+				// 		break;
+				// 	}
+				// } else {
+				// 	// Good distance - complex orbital/patrol patterns
+				// 	float time = glfwGetTime();
+				// 	float phase = i * 0.785f; // 45 degrees apart
 
-				// Add some random variation to make it less predictable
-				missiles->missiles[i]->targetDirection[0] += (rand_01() * 2.0f - 1.0f) * 0.05f;
-				missiles->missiles[i]->targetDirection[1] += (rand_01() * 2.0f - 1.0f) * 0.05f;
-				missiles->missiles[i]->targetDirection[2] += (rand_01() * 2.0f - 1.0f) * 0.05f;
-			}
+				// 	switch (behavior_type) {
+				// 	case 0: // Circular orbit
+				// 	{
+				// 		float orbit_radius = 0.4f;
+				// 		float orbit_speed = 1.5f;
+				// 		missiles->missiles[i]->targetDirection[0] = sinf(time * orbit_speed + phase) * orbit_radius;
+				// 		missiles->missiles[i]->targetDirection[1] = (rand_01() * 2.0f - 1.0f) * 0.1f;
+				// 		missiles->missiles[i]->targetDirection[2] = cosf(time * orbit_speed + phase) * orbit_radius;
+				// 	} break;
+				// 	case 1: // Figure-8 pattern
+				// 	{
+				// 		float fig8_scale = 0.3f;
+				// 		missiles->missiles[i]->targetDirection[0] = sinf(time * 2.0f + phase) * fig8_scale;
+				// 		missiles->missiles[i]->targetDirection[1] = sinf(time * 4.0f + phase) * fig8_scale * 0.5f;
+				// 		missiles->missiles[i]->targetDirection[2] = cosf(time * 2.0f + phase) * fig8_scale;
+				// 	} break;
+				// 	case 2: // Patrol pattern (back and forth)
+				// 	{
+				// 		float patrol_intensity = 0.4f;
+				// 		missiles->missiles[i]->targetDirection[0] = sinf(time * 1.2f + phase) * patrol_intensity;
+				// 		missiles->missiles[i]->targetDirection[1] = cosf(time * 0.8f + phase) * 0.2f;
+				// 		missiles->missiles[i]->targetDirection[2] = cosf(time * 1.2f + phase) * patrol_intensity;
+				// 	} break;
+				// 	case 3: // Helix pattern
+				// 	{
+				// 		float helix_radius = 0.3f;
+				// 		float helix_speed = 2.0f;
+				// 		missiles->missiles[i]->targetDirection[0] = sinf(time * helix_speed + phase) * helix_radius;
+				// 		missiles->missiles[i]->targetDirection[1] = sinf(time * helix_speed * 0.3f + phase) * 0.4f;
+				// 		missiles->missiles[i]->targetDirection[2] = cosf(time * helix_speed + phase) * helix_radius;
+				// 	} break;
+				// 	}
 
-			// Normalize the final direction vector
-			float len = sqrtf(missiles->missiles[i]->targetDirection[0] * missiles->missiles[i]->targetDirection[0] +
-							  missiles->missiles[i]->targetDirection[1] * missiles->missiles[i]->targetDirection[1] +
-							  missiles->missiles[i]->targetDirection[2] * missiles->missiles[i]->targetDirection[2]);
-			if (len > 0.001f) {
-				float inv_len = 1.0f / len;
-				missiles->missiles[i]->targetDirection[0] *= inv_len;
-				missiles->missiles[i]->targetDirection[1] *= inv_len;
-				missiles->missiles[i]->targetDirection[2] *= inv_len;
-			}
+				// 	// Add some random variation to make it less predictable
+				// 	missiles->missiles[i]->targetDirection[0] += (rand_01() * 2.0f - 1.0f) * 0.05f;
+				// 	missiles->missiles[i]->targetDirection[1] += (rand_01() * 2.0f - 1.0f) * 0.05f;
+				// 	missiles->missiles[i]->targetDirection[2] += (rand_01() * 2.0f - 1.0f) * 0.05f;
+				// }
 
-			// Optional: Add height preference to keep missiles at reasonable altitude
-			float preferred_height = 30.0f;
-			float height_diff = missiles->missiles[i]->position[1] - preferred_height;
-			if (fabs(height_diff) > 20.0f) {
-				missiles->missiles[i]->targetDirection[1] += (height_diff > 0) ? -0.2f : 0.2f;
+				// // Normalize the final direction vector
+				// float len = sqrtf(missiles->missiles[i]->targetDirection[0] * missiles->missiles[i]->targetDirection[0] +
+				// 				  missiles->missiles[i]->targetDirection[1] * missiles->missiles[i]->targetDirection[1] +
+				// 				  missiles->missiles[i]->targetDirection[2] * missiles->missiles[i]->targetDirection[2]);
+				// if (len > 0.001f) {
+				// 	float inv_len = 1.0f / len;
+				// 	missiles->missiles[i]->targetDirection[0] *= inv_len;
+				// 	missiles->missiles[i]->targetDirection[1] *= inv_len;
+				// 	missiles->missiles[i]->targetDirection[2] *= inv_len;
+				// }
+
+				// // Optional: Add height preference to keep missiles at reasonable altitude
+				// float preferred_height = 30.0f;
+				// float height_diff = missiles->missiles[i]->position[1] - preferred_height;
+				// if (fabs(height_diff) > 20.0f) {
+				// 	missiles->missiles[i]->targetDirection[1] += (height_diff > 0) ? -0.2f : 0.2f;
+				// }
 			}
 		}
 	}
@@ -4224,9 +4232,9 @@ int main() {
 
 		clock_t startGridTime = clock();
 		if (!paused) {
-			UpdateAllMissiles(&missiles, 1 / TPS);
+			UpdateAllMissiles(&missiles, 1 / TPS, &gpuTimings.missileSimulationTime, &gpuTimings.missileFireSimulationTime);
 			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime); // Always update grid data
-			fireSimStep(fireParticles, 1 / TPS, &gpuTimings.missileSimulationTime);
+			fireSimStep(fireParticles, 1 / TPS, &gpuTimings.fireSimulationTime);
 		}
 		clock_t endGridTime = clock();
 		dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;

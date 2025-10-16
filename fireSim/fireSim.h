@@ -32,74 +32,6 @@ struct FireSOA {
     float swirlFrequency;         // Rotation speed (Hz)
 };
 
-struct Missile {
-    // Core simulation (UNCHANGED)
-    struct Seeker seeker;
-    float position[3];
-    float velocity[3];
-    float acceleration[3];
-    float targetPosition[3];
-    float targetDirection[3];
-    
-    // Aerodynamic state
-    float bodyOrientation[3];
-    float angularVelocity[3];
-    float angleOfAttack;
-    float sideslipAngle;
-    
-    // Mass properties  
-    float dryMass;
-    float fuelMass;
-    float totalMass;
-    float momentOfInertia;
-    
-    // Propulsion
-    float thrust;
-    float Isp;
-    int burning;
-    float burnRate;
-    float maxGimbalAngle;
-    float gimbalAngle[2];
-    
-    // Aerodynamic coefficients
-    float zeroLiftDrag;
-    float liftSlope;
-    float maxLiftCoeff;
-    float dragSlope; 
-    float crossSectionArea;
-    float wingArea;
-    float aspectRatio;
-    float oswaldEfficiency;
-    
-    // Control surfaces
-    float finMaxDeflection;
-    float finDeflection[4];
-    float finEffectiveness;
-    float rollDamping;
-    
-    // Performance limits
-    float maxGPull;
-    float maxDynamicPressure;
-    float maxAoA;
-    float maxLoadFactor;
-    
-    // Guidance & control
-    float guidanceGain;
-    float controlAuthority;
-    float energyManagementFactor;
-    float optimalSpeed;
-    
-    // Simulation
-    float remainingTime;
-    struct FireSOA *fireSim;
-    
-    // Cached values
-    float machNumber;
-    float dynamicPressure;
-    
-    // NEW: Store previous LOS for proper PN guidance
-    float prevLOS[3];
-};
 
 enum MissileLock{
     Searching,
@@ -114,37 +46,76 @@ struct Seeker {
 
 };
 
-struct Missile {
-    struct Seeker seeker;
-    float position[3];                    // Current position in world space (m)
-    float velocity[3];                    // Current velocity vector (m/s)
-    float targetDirection[3];             // Desired flight direction (unit vector)
-    float bodyOrientation[3];             // Physical body alignment (unit vector)
-    float angularVelocity[3];             // Rotation rate (rad/s)
-    float drag;                           // Base drag coefficient (lower=more aerodynamic)
-    float inducedDragFactor;              // Additional drag from maneuvering (0=none, 0.2=high)
-    float transsonicDragPeak;             // Drag multiplier at Mach 0.8-1.2 (1=none, 4=severe)
-    float supersonicDragFactor;           // Drag increase above Mach 1.2 per Mach (0.3=low, 0.7=high)
-    float crossSectionArea;               // Frontal area for drag/lift (m²)
-    float liftCoefficient;                // Body lift generation efficiency (0.25=low, 0.55=high)
-    float maxDynamicPressure;             // Structural limit (Pa, 80k=weak, 150k=strong)
-    float thrustVectoringEfficiency;      // Thrust effectiveness at angle (0.75=poor, 0.95=excellent)
-    float momentOfInertia;                // Resistance to rotation (kg·m², lower=more agile)
-    float controlAuthority;               // Control surface effectiveness (0.85=limited, 0.98=excellent)
-    float energyManagementFactor;         // Conservation aggressiveness (0.6=aggressive turns, 0.9=conservative)
-    float minEnergyThreshold;             // Energy ratio to start limiting maneuvers (0.3=late, 0.5=early)
-    float optimalSpeed;                   // Target cruise speed (m/s)
-    float dryMass;                        // Empty weight (kg)
-    float fuelMass;                       // Remaining propellant (kg)
-    float maxGPull;                       // Maximum lateral acceleration (g-force)
-    float Isp;                            // Specific impulse efficiency (s, higher=better)
-    int burning;                          // Engine state: 1=on, 0=off
-    float burnRate;                       // Fuel consumption rate (kg/s)
-    float Q_spec;                         // Energy per kg of fuel (J/kg)
-    float remainingTime;                  // Remaining simulation time (s)
-    struct FireSOA *fireSim;              // Exhaust plume particles
-};
 
+struct Missile {
+    // Core simulation
+    struct Seeker seeker;                 // Target detection and tracking system
+    float position[3];                    // World coordinates (x, y, z) in meters
+    float velocity[3];                    // Velocity vector (m/s)
+    float acceleration[3];                // Current acceleration vector (m/s²)
+    float targetPosition[3];              // Absolute target position in world space
+    float targetDirection[3];             // Normalized direction to target (unit vector)
+    
+    // Aerodynamic state
+    float bodyOrientation[3];             // Missile's forward direction (unit vector)
+    float angularVelocity[3];             // Rotation rates around axes (rad/s)
+    float angleOfAttack;                  // Angle between body and velocity vector (radians)
+    float sideslipAngle;                  // Side-slip angle for crosswind effects (radians)
+    
+    // Mass properties  
+    float dryMass;                        // Empty missile mass without fuel (kg)
+    float fuelMass;                       // Remaining propellant mass (kg)
+    float totalMass;                      // Current total mass (dry + fuel) (kg)
+    float momentOfInertia;                // Resistance to rotational acceleration (kg·m²)
+    
+    // Propulsion
+    float thrust;                         // Current thrust output (Newtons)
+    float Isp;                            // Specific impulse - fuel efficiency (seconds)
+    int burning;                          // Engine state: 1=active, 0=shutdown
+    float burnRate;                       // Fuel consumption rate (kg/s)
+    float maxGimbalAngle;                 // Maximum nozzle deflection angle (radians)
+    float gimbalAngle[2];                 // Current pitch/yaw gimbal angles (radians)
+    
+    // Aerodynamic coefficients
+    float zeroLiftDrag;                   // Base drag coefficient at zero lift (Cd0)
+    float liftSlope;                      // Lift curve slope - how much lift per AoA (per radian)
+    float maxLiftCoeff;                   // Maximum achievable lift coefficient (Cl_max)
+    float dragSlope;                      // Drag increase with AoA squared
+    float crossSectionArea;               // Frontal area for drag calculations (m²)
+    float wingArea;                       // Wing/fin reference area for lift (m²)
+    float aspectRatio;                    // Wing aspect ratio (span²/area)
+    float oswaldEfficiency;               // Wing efficiency factor (0.7-0.95 typical)
+    
+    // Control surfaces
+    float finMaxDeflection;               // Maximum fin deflection angle (radians)
+    float finDeflection[4];               // Individual fin angles [rad] for 4-fin configuration
+    float finEffectiveness;               // Fin control power (0-1, higher = more responsive)
+    float rollDamping;                    // Natural roll damping coefficient
+    
+    // Performance limits
+    float maxGPull;                       // Maximum lateral acceleration capability (g-forces)
+    float maxDynamicPressure;             // Structural limit for dynamic pressure (Pascals)
+    float maxAoA;                         // Maximum safe angle of attack (radians)
+    // Example: Higher maxAoA (e.g., 0.52 rad/30°) allows more aggressive turns but risks stall
+    float maxLoadFactor;                  // Maximum structural g-load
+    
+    // Guidance & control
+    float guidanceGain;                   // Proportional navigation gain constant
+    // Example: Higher gain (4-6) = more aggressive interception, lower (2-3) = smoother pursuit
+    float controlAuthority;               // Overall control system effectiveness (0-1)
+    float energyManagementFactor;         // Energy conservation vs maneuver tradeoff (0-1)
+    // Example: Lower value (0.6) = aggressive turns, higher (0.9) = energy conservation
+    float optimalSpeed;                   // Design cruise speed for best performance (m/s)
+    
+    // Simulation
+    float remainingTime;                  // Time until self-destruct (seconds)
+    struct FireSOA *fireSim;              // Exhaust plume and visual effects
+    
+    // Cached values (updated each frame)
+    float machNumber;                     // Current Mach number (speed/speed_of_sound)
+    float dynamicPressure;                // Current dynamic pressure 0.5*ρ*v² (Pa)
+    float prevLOS[3];                     // Previous line-of-sight vector for guidance
+};
 
 struct Missiles {
     struct Missile *missiles[MAX_FIRE_SIMS];
@@ -157,12 +128,14 @@ void InitializeFireParticles(struct FireSOA *particles);
 void fireSimStep(struct FireSOA *particles, float deltaTime, float *timeTook);
 
 void InitializeMissile(struct Missile *missile);
-void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active);
+void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active, float *fireSimulationTime);
 void setMissileTarget(struct Missile *missile, float targetPos[3]);
+void setMissileTargetDirection(struct Missile *missile, float targetDir[3], float *targetDist);
 void cleanupMissile(struct Missile *missile);
 
 void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *missileModel);
-void UpdateAllMissiles(struct Missiles *missiles, float deltaTime);
+void UpdateAllMissiles(struct Missiles *missiles, float deltaTime, float *simTime, float *fireSimulationTime);
 void CleanupMissiles(struct Missiles *missiles);
+float randRange(float min, float max);
 
 #endif

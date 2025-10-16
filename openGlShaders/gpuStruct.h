@@ -4,6 +4,7 @@
 
 #include <CL/cl.h>
 #include <GL/gl.h>
+#include <stdbool.h>
 
 struct OpenCLContext {
 	cl_platform_id platform;
