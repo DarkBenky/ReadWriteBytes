@@ -652,7 +652,23 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 	}
 }
 
-void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs) {
+void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool fire) {
+	float totalTimeTookMs = 0.0f;
+	for (int i = 0; i < missiles->count; i++) {
+		struct Missile *missile = missiles->missiles[i];
+		float tempTimeTookMs = 0.0f;
+		float targetDir[3] = {0.0f, 0.0f, 0.0f};
+		bool foundTarget = false;
+		renderAllMissileFires(ocl,
+			missiles,
+			&missile->seeker.seekerCamera,
+			&tempTimeTookMs,
+			1,
+			&foundTarget,
+			&targetDir);
+		totalTimeTookMs += tempTimeTookMs;
+		missileSeekStep(missile, fire, foundTarget, targetDir);
+	}
 }
 
 void compositeBuffersOpenCL(

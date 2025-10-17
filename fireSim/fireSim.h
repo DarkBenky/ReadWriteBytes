@@ -2,7 +2,7 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 750
-#define MAX_FIRE_SIMS 128
+#define MAX_FIRE_SIMS 1
 #define G 9.81f
 
 #include "../openGlShaders/gpuStruct.h"
@@ -137,6 +137,7 @@ void cleanupMissile(struct Missile *missile);
 void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *missileModel);
 void UpdateAllMissiles(struct Missiles *missiles, float deltaTime, float *simTime, float *fireSimulationTime);
 void CleanupMissiles(struct Missiles *missiles);
+void missileSeekStep(struct Missile *missile, bool fire, bool foundTarget, float targetDir[3]);
 float randRange(float min, float max);
 
 #endif
