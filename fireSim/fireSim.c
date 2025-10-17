@@ -44,7 +44,7 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerCamera.fov = 8.5f;
 	missile->seeker.seekerFov = 60.0f;
 	missile->seeker.seekerSteps = 1;
-	missile->seeker.lockState = Searching;
+	missile->seeker.lockState = Lunching;
 
 	// Core simulation
 	missile->position[0] = randRange(-250.0f, 250.0f);
@@ -184,6 +184,14 @@ void missileSeekStep(struct Missile *missile) {
 	} else if (missile->seeker.lockState == Tracking) {
 		// kernel will provide center of the bounding box of the target in screen space that we can use to adjust the seeker camera direction if found no bounding box we switch back to searching mode
 		return;
+	} else if (missile->seeker.lockState == Lunching) {
+		missile->seeker.seekerCamera.ray.direction[0] = missile->targetDirection[0];
+		missile->seeker.seekerCamera.ray.direction[1] = missile->targetDirection[1];
+		missile->seeker.seekerCamera.ray.direction[2] = missile->targetDirection[2];
+		missile->seeker.seekerCamera.ray.origin[0] = missile->position[0];
+		missile->seeker.seekerCamera.ray.origin[1] = missile->position[1];
+		missile->seeker.seekerCamera.ray.origin[2] = missile->position[2];
+		missile->seeker.lockState = Tracking;
 	}
 	return;
 }
@@ -807,7 +815,11 @@ void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *
 
 void UpdateAllMissiles(struct Missiles *missiles, float deltaTime, float *simTime, float *fireSimulationTime) {
 	for (int i = 0; i < missiles->count; i++) {
-		missileSimStep(missiles->missiles[i], deltaTime, simTime, &missiles->active[i], fireSimulationTime);
+		if (missiles->active[i] && missiles->missiles[i]->seeker.lockState != Lunching) {
+			missileSimStep(missiles->missiles[i], deltaTime, simTime, &missiles->active[i], fireSimulationTime);
+		} else {
+			missileSeekStep(missiles->missiles[i]);
+		}
 	}
 }
 

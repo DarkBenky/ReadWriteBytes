@@ -36,6 +36,7 @@ struct FireSOA {
 enum MissileLock{
     Searching,
     Tracking,
+    Lunching
 };
 
 struct Seeker {
