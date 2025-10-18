@@ -2,7 +2,7 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 250
-#define MAX_FIRE_SIMS 24
+#define MAX_FIRE_SIMS 2
 #define G 9.81f
 
 #include "../openGlShaders/gpuStruct.h"

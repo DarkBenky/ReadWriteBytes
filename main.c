@@ -763,6 +763,7 @@ void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missi
 		float tempTimeTookMs = 0.0f;
 		float targetDir[3] = {0.0f, 0.0f, 0.0f};
 		bool foundTarget = false;
+		bool fired = False;
 		if (fire && !active) {
 			float seekerOffset = 5.0f;
 			missile->seeker.seekerCamera.ray.origin[0] = camera->ray.origin[0] + camera->ray.direction[0] * seekerOffset;
@@ -789,6 +790,7 @@ void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missi
 			missile->targetPosition[0] = camera->ray.origin[0] + camera->ray.direction[0] * 100.0f;
 			missile->targetPosition[1] = camera->ray.origin[1] + camera->ray.direction[1] * 100.0f;
 			missile->targetPosition[2] = camera->ray.origin[2] + camera->ray.direction[2] * 100.0f;
+			fire = true;
 		}
 
 		renderAllMissileFires(ocl,
@@ -804,7 +806,9 @@ void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missi
 		printf("active: %d\n", missiles->active[i]);
 		missileSeekStep(missile, fire, foundTarget, targetDir, &missiles->active[i], deltaTime, &tmp1, &tmp2);
 		totalTimeTookMs += tmp1 + tmp2;
-		fire = false;
+		if (!fired) {
+			fire = false;
+		}
 	}
 	*timeTookMs = totalTimeTookMs;
 }

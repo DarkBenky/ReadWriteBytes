@@ -853,7 +853,7 @@ void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *
 			missiles->missiles[i]->targetDirection[2] /= len;
 		}
 
-		missiles->active[i] = true;
+		missiles->active[i] = false;
 	}
 }
 
