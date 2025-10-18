@@ -94,8 +94,9 @@ const char *clErrorString(cl_int err) {
 #define CL_ERROR(err, call) CHECK_CL(err, call)
 
 struct KeyState {
-	bool keys[GLFW_KEY_LAST + 1];	  // Array to store state of all keys
-	bool prevKeys[GLFW_KEY_LAST + 1]; // Previous frame state for detecting press/release
+	bool keys[GLFW_KEY_LAST + 1];		 // Array to store state of all keys
+	bool prevKeys[GLFW_KEY_LAST + 1];	 // Previous frame state for detecting press/release
+	bool justPressed[GLFW_KEY_LAST + 1]; // Latched presses set in callback
 };
 
 struct MouseState {
@@ -294,7 +295,72 @@ void filterOverlapOpenCL(
 	clFinish(ocl->queue);
 }
 
-void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs, int mode, bool *foundTarget, float (*targetDirection)[3]) {
+int launchOverlayImageOpenCL(
+	struct OpenCLContext *ocl,
+	cl_mem OutputBuffer, // target buffer (device) where overlay will be written
+	cl_mem ImageBuffer,	 // source image buffer (device) laid out according to displayMode)
+	int screenWidth,
+	int screenHeight,
+	int imageWidth,
+	int imageHeight,
+	int Outputmode,	 // 0=RGB, 1=RGBA, 2=Grayscale
+	int displayMode, // 0=RGB, 1=RGBA, 2=Grayscale
+	float *outGpuMs,
+	int posX,
+	int posY) {
+	if (!ocl || !ocl->overlayImage_kernel) {
+		fprintf(stderr, "Overlay kernel or context not initialized\n");
+		return 0;
+	}
+
+	cl_int err;
+	cl_event evt = NULL;
+
+	// set kernel args
+	err = clSetKernelArg(ocl->overlayImage_kernel, 0, sizeof(cl_mem), &OutputBuffer);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 1, sizeof(cl_mem), &ImageBuffer);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 2, sizeof(cl_int), &screenWidth);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 3, sizeof(cl_int), &screenHeight);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 4, sizeof(cl_int), &imageWidth);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 5, sizeof(cl_int), &imageHeight);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 6, sizeof(cl_int), &Outputmode);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 7, sizeof(cl_int), &displayMode);
+	// new args for position
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 8, sizeof(cl_int), &posX);
+	err |= clSetKernelArg(ocl->overlayImage_kernel, 9, sizeof(cl_int), &posY);
+
+	if (err != CL_SUCCESS) {
+		fprintf(stderr, "Error setting OverlayImage kernel args: %s (%d)\n", clErrorString(err), err);
+		return 0;
+	}
+
+	size_t global[2] = {(size_t)screenWidth, (size_t)screenHeight};
+
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->overlayImage_kernel, 2, NULL, global, NULL, 0, NULL, &evt);
+	if (err != CL_SUCCESS) {
+		fprintf(stderr, "Error enqueuing OverlayImage kernel: %s (%d)\n", clErrorString(err), err);
+		return 0;
+	}
+
+	// Wait and optionally measure time
+	clFinish(ocl->queue);
+
+	if (outGpuMs != NULL) {
+		cl_ulong t0 = 0, t1 = 0;
+		if (evt) {
+			clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(t0), &t0, NULL);
+			clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(t1), &t1, NULL);
+			*outGpuMs = (t1 - t0) * 1e-6f;
+		} else {
+			*outGpuMs = 0.0f;
+		}
+	}
+
+	if (evt) clReleaseEvent(evt);
+	return 1;
+}
+
+void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs, int mode, bool *foundTarget, float (*targetDirection)[3], int idx) {
 	if (!missiles || missiles->count == 0) return;
 
 	cl_int err;
@@ -350,7 +416,10 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 	// Render each missile's body and fire
 	for (int i = 0; i < missiles->count; i++) {
 		struct Missile *missile = missiles->missiles[i];
-		if (!missile || !missiles->active[i]) continue;
+		if ((!missile || !missiles->active[i]) && mode == 0) continue;
+		if (idx == i && mode != 0) {
+			continue;
+		}
 
 		// === RENDER MISSILE BODY ===
 		cl_float3 missile_pos = {missile->position[0], missile->position[1], missile->position[2]};
@@ -600,16 +669,21 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 									  0, NULL, NULL);
 			clFinish(ocl->queue);
 		}
+		// Updated seeker mode code with optimized GPU readback
+
 	} else if (mode != 0) {
-		// seeker functionality
+		printf("seeker mode\n");
+
+		// Seeker functionality
 		cl_int seekerW = SEEKER_SIZE;
 		cl_int seekerH = SEEKER_SIZE;
 		cl_float3 cam_pos_k = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
 		cl_float3 cam_dir_k = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
 		cl_float fov_k = camera->fov;
-		cl_int sampleRadius = 8;
-		cl_int iterations = 3;
+		cl_int sampleRadius = 5;
+		cl_int iterations = 1;
 
+		// Set kernel arguments
 		err = clSetKernelArg(ocl->missile_seeker_kernel, 0, sizeof(cl_mem), &ocl->buffer_seeker_distances);
 		err |= clSetKernelArg(ocl->missile_seeker_kernel, 1, sizeof(cl_mem), &ocl->buffer_seeker_temp);
 		err |= clSetKernelArg(ocl->missile_seeker_kernel, 2, sizeof(cl_mem), &ocl->seeker_output);
@@ -622,53 +696,117 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 		err |= clSetKernelArg(ocl->missile_seeker_kernel, 9, sizeof(cl_int), &sampleRadius);
 		err |= clSetKernelArg(ocl->missile_seeker_kernel, 10, sizeof(cl_int), &iterations);
 
+		if (err != CL_SUCCESS) {
+			printf("Error setting kernel arguments: %d\n", err);
+			return; // or handle error appropriately
+		}
+
+		// Launch kernel
 		size_t seeker_global_size[2] = {SEEKER_SIZE, SEEKER_SIZE};
 		err = clEnqueueNDRangeKernel(ocl->queue, ocl->missile_seeker_kernel, 2, NULL,
 									 seeker_global_size, NULL, 0, NULL, NULL);
-		clFinish(ocl->queue);
 
 		if (err != CL_SUCCESS) {
 			printf("Error executing missile seeker kernel: %d\n", err);
+			return;
 		}
 
-		// read back seeker output
-		cl_float4 hotspot;
-		cl_float3 hotspotDir;
-		err = clEnqueueReadBuffer(ocl->queue, ocl->seeker_output, CL_TRUE, 0, sizeof(cl_float4), &hotspot, 0, NULL, NULL);
-		err |= clEnqueueReadBuffer(ocl->queue, ocl->seeker_dir, CL_TRUE, 0, sizeof(cl_float3), &hotspotDir, 0, NULL, NULL);
+		// Use mapped memory for faster readback
+		cl_float4 *hotspot = (cl_float4 *)clEnqueueMapBuffer(
+			ocl->queue,
+			ocl->seeker_output,
+			CL_TRUE, // Blocking - waits for kernel to complete
+			CL_MAP_READ,
+			0,
+			sizeof(cl_float4),
+			0, NULL, NULL, &err);
 
+		cl_float3 *hotspotDir = NULL;
 		if (err == CL_SUCCESS) {
-			*foundTarget = (hotspot.z > 0.0f);
+			hotspotDir = (cl_float3 *)clEnqueueMapBuffer(
+				ocl->queue,
+				ocl->seeker_dir,
+				CL_TRUE,
+				CL_MAP_READ,
+				0,
+				sizeof(cl_float3),
+				0, NULL, NULL, &err);
+		}
+
+		if (err == CL_SUCCESS && hotspot != NULL && hotspotDir != NULL) {
+			*foundTarget = (hotspot->z > 0.0f);
 			if (*foundTarget) {
-				targetDirection[0][0] = hotspotDir.x;
-				targetDirection[0][1] = hotspotDir.y;
-				targetDirection[0][2] = hotspotDir.z;
-			} else {
-				printf("No target found by seeker (hotspot.z <= 0)\n");
+				printf("Target found by seeker at (%f, %f, %f)\n", hotspotDir->x, hotspotDir->y, hotspotDir->z);
+				targetDirection[0][0] = hotspotDir->x;
+				targetDirection[0][1] = hotspotDir->y;
+				targetDirection[0][2] = hotspotDir->z;
 			}
+
+			// Unmap buffers
+			clEnqueueUnmapMemObject(ocl->queue, ocl->seeker_output, hotspot, 0, NULL, NULL);
+			clEnqueueUnmapMemObject(ocl->queue, ocl->seeker_dir, hotspotDir, 0, NULL, NULL);
 		} else {
-			printf("Error reading back seeker output: %d\n", err);
+			printf("Error mapping seeker output buffers: %d\n", err);
+			// Clean up any successful maps
+			if (hotspot != NULL) {
+				clEnqueueUnmapMemObject(ocl->queue, ocl->seeker_output, hotspot, 0, NULL, NULL);
+			}
 		}
 	}
 }
 
-void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool fire) {
+void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool fire, struct Camera *camera, float deltaTime) {
 	float totalTimeTookMs = 0.0f;
 	for (int i = 0; i < missiles->count; i++) {
 		struct Missile *missile = missiles->missiles[i];
+		bool active = missiles->active[i];
 		float tempTimeTookMs = 0.0f;
 		float targetDir[3] = {0.0f, 0.0f, 0.0f};
 		bool foundTarget = false;
+		if (fire && !active) {
+			float seekerOffset = 5.0f;
+			missile->seeker.seekerCamera.ray.origin[0] = camera->ray.origin[0] + camera->ray.direction[0] * seekerOffset;
+			missile->seeker.seekerCamera.ray.origin[1] = camera->ray.origin[1] + camera->ray.direction[1] * seekerOffset;
+			missile->seeker.seekerCamera.ray.origin[2] = camera->ray.origin[2] + camera->ray.direction[2] * seekerOffset;
+			missile->seeker.seekerCamera.ray.direction[0] = camera->ray.direction[0];
+			missile->seeker.seekerCamera.ray.direction[1] = camera->ray.direction[1];
+			missile->seeker.seekerCamera.ray.direction[2] = camera->ray.direction[2];
+			missile->position[0] = camera->ray.origin[0];
+			missile->position[1] = camera->ray.origin[1];
+			missile->position[2] = camera->ray.origin[2];
+			missile->bodyOrientation[0] = camera->ray.direction[0];
+			missile->bodyOrientation[1] = camera->ray.direction[1];
+			missile->bodyOrientation[2] = camera->ray.direction[2];
+			missile->acceleration[0] = camera->ray.direction[0] * 10.0f;
+			missile->acceleration[1] = camera->ray.direction[1] * 10.0f;
+			missile->acceleration[2] = camera->ray.direction[2] * 10.0f;
+			missile->velocity[0] = camera->ray.direction[0] * 50.0f;
+			missile->velocity[1] = camera->ray.direction[1] * 50.0f;
+			missile->velocity[2] = camera->ray.direction[2] * 50.0f;
+			missile->targetDirection[0] = camera->ray.direction[0];
+			missile->targetDirection[1] = camera->ray.direction[1];
+			missile->targetDirection[2] = camera->ray.direction[2];
+			missile->targetPosition[0] = camera->ray.origin[0] + camera->ray.direction[0] * 100.0f;
+			missile->targetPosition[1] = camera->ray.origin[1] + camera->ray.direction[1] * 100.0f;
+			missile->targetPosition[2] = camera->ray.origin[2] + camera->ray.direction[2] * 100.0f;
+		}
+
 		renderAllMissileFires(ocl,
-			missiles,
-			&missile->seeker.seekerCamera,
-			&tempTimeTookMs,
-			1,
-			&foundTarget,
-			&targetDir);
+							  missiles,
+							  &missile->seeker.seekerCamera,
+							  &tempTimeTookMs,
+							  1,
+							  &foundTarget,
+							  &targetDir, i);
 		totalTimeTookMs += tempTimeTookMs;
-		missileSeekStep(missile, fire, foundTarget, targetDir);
+		float tmp1 = 0.0f;
+		float tmp2 = 0.0f;
+		printf("active: %d\n", missiles->active[i]);
+		missileSeekStep(missile, fire, foundTarget, targetDir, &missiles->active[i], deltaTime, &tmp1, &tmp2);
+		totalTimeTookMs += tmp1 + tmp2;
+		fire = false;
 	}
+	*timeTookMs = totalTimeTookMs;
 }
 
 void compositeBuffersOpenCL(
@@ -745,6 +883,7 @@ void compositeBuffersOpenCL(
 	clReleaseEvent(kernel_event);
 }
 
+// TODO REWORK THIS TO MAKE IT MODULAR SO I CAN RENDER FIRE PARTICLES FROW WHAT EVER CAMERA
 void renderFireParticles(struct OpenCLContext *ocl, struct FireSOA *fireParticles, struct Camera *camera, float *gpuTimeMs) {
 	cl_int err;
 	cl_event kernel_event, blur_event;
@@ -1732,22 +1871,6 @@ void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cu
 	}
 }
 
-// read the pause.bin
-void readPauseData(bool *paused) {
-	FILE *file = fopen("pause.bin", "rb");
-	if (!file) {
-		return; // If file doesn't exist, keep current pause state
-	}
-
-	// Read the boolean value from the file
-	bool fileValue;
-	if (fread(&fileValue, sizeof(bool), 1, file) == 1) {
-		*paused = fileValue; // Update the pause state with the value from the file
-	}
-
-	fclose(file);
-}
-
 int uploadTriangleDataOnce(struct OpenCLContext *ocl, struct Triangles *triangles) {
 	cl_int err;
 
@@ -2251,6 +2374,12 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	ocl->overlayImage_kernel = clCreateKernel(ocl->program, "OverlayImage", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating overlayImage kernel: %d\n", err);
+		return 0;
+	}
+
 	ocl->fire_render_kernel = clCreateKernel(ocl->program, "renderFire", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating renderFireParticles kernel: %d\n", err);
@@ -2368,19 +2497,19 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	ocl->seeker_output = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, sizeof(cl_float4), NULL, &err);
+	// ocl->seeker_output = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, sizeof(cl_float4), NULL, &err);
 
-	if (err != CL_SUCCESS) {
-		printf("Error creating seeker output buffer: %d\n", err);
-		return 0;
-	}
+	// if (err != CL_SUCCESS) {
+	// 	printf("Error creating seeker output buffer: %d\n", err);
+	// 	return 0;
+	// }
 
-	ocl->seeker_dir = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, sizeof(cl_float3), NULL, &err);
+	// ocl->seeker_dir = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, sizeof(cl_float3), NULL, &err);
 
-	if (err != CL_SUCCESS) {
-		printf("Error creating seeker dir buffer: %d\n", err);
-		return 0;
-	}
+	// if (err != CL_SUCCESS) {
+	// 	printf("Error creating seeker dir buffer: %d\n", err);
+	// 	return 0;
+	// }
 
 	ocl->buffer_seeker_view = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 											 SEEKER_SIZE * SEEKER_SIZE * sizeof(float), NULL, &err);
@@ -2405,6 +2534,20 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		printf("Error creating seeker view buffer: %d\n", err);
 		return 0;
 	}
+
+	ocl->seeker_output = clCreateBuffer(
+		ocl->context,
+		CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR,
+		sizeof(cl_float4),
+		NULL,
+		&err);
+
+	ocl->seeker_dir = clCreateBuffer(
+		ocl->context,
+		CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR,
+		sizeof(cl_float3),
+		NULL,
+		&err);
 
 	ocl->buffer_seeker_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
 											 SEEKER_SIZE * SEEKER_SIZE * sizeof(float), NULL, &err);
@@ -2967,6 +3110,9 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 	clReleaseEvent(kernel_event);
 }
 
+const int renderFromMissileSeeker = 1;
+const int renderFromMainCamera = 0;
+
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
 	cl_int err;
 
@@ -2984,7 +3130,10 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		velocities_data[i * 3 + 2] = particles->zVelocity[i];
 	}
 
-	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime);
+	bool temp = false;
+	float tempVec[3] = {0.0f, 0.0f, 0.0f};
+
+	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime, renderFromMainCamera, &temp, &tempVec, 0);
 	renderFireParticles(ocl, fireParticles, camera, &gpuTimings->fireRenderingTime);
 
 	// Write data to GPU buffers
@@ -3321,6 +3470,20 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	//  === COPY UI TO OPENGL UI TEXTURE ===
 
 #if renderUI_Separately == 1
+	float tmp = 0.0f;
+	launchOverlayImageOpenCL(
+		ocl,
+		ocl->cl_ui_texture_buffer_temp,
+		ocl->buffer_seeker_view,
+		ScreenWidth,
+		ScreenHeight,
+		SEEKER_SIZE,
+		SEEKER_SIZE,
+		0,
+		2,
+		&tmp,
+		ScreenWidth - SEEKER_SIZE - 10,
+		10);
 	// Acquire UI texture
 	err = clEnqueueAcquireGLObjects(ocl->queue, 1, &ocl->cl_ui_texture_buffer, 0, NULL, NULL);
 	if (err != CL_SUCCESS) {
@@ -3889,7 +4052,14 @@ uint8_t readRenderMode(const char *filename) {
 }
 
 bool isKeyPressed(int key) {
-	return keyState.keys[key] && !keyState.prevKeys[key]; // Just pressed this frame
+	// If the callback latched a press, consume and return true
+	if (key >= 0 && key <= GLFW_KEY_LAST && keyState.justPressed[key]) {
+		keyState.justPressed[key] = false;
+		return true;
+	}
+	if (key >= 0 && key <= GLFW_KEY_LAST)
+		return keyState.keys[key] && !keyState.prevKeys[key];
+	return false;
 }
 
 bool isKeyReleased(int key) {
@@ -3908,9 +4078,10 @@ void updateKeyStates() {
 void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods) {
 	if (key < 0 || key > GLFW_KEY_LAST) return; // Safety check
 
-	if (action == GLFW_PRESS) {
+	if (action == GLFW_PRESS || action == GLFW_REPEAT) {
 		keyState.keys[key] = true;
-		printf("Key %d pressed\n", key);
+		if (action == GLFW_PRESS) keyState.justPressed[key] = true; // latch the press event
+		printf("Key %d pressed/repeat\n", key);
 	} else if (action == GLFW_RELEASE) {
 		keyState.keys[key] = false;
 		printf("Key %d released\n", key);
@@ -4242,6 +4413,7 @@ int main() {
 	int averageRenderTime = 0;
 	int frameCount = 0;
 	bool paused = false;
+	bool fireMissile = false;
 
 	struct TimePartition *timePartition = (struct TimePartition *)malloc(sizeof(struct TimePartition));
 	if (!timePartition) {
@@ -4318,6 +4490,7 @@ int main() {
 	InitializeFireParticles(fireParticles);
 
 	while (!glfwWindowShouldClose(window) && !exit) {
+		// sleep(1);
 		// Update key states at the start of each frame
 		glfwPollEvents();
 
@@ -4353,8 +4526,28 @@ int main() {
 			enum RenderMode oldMode = camera.renderMode;
 			camera.renderMode = (camera.renderMode + 1) % RENDER_MODE_COUNT;
 		}
+		if (paused) {
+			printf("Simulation Paused \n");
+		} else {
+			printf("Simulation Running \n");
+		}
 		if (isKeyPressed(GLFW_KEY_P)) {
+			printf("Simulation Paused\n");
 			paused = !paused;
+		}
+		if (fireMissile) {
+			printf("1. Missile Fired\n");
+		} else {
+			printf("2. No Missile Fired\n");
+		}
+		if (isKeyPressed(GLFW_KEY_F)) {
+			printf("Fire Missile\n");
+			fireMissile = true;
+		}
+		if (fireMissile) {
+			printf("3. Missile Fired\n");
+		} else {
+			printf("4. No Missile Fired\n");
 		}
 		if (isKeyPressed(GLFW_KEY_O)) {
 			camera.AntiAlias = !camera.AntiAlias;
@@ -4362,9 +4555,6 @@ int main() {
 		if (isKeyPressed(GLFW_KEY_I)) {
 			camera.advanceAntiAlias = !camera.advanceAntiAlias;
 		}
-
-		updateKeyStates();
-		updateMouseStates();
 
 		static float yaw = 0.0f;
 		static float pitch = 0.0f;
@@ -4404,18 +4594,16 @@ int main() {
 		clock_t loopStartTime = clock();
 
 		clock_t readDataTime = clock();
-		// readCameraData(&camera);
-		// readCursorData(cursor);
-		readPauseData(&paused);
 		clock_t endReadDataTime = clock();
 		float dt1 = (float)(endReadDataTime - readDataTime) / (float)CLOCKS_PER_SEC;
 		timePartition->readDataTime += dt1;
 
-		randomMissileMovement(&missiles, &camera);
+		// randomMissileMovement(&missiles, &camera);
 
 		clock_t startGridTime = clock();
 		if (!paused) {
-			UpdateAllMissiles(&missiles, 1 / TPS, &gpuTimings.missileSimulationTime, &gpuTimings.missileFireSimulationTime);
+			float tmp = 0.0f;
+			renderAllMissileFiresView(&ocl, &missiles, &tmp, fireMissile, &camera, 1 / 60.0f);
 			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime); // Always update grid data
 			fireSimStep(fireParticles, 1 / TPS, &gpuTimings.fireSimulationTime);
 		}
@@ -4492,10 +4680,12 @@ int main() {
 
 		float averageRenderTime = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;
 
-		printf("FPS: %.2f, TPS: %.2f, Update: %.02f s, Render: %0.2f s\n",
-			   currentFPS, TPS,
-			   (averageUpdateTime),
-			   (averageRenderTime));
+		if (0.01f > rand_01()) {
+			printf("FPS: %.2f, TPS: %.2f, Update: %.02f s, Render: %0.2f s\n",
+				   currentFPS, TPS,
+				   (averageUpdateTime),
+				   (averageRenderTime));
+		}
 
 		if (frameCount >= FrameCount) {
 			frameCount = 0;
@@ -4547,6 +4737,9 @@ int main() {
 			timePartition->readDataTime = 0;
 		}
 		frameCount++;
+
+		updateMouseStates();
+		updateKeyStates();
 	}
 
 	// Clean up

@@ -37,6 +37,7 @@ struct OpenCLContext {
 	cl_kernel renderMissile_kernel;      // Missile rendering kernel
 	cl_kernel renderFireTemperature_kernel; // Fire temperature rendering kernel
 	cl_kernel missile_seeker_kernel;     // Missile seeker kernel
+	cl_kernel overlayImage_kernel;        // Overlay image kernel
 	// buffers
 	cl_mem buffer_seeker_view;
 	cl_mem buffer_seeker_colors;

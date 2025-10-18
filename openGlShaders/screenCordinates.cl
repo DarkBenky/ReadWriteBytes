@@ -3221,6 +3221,306 @@ __kernel void filterOverlap(
     }
 }
 
+// float3 screenToDirection(
+//     int x, int y,
+//     const int screenWidth,
+//     const int screenHeight,
+//     const float3 camDir,
+//     const float fov
+// ) {
+//     float aspectRatio = (float)screenWidth / (float)screenHeight;
+//     float tanHalfFov = tan(fov * 0.5f);
+    
+//     // Normalized device coordinates (-1 to 1)
+//     float ndcX = (2.0f * x) / screenWidth - 1.0f;
+//     float ndcY = 1.0f - (2.0f * y) / screenHeight;
+    
+//     // Calculate camera right and up vectors
+//     float3 worldUp = (float3)(0.0f, 1.0f, 0.0f);
+//     float3 camRight = normalize(cross(camDir, worldUp));
+//     float3 camUp = normalize(cross(camRight, camDir));
+    
+//     // Calculate ray direction (normalized vector pointing to hotspot)
+//     float3 rayDir = normalize(
+//         camDir + 
+//         camRight * ndcX * aspectRatio * tanHalfFov +
+//         camUp * ndcY * tanHalfFov
+//     );
+    
+//     return rayDir;
+// }
+
+// void downSample(
+//     int x, int y,
+//     __global float* inputBuffer,
+//     __global float* tempBuffer,
+//     const int screenWidth,
+//     const int screenHeight,
+//     const int sampleRadius
+// ) {
+//     int startX = max(0, x - sampleRadius);
+//     int endX = min(screenWidth - 1, x + sampleRadius);
+//     int startY = max(0, y - sampleRadius);
+//     int endY = min(screenHeight - 1, y + sampleRadius);
+    
+//     float accumColor = 0.0f;
+//     int count = 0;
+    
+//     for (int j = startY; j <= endY; j++) {
+//         for (int i = startX; i <= endX; i++) {
+//             int idx = j * screenWidth + i;
+//             float color = inputBuffer[idx];
+//             if (color > 0.001f) {
+//                 accumColor += color;
+//                 count++;
+//             }
+//         }
+//     }
+    
+//     int outIdx = y * screenWidth + x;
+//     if (count > 0) {
+//         tempBuffer[outIdx] = accumColor / (float)count;
+//     } else {
+//         tempBuffer[outIdx] = 0.0f;
+//     }
+// }
+
+// void boxBlur(
+//     int x, int y,
+//     __global float* tempBuffer,
+//     __global float* outputBuffer,
+//     const int screenWidth,
+//     const int screenHeight,
+//     const int sampleRadius
+// ) {
+//     int startX = max(0, x - sampleRadius);
+//     int endX = min(screenWidth - 1, x + sampleRadius);
+//     int startY = max(0, y - sampleRadius);
+//     int endY = min(screenHeight - 1, y + sampleRadius);
+    
+//     float accumColor = 0.0f;
+//     int count = 0;
+    
+//     for (int j = startY; j <= endY; j++) {
+//         for (int i = startX; i <= endX; i++) {
+//             int idx = j * screenWidth + i;
+//             float color = tempBuffer[idx];
+//             if (color > 0.001f) {
+//                 accumColor += color;
+//                 count++;
+//             }
+//         }
+//     }
+    
+//     int outIdx = y * screenWidth + x;
+//     if (count > 0) {
+//         outputBuffer[outIdx] = accumColor / (float)count;
+//     } else {
+//         outputBuffer[outIdx] = 0.0f;
+//     }
+// }
+
+// float2 findAvgStd(
+//     __global float* buffer,
+//     const int screenWidth,
+//     const int screenHeight
+// ) {
+//     float sum = 0.0f;
+//     float sumSq = 0.0f;
+//     int count = 0;
+    
+//     for (int y = 0; y < screenHeight; y++) {
+//         for (int x = 0; x < screenWidth; x++) {
+//             int idx = y * screenWidth + x;
+//             float brightness = buffer[idx];
+//             if (brightness > 0.001f) {
+//                 sum += brightness;
+//                 sumSq += brightness * brightness;
+//                 count++;
+//             }
+//         }
+//     }
+    
+//     if (count == 0) return (float2)(0.0f, 0.0f);
+    
+//     float avg = sum / (float)count;
+//     float variance = (sumSq / (float)count) - (avg * avg);
+//     variance = max(variance, 0.0f);
+//     float stddev = sqrt(variance);
+    
+//     return (float2)(avg, stddev);
+// }
+
+// __kernel void findHotSpots(
+//     __global float* inputBuffer,
+//     __global float* tempBuffer,
+//     __global float4* output,  // x=centerX, y=centerY, z=has_hotspot, w=unused
+//     __global float3* outputDirection,  // Normalized 3D direction vector pointing to hotspot
+//     const int screenWidth,
+//     const int screenHeight,
+//     const float3 camPos,
+//     const float3 camDir,
+//     const float fov,
+//     int sampleRadius,
+//     const int iterations
+// ) {
+//     int x = get_global_id(0);
+//     int y = get_global_id(1);
+    
+//     if (x >= screenWidth || y >= screenHeight) return;
+    
+//     int idx = y * screenWidth + x;
+    
+//     // Iterative processing
+//     for (int iter = 0; iter < iterations; iter++) {
+//         barrier(CLK_GLOBAL_MEM_FENCE);
+        
+//         downSample(x, y, inputBuffer, tempBuffer, screenWidth, screenHeight, sampleRadius);
+        
+//         barrier(CLK_GLOBAL_MEM_FENCE);
+        
+//         boxBlur(x, y, tempBuffer, inputBuffer, screenWidth, screenHeight, sampleRadius);
+        
+//         barrier(CLK_GLOBAL_MEM_FENCE);
+        
+//         // Statistics and thresholding
+//         if (x == 0 && y == 0) {
+//             float2 stats = findAvgStd(inputBuffer, screenWidth, screenHeight);
+//             float avgBrightness = stats.x;
+//             float stddev = stats.y;
+//             float threshold = (avgBrightness + 2.0f * stddev) * 1.5f;
+            
+//             // Apply threshold to entire buffer
+//             for (int i = 0; i < screenWidth * screenHeight; i++) {
+//                 if (inputBuffer[i] < threshold) {
+//                     inputBuffer[i] = 0.0f;
+//                 }
+//             }
+//         }
+        
+//         barrier(CLK_GLOBAL_MEM_FENCE);
+        
+//         sampleRadius = max(1, sampleRadius / 2);
+//     }
+    
+//     barrier(CLK_GLOBAL_MEM_FENCE);
+    
+//     // Find bounding box
+//     if (x == 0 && y == 0) {
+//         int minX = screenWidth;
+//         int minY = screenHeight;
+//         int maxX = -1;
+//         int maxY = -1;
+        
+//         for (int py = 0; py < screenHeight; py++) {
+//             for (int px = 0; px < screenWidth; px++) {
+//                 int pidx = py * screenWidth + px;
+//                 if (inputBuffer[pidx] > 0.001f) {
+//                     minX = min(minX, px);
+//                     maxX = max(maxX, px);
+//                     minY = min(minY, py);
+//                     maxY = max(maxY, py);
+//                 }
+//             }
+//         }
+        
+//         if (maxX >= 0 && maxY >= 0) {
+//             // Calculate center in screen space
+//             float centerX = (minX + maxX) / 2.0f;
+//             float centerY = (minY + maxY) / 2.0f;
+            
+//             // Convert to 3D direction
+//             float3 direction = screenToDirection(
+//                 (int)centerX, (int)centerY,
+//                 screenWidth, screenHeight,
+//                 camDir, fov
+//             );
+            
+//             // Output results
+//             output[0] = (float4)(centerX, centerY, 1.0f, 0.0f);
+//             outputDirection[0] = direction;
+//         } else {
+//             // No hotspot found
+//             output[0] = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+//             outputDirection[0] = (float3)(0.0f, 0.0f, 0.0f);
+//         }
+//     }
+// }
+
+__kernel void OverlayImage(
+    __global float* OutputBuffer,
+    __global float* Image,
+    const int screenWidth,
+    const int screenHeight,
+    const int imageWidth,
+    const int imageHeight,
+    const int Outputmode, // 0=RGB, 1=RGBA, 2=Grayscale
+    const int displayMode, // 0=RGB, 1=RGBA, 2=Grayscale
+    const int posX,
+    const int posY
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+
+    if (x >= screenWidth || y >= screenHeight) return;
+
+    // Use posX and posY directly as the offset
+    int offsetX = posX;
+    int offsetY = posY;
+
+    int imgX = x - offsetX;
+    int imgY = y - offsetY;
+
+    // nothing to overlay if outside image bounds
+    if (imgX < 0 || imgX >= imageWidth || imgY < 0 || imgY >= imageHeight) return;
+
+    int screenPixel = y * screenWidth + x;
+    int imagePixel  = imgY * imageWidth + imgX;
+
+    // load source pixel from Image according to displayMode (ignore alpha entirely)
+    float srcR = 0.0f, srcG = 0.0f, srcB = 0.0f;
+    if (displayMode == 0) { // RGB
+        int i = imagePixel * 3;
+        srcR = Image[i + 0];
+        srcG = Image[i + 1];
+        srcB = Image[i + 2];
+    } else if (displayMode == 1) { // RGBA - ignore A
+        int i = imagePixel * 4;
+        srcR = Image[i + 0];
+        srcG = Image[i + 1];
+        srcB = Image[i + 2];
+    } else { // Grayscale
+        int i = imagePixel;
+        float g = Image[i];
+        srcR = g; srcG = g; srcB = g;
+    }
+
+    // clamp source components
+    srcR = clamp(srcR, 0.0f, 1.0f);
+    srcG = clamp(srcG, 0.0f, 1.0f);
+    srcB = clamp(srcB, 0.0f, 1.0f);
+
+    // Write directly into OutputBuffer (no alpha blending — overlay/replace)
+    if (Outputmode == 0) { // RGB output (3 floats per pixel)
+        int o = screenPixel * 3;
+        OutputBuffer[o + 0] = srcR;
+        OutputBuffer[o + 1] = srcG;
+        OutputBuffer[o + 2] = srcB;
+    } else if (Outputmode == 1) { // RGBA output (4 floats per pixel) -> set A = 1.0
+        int o = screenPixel * 4;
+        OutputBuffer[o + 0] = srcR;
+        OutputBuffer[o + 1] = srcG;
+        OutputBuffer[o + 2] = srcB;
+        OutputBuffer[o + 3] = 1.0f;
+    } else { // Grayscale output (1 float per pixel) -> convert to luminance
+        int o = screenPixel;
+        float lum = dot((float3)(srcR, srcG, srcB), (float3)(0.299f, 0.587f, 0.114f));
+        OutputBuffer[o] = clamp(lum, 0.0f, 1.0f);
+    }
+}
+
+
+
 float3 screenToDirection(
     int x, int y,
     const int screenWidth,
@@ -3250,112 +3550,11 @@ float3 screenToDirection(
     return rayDir;
 }
 
-void downSample(
-    int x, int y,
-    __global float* inputBuffer,
-    __global float* tempBuffer,
-    const int screenWidth,
-    const int screenHeight,
-    const int sampleRadius
-) {
-    int startX = max(0, x - sampleRadius);
-    int endX = min(screenWidth - 1, x + sampleRadius);
-    int startY = max(0, y - sampleRadius);
-    int endY = min(screenHeight - 1, y + sampleRadius);
-    
-    float accumColor = 0.0f;
-    int count = 0;
-    
-    for (int j = startY; j <= endY; j++) {
-        for (int i = startX; i <= endX; i++) {
-            int idx = j * screenWidth + i;
-            float color = inputBuffer[idx];
-            if (color > 0.001f) {
-                accumColor += color;
-                count++;
-            }
-        }
-    }
-    
-    int outIdx = y * screenWidth + x;
-    if (count > 0) {
-        tempBuffer[outIdx] = accumColor / (float)count;
-    } else {
-        tempBuffer[outIdx] = 0.0f;
-    }
-}
-
-void boxBlur(
-    int x, int y,
-    __global float* tempBuffer,
-    __global float* outputBuffer,
-    const int screenWidth,
-    const int screenHeight,
-    const int sampleRadius
-) {
-    int startX = max(0, x - sampleRadius);
-    int endX = min(screenWidth - 1, x + sampleRadius);
-    int startY = max(0, y - sampleRadius);
-    int endY = min(screenHeight - 1, y + sampleRadius);
-    
-    float accumColor = 0.0f;
-    int count = 0;
-    
-    for (int j = startY; j <= endY; j++) {
-        for (int i = startX; i <= endX; i++) {
-            int idx = j * screenWidth + i;
-            float color = tempBuffer[idx];
-            if (color > 0.001f) {
-                accumColor += color;
-                count++;
-            }
-        }
-    }
-    
-    int outIdx = y * screenWidth + x;
-    if (count > 0) {
-        outputBuffer[outIdx] = accumColor / (float)count;
-    } else {
-        outputBuffer[outIdx] = 0.0f;
-    }
-}
-
-float2 findAvgStd(
-    __global float* buffer,
-    const int screenWidth,
-    const int screenHeight
-) {
-    float sum = 0.0f;
-    float sumSq = 0.0f;
-    int count = 0;
-    
-    for (int y = 0; y < screenHeight; y++) {
-        for (int x = 0; x < screenWidth; x++) {
-            int idx = y * screenWidth + x;
-            float brightness = buffer[idx];
-            if (brightness > 0.001f) {
-                sum += brightness;
-                sumSq += brightness * brightness;
-                count++;
-            }
-        }
-    }
-    
-    if (count == 0) return (float2)(0.0f, 0.0f);
-    
-    float avg = sum / (float)count;
-    float variance = (sumSq / (float)count) - (avg * avg);
-    variance = max(variance, 0.0f);
-    float stddev = sqrt(variance);
-    
-    return (float2)(avg, stddev);
-}
-
 __kernel void findHotSpots(
     __global float* inputBuffer,
     __global float* tempBuffer,
-    __global float4* output,  // x=centerX, y=centerY, z=has_hotspot, w=unused
-    __global float3* outputDirection,  // Normalized 3D direction vector pointing to hotspot
+    __global float4* output,
+    __global float3* outputDirection,
     const int screenWidth,
     const int screenHeight,
     const float3 camPos,
@@ -3370,74 +3569,155 @@ __kernel void findHotSpots(
     if (x >= screenWidth || y >= screenHeight) return;
     
     int idx = y * screenWidth + x;
+    int radiusStep = sampleRadius;
     
-    // Iterative processing
+    // Iterative blur and threshold processing
     for (int iter = 0; iter < iterations; iter++) {
         barrier(CLK_GLOBAL_MEM_FENCE);
         
-        downSample(x, y, inputBuffer, tempBuffer, screenWidth, screenHeight, sampleRadius);
+        // Downsampling pass
+        int startX = max(0, x - radiusStep);
+        int endX = min(screenWidth - 1, x + radiusStep);
+        int startY = max(0, y - radiusStep);
+        int endY = min(screenHeight - 1, y + radiusStep);
+        
+        float accumColor = 0.0f;
+        int count = 0;
+        
+        for (int j = startY; j <= endY; j++) {
+            for (int i = startX; i <= endX; i++) {
+                int readIdx = j * screenWidth + i;
+                float color = inputBuffer[readIdx];
+                if (color > 0.001f) {
+                    accumColor += color;
+                    count++;
+                }
+            }
+        }
+        
+        if (count > 0) {
+            tempBuffer[idx] = accumColor / (float)count;
+        } else {
+            tempBuffer[idx] = 0.0f;
+        }
         
         barrier(CLK_GLOBAL_MEM_FENCE);
         
-        boxBlur(x, y, tempBuffer, inputBuffer, screenWidth, screenHeight, sampleRadius);
+        // Box blur pass
+        accumColor = 0.0f;
+        count = 0;
+        
+        for (int j = startY; j <= endY; j++) {
+            for (int i = startX; i <= endX; i++) {
+                int readIdx = j * screenWidth + i;
+                float color = tempBuffer[readIdx];
+                if (color > 0.001f) {
+                    accumColor += color;
+                    count++;
+                }
+            }
+        }
+        
+        if (count > 0) {
+            inputBuffer[idx] = accumColor / (float)count;
+        } else {
+            inputBuffer[idx] = 0.0f;
+        }
         
         barrier(CLK_GLOBAL_MEM_FENCE);
         
-        // Statistics and thresholding
+        // Statistics calculation and thresholding (single thread)
         if (x == 0 && y == 0) {
-            float2 stats = findAvgStd(inputBuffer, screenWidth, screenHeight);
-            float avgBrightness = stats.x;
-            float stddev = stats.y;
-            float threshold = (avgBrightness + 2.0f * stddev) * 1.5f;
+            float sum = 0.0f;
+            float sumSq = 0.0f;
+            int validCount = 0;
             
-            // Apply threshold to entire buffer
-            for (int i = 0; i < screenWidth * screenHeight; i++) {
-                if (inputBuffer[i] < threshold) {
-                    inputBuffer[i] = 0.0f;
+            for (int py = 0; py < screenHeight; py++) {
+                for (int px = 0; px < screenWidth; px++) {
+                    int pidx = py * screenWidth + px;
+                    float brightness = inputBuffer[pidx];
+                    if (brightness > 0.001f) {
+                        sum += brightness;
+                        sumSq += brightness * brightness;
+                        validCount++;
+                    }
+                }
+            }
+            
+            if (validCount > 0) {
+                float avgBrightness = sum / (float)validCount;
+                float variance = (sumSq / (float)validCount) - (avgBrightness * avgBrightness);
+                variance = max(variance, 0.0f);
+                float stddev = sqrt(variance);
+                float threshold = (avgBrightness + 2.0f * stddev) * 1.5f;
+                
+                // Apply threshold
+                for (int i = 0; i < screenWidth * screenHeight; i++) {
+                    if (inputBuffer[i] < threshold) {
+                        inputBuffer[i] = 0.0f;
+                    }
                 }
             }
         }
         
         barrier(CLK_GLOBAL_MEM_FENCE);
         
-        sampleRadius = max(1, sampleRadius / 2);
+        // Reduce radius for next iteration
+        radiusStep = max(1, radiusStep / 2);
     }
     
     barrier(CLK_GLOBAL_MEM_FENCE);
     
-    // Find bounding box
+    // Find hotspot bounding box and calculate center (single thread)
     if (x == 0 && y == 0) {
         int minX = screenWidth;
         int minY = screenHeight;
         int maxX = -1;
         int maxY = -1;
+        float maxBrightness = 0.0f;
+        int maxBrightX = 0;
+        int maxBrightY = 0;
         
+        // Find bounding box and brightest pixel
         for (int py = 0; py < screenHeight; py++) {
             for (int px = 0; px < screenWidth; px++) {
                 int pidx = py * screenWidth + px;
-                if (inputBuffer[pidx] > 0.001f) {
+                float brightness = inputBuffer[pidx];
+                
+                if (brightness > 0.001f) {
                     minX = min(minX, px);
                     maxX = max(maxX, px);
                     minY = min(minY, py);
                     maxY = max(maxY, py);
+                    
+                    if (brightness > maxBrightness) {
+                        maxBrightness = brightness;
+                        maxBrightX = px;
+                        maxBrightY = py;
+                    }
                 }
             }
         }
         
-        if (maxX >= 0 && maxY >= 0) {
-            // Calculate center in screen space
+        if (maxX >= 0 && maxY >= 0 && maxBrightness > 0.001f) {
+            // Use weighted center (brightest point gets more weight)
             float centerX = (minX + maxX) / 2.0f;
             float centerY = (minY + maxY) / 2.0f;
             
-            // Convert to 3D direction
+            // Blend with brightest point for better accuracy
+            centerX = centerX * 0.3f + maxBrightX * 0.7f;
+            centerY = centerY * 0.3f + maxBrightY * 0.7f;
+            
+            // Convert center to 3D direction
             float3 direction = screenToDirection(
-                (int)centerX, (int)centerY,
+                (int)(centerX + 0.5f), (int)(centerY + 0.5f),
                 screenWidth, screenHeight,
                 camDir, fov
             );
+            direction = normalize(direction);
             
             // Output results
-            output[0] = (float4)(centerX, centerY, 1.0f, 0.0f);
+            output[0] = (float4)(centerX, centerY, 1.0f, maxBrightness);
             outputDirection[0] = direction;
         } else {
             // No hotspot found
