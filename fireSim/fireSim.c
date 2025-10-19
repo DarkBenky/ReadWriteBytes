@@ -41,10 +41,11 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerCamera.ray.direction[0] = 1.0f;
 	missile->seeker.seekerCamera.ray.direction[1] = 0.0f;
 	missile->seeker.seekerCamera.ray.direction[2] = 0.0f;
-	missile->seeker.seekerCamera.fov = 15.0f;
+	missile->seeker.seekerCamera.fov = 8.0f;
 	missile->seeker.seekerFov = 45.0f;
 	missile->seeker.seekerSteps = 1;
-	missile->seeker.lockState = Searching;
+	missile->seeker.lockState = Lunching;
+	missile->seeker.searchMultiplayer = randRange(3.0f, 8.0f)
 
 	// Core simulation
 	missile->position[0] = randRange(-450.0f, 450.0f);
@@ -208,7 +209,7 @@ void missileSeekStep(struct Missile *missile, bool fire, bool foundTarget, float
 
         // Convert FOV and gimbal limit from degrees to radians
         // while searching make fov bigger for fater scan
-        float fovRad = missile->seeker.seekerCamera.fov * 4.0f * (M_PI / 180.0f);
+        float fovRad = missile->seeker.seekerCamera.fov * missile->seeker.searchMultiplayer * (M_PI / 180.0f);
         float maxGimbalRad = missile->seeker.seekerFov * (M_PI / 180.0f) / 2.0f;
         // Get current camera ray direction
         float *rayDir = missile->seeker.seekerCamera.ray.direction;
