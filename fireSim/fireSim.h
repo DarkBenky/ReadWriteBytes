@@ -43,8 +43,8 @@ struct Seeker {
     struct Camera seekerCamera;
     float seekerFov; // Seeker gimbal limit (degrees)
     int seekerSteps; // Number of steps preferred in one simulation step
+    float searchMultiplayer;
     enum  MissileLock lockState;
-
 };
 
 
