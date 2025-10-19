@@ -194,100 +194,98 @@ void setMissileTargetDirection(struct Missile *missile, float targetDir[3], floa
 }
 
 void missileSeekStep(struct Missile *missile, bool fire, bool foundTarget, float targetDir[3], bool *active, float deltaTime, float *timeTook, float *fireSimulationTime) {
-	if (foundTarget && *active) {
-		missile->seeker.lockState = Tracking;
-	}
-	if (!foundTarget && active) {
-		missile->seeker.lockState = Searching;
-	}
-	if (fire && !*active) {
-		missile->seeker.lockState = Lunching;
-	}
+    if (foundTarget && *active) {
+        missile->seeker.lockState = Tracking;
+    }
+    if (!foundTarget && *active) {
+        missile->seeker.lockState = Searching;
+    }
+    if (fire && !*active) {
+        missile->seeker.lockState = Lunching;
+    }
+    if (missile->seeker.lockState == Searching) {
+        printf("Searching...\n");
 
-	// printf("active: %d, lockState: %d\n, fire: %d\n", *active, missile->seeker.lockState, fire);
-	// printf("seekerXDir: %f", missile->seeker.seekerCamera.ray.direction[0]);
-	// printf("seekerYDir: %f", missile->seeker.seekerCamera.ray.direction[1]);
-	// printf("seekerZDir: %f", missile->seeker.seekerCamera.ray.direction[2]);
+        // Convert FOV and gimbal limit from degrees to radians
+        // while searching make fov bigger for fater scan
+        float fovRad = missile->seeker.seekerCamera.fov * 4.0f * (M_PI / 180.0f);
+        float maxGimbalRad = missile->seeker.seekerFov * (M_PI / 180.0f) / 2.0f;
+        // Get current camera ray direction
+        float *rayDir = missile->seeker.seekerCamera.ray.direction;
+        float *rayOrigin = missile->seeker.seekerCamera.ray.origin;
+        // Calculate current angles relative to missile body (forward = +Z)
+        float currentPitch = atan2f(rayDir[1], sqrtf(rayDir[0] * rayDir[0] + rayDir[2] * rayDir[2]));
+        float currentYaw = atan2f(rayDir[0], rayDir[2]);
+        // Move camera by smaller step (e.g., half FOV for overlap)
+        float stepSize = fovRad * 0.5f;
+        currentYaw += stepSize;
+        // Check if we exceeded gimbal limit
+        if (currentYaw > maxGimbalRad) {
+            currentYaw = -maxGimbalRad; // Reset to left edge
+            currentPitch += stepSize;   // Step down
+            // If exceeded vertical gimbal limit, reset to top
+            if (currentPitch > maxGimbalRad) {
+                currentPitch = -maxGimbalRad;
+            }
+        }
+        // Convert angles back to direction vector
+        float cosPitch = cosf(currentPitch);
+        rayDir[0] = sinf(currentYaw) * cosPitch;
+        rayDir[1] = sinf(currentPitch);
+        rayDir[2] = cosf(currentYaw) * cosPitch;
+        // Normalize direction vector
+        float length = sqrtf(rayDir[0] * rayDir[0] + rayDir[1] * rayDir[1] + rayDir[2] * rayDir[2]);
+        rayDir[0] /= length;
+        rayDir[1] /= length;
+        rayDir[2] /= length;
+        // Update camera origin to missile position
+        rayOrigin[0] = missile->position[0];
+        rayOrigin[1] = missile->position[1];
+        rayOrigin[2] = missile->position[2];
 
-	if (missile->seeker.lockState == Searching) {
-		printf("Searching...\n");
-		// Convert FOV and gimbal limit from degrees to radians
-		float fovRad = missile->seeker.seekerCamera.fov * (M_PI / 180.0f);
-		float maxGimbalRad = missile->seeker.seekerFov * (M_PI / 180.0f) / 2.0f;
+        missileSimStep(missile, deltaTime, timeTook, active, fireSimulationTime);
 
-		// Get current camera ray direction
-		float *rayDir = missile->seeker.seekerCamera.ray.direction;
-		float *rayOrigin = missile->seeker.seekerCamera.ray.origin;
+    } else if (missile->seeker.lockState == Tracking) {
+        printf("Tracking...\n");
 
-		// Calculate current angles relative to missile body (forward = +Z)
-		float currentPitch = atan2f(rayDir[1], sqrtf(rayDir[0] * rayDir[0] + rayDir[2] * rayDir[2]));
-		float currentYaw = atan2f(rayDir[0], rayDir[2]);
+        missile->seeker.seekerCamera.ray.direction[0] = targetDir[0];
+        missile->seeker.seekerCamera.ray.direction[1] = targetDir[1];
+        missile->seeker.seekerCamera.ray.direction[2] = targetDir[2];
 
-		// Move camera by one FOV step horizontally
-		currentYaw += fovRad;
+        missile->targetDirection[0] = targetDir[0];
+        missile->targetDirection[1] = targetDir[1];
+        missile->targetDirection[2] = targetDir[2];
+        missile->prevLOS[0] = missile->targetPosition[0];
+        missile->prevLOS[1] = missile->targetPosition[1];
+        missile->prevLOS[2] = missile->targetPosition[2];
+        // Set missile target direction for PN guidance
+        float virtualTargetDistance = 1000.0f;
+        missile->targetPosition[0] = missile->position[0] + missile->targetDirection[0] * virtualTargetDistance;
+        missile->targetPosition[1] = missile->position[1] + missile->targetDirection[1] * virtualTargetDistance;
+        missile->targetPosition[2] = missile->position[2] + missile->targetDirection[2] * virtualTargetDistance;
 
-		// Check if we exceeded gimbal limit
-		if (currentYaw > maxGimbalRad) {
-			currentYaw = -maxGimbalRad; // Reset to left edge
-			currentPitch += fovRad;		// Step down by one FOV
+        missileSimStep(missile, deltaTime, timeTook, active, fireSimulationTime);
 
-			// If exceeded vertical gimbal limit, reset to top
-			if (currentPitch > maxGimbalRad) {
-				currentPitch = -maxGimbalRad;
-			}
-		}
+    } else if (missile->seeker.lockState == Lunching) {
+        printf("Lunching...\n");
 
-		// Convert angles back to direction vector
-		float cosPitch = cosf(currentPitch);
-		rayDir[0] = sinf(currentYaw) * cosPitch;
-		rayDir[1] = sinf(currentPitch);
-		rayDir[2] = cosf(currentYaw) * cosPitch;
+        missile->seeker.seekerCamera.ray.direction[0] = missile->targetDirection[0];
+        missile->seeker.seekerCamera.ray.direction[1] = missile->targetDirection[1];
+        missile->seeker.seekerCamera.ray.direction[2] = missile->targetDirection[2];
 
-		// Normalize direction vector
-		float length = sqrtf(rayDir[0] * rayDir[0] + rayDir[1] * rayDir[1] + rayDir[2] * rayDir[2]);
-		rayDir[0] /= length;
-		rayDir[1] /= length;
-		rayDir[2] /= length;
+        missile->seeker.seekerCamera.ray.origin[0] = missile->position[0];
+        missile->seeker.seekerCamera.ray.origin[1] = missile->position[1];
+        missile->seeker.seekerCamera.ray.origin[2] = missile->position[2];
 
-		// Update camera origin to missile position
-		rayOrigin[0] = missile->position[0];
-		rayOrigin[1] = missile->position[1];
-		rayOrigin[2] = missile->position[2];
-		missileSimStep(missile, deltaTime, timeTook, active, fireSimulationTime);
-	} else if (missile->seeker.lockState == Tracking) {
-		printf("Tracking...\n");
-		missile->seeker.seekerCamera.ray.direction[0] = targetDir[0];
-		missile->seeker.seekerCamera.ray.direction[1] = targetDir[1];
-		missile->seeker.seekerCamera.ray.direction[2] = targetDir[2];
-		missile->targetDirection[0] = targetDir[0];
-		missile->targetDirection[1] = targetDir[1];
-		missile->targetDirection[2] = targetDir[2];
+        setMissileTargetDirection(missile, targetDir, NULL);
 
-		missile->prevLOS[0] = missile->targetPosition[0];
-		missile->prevLOS[1] = missile->targetPosition[1];
-		missile->prevLOS[2] = missile->targetPosition[2];
+        if (fire) {
+            missile->seeker.lockState = Tracking;
+            *active = true;
+        }
+    }
 
-		// set missile target direction for PN guidance
-		float virtualTargetDistance = 1000.0f;
-		missile->targetPosition[0] = missile->position[0] + missile->targetDirection[0] * virtualTargetDistance;
-		missile->targetPosition[1] = missile->position[1] + missile->targetDirection[1] * virtualTargetDistance;
-		missile->targetPosition[2] = missile->position[2] + missile->targetDirection[2] * virtualTargetDistance;
-		missileSimStep(missile, deltaTime, timeTook, active, fireSimulationTime);
-	} else if (missile->seeker.lockState == Lunching) {
-		printf("Lunching...\n");
-		missile->seeker.seekerCamera.ray.direction[0] = missile->targetDirection[0];
-		missile->seeker.seekerCamera.ray.direction[1] = missile->targetDirection[1];
-		missile->seeker.seekerCamera.ray.direction[2] = missile->targetDirection[2];
-		missile->seeker.seekerCamera.ray.origin[0] = missile->position[0];
-		missile->seeker.seekerCamera.ray.origin[1] = missile->position[1];
-		missile->seeker.seekerCamera.ray.origin[2] = missile->position[2];
-		setMissileTargetDirection(missile, targetDir, NULL);
-		if (fire) {
-			missile->seeker.lockState = Tracking;
-			*active = true;
-		}
-	}
-	return;
+    return;
 }
 
 void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active, float *fireSimulationTime) {
