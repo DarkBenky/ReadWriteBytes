@@ -1,5 +1,5 @@
 // Usage: Render 3D geometry -> Pass buffers to this kernel -> Composites radar cones over scene
-// Only modifies pixels where cone is closer than existing depth
+// Desaturates background to make cones stand out, overwrites pixels where cone is closer
 
 __kernel void composite_cones(
     __global float* imageBufferColor,      // RGB input/output, 3 floats per pixel
@@ -29,6 +29,15 @@ __kernel void composite_cones(
     if (x >= imageWidth || y >= imageHeight) return;
     
     int pixelIdx = y * imageWidth + x;
+    
+    // Desaturate background (convert to grayscale, keep 40% saturation)
+    float r = imageBufferColor[pixelIdx * 3 + 0];
+    float g = imageBufferColor[pixelIdx * 3 + 1];
+    float b = imageBufferColor[pixelIdx * 3 + 2];
+    float gray = 0.299f * r + 0.587f * g + 0.114f * b;
+    imageBufferColor[pixelIdx * 3 + 0] = gray * 0.6f + r * 0.4f;
+    imageBufferColor[pixelIdx * 3 + 1] = gray * 0.6f + g * 0.4f;
+    imageBufferColor[pixelIdx * 3 + 2] = gray * 0.6f + b * 0.4f;
     
     // Read existing depth
     float existingDepth = imageBufferDepth[pixelIdx];
