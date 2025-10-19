@@ -21,12 +21,12 @@
 #include <stdio.h>
 #include "fireSim/fireSim.h"
 #include "openGlShaders/gpuStruct.h"
-#define SEEKER_SIZE 64 // Size of seeker view (64x64 pixels)
 
 void *SharedMem = NULL;
 
-#define chartPosY 480 // Y position on screen for timing chart
-#define chartPosX 700 // X position on screen for timing chart
+#define SEEKER_SIZE 128 // Size of seeker view (64x64 pixels)
+#define chartPosY 480	// Y position on screen for timing chart
+#define chartPosX 700	// X position on screen for timing chart
 #define MAX_TEXT_LENGTH 2048
 // temporary buffer for saving text
 char text[MAX_TEXT_LENGTH];
@@ -672,8 +672,6 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 		// Updated seeker mode code with optimized GPU readback
 
 	} else if (mode != 0) {
-		printf("seeker mode\n");
-
 		// Seeker functionality
 		cl_int seekerW = SEEKER_SIZE;
 		cl_int seekerH = SEEKER_SIZE;
@@ -755,62 +753,99 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 	}
 }
 
-void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool fire, struct Camera *camera, float deltaTime) {
+float delay = 0.2f;
+float timeSinceLastFire = 0.0f;
+float firedMissileTime = 0.0f;
+int firedMissileIdx = -1;
+
+void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime) {
 	float totalTimeTookMs = 0.0f;
-	bool hasFired = false; // Track if we've already fired a missile this frame
-	add delay between fires
+	bool hasFired = false;
+
+	timeSinceLastFire += deltaTime;
+	bool canFire = (timeSinceLastFire >= delay);
+
 	for (int i = 0; i < missiles->count; i++) {
 		struct Missile *missile = missiles->missiles[i];
 		bool active = missiles->active[i];
 		float tempTimeTookMs = 0.0f;
 		float targetDir[3] = {0.0f, 0.0f, 0.0f};
+		float targetPos[3] = {0.0f, 0.0f, 0.0f};
+		float targetVel[3] = {0.0f, 0.0f, 0.0f};
 		bool foundTarget = false;
 		bool shouldFireThisMissile = false;
 
-		// Only fire the first inactive missile we find
-		if (fire && !active && !hasFired) {
-			float seekerOffset = 5.0f;
-			missile->seeker.seekerCamera.ray.origin[0] = camera->ray.origin[0] + camera->ray.direction[0] * seekerOffset;
-			missile->seeker.seekerCamera.ray.origin[1] = camera->ray.origin[1] + camera->ray.direction[1] * seekerOffset;
-			missile->seeker.seekerCamera.ray.origin[2] = camera->ray.origin[2] + camera->ray.direction[2] * seekerOffset;
-			missile->seeker.seekerCamera.ray.direction[0] = camera->ray.direction[0];
-			missile->seeker.seekerCamera.ray.direction[1] = camera->ray.direction[1];
-			missile->seeker.seekerCamera.ray.direction[2] = camera->ray.direction[2];
-			missile->position[0] = camera->ray.origin[0];
-			missile->position[1] = camera->ray.origin[1];
-			missile->position[2] = camera->ray.origin[2];
+		if (*fire && !active && !hasFired && canFire) {
+			float spawnOffset = 35.0f;
+
+			missile->position[0] = camera->ray.origin[0] + camera->ray.direction[0] * spawnOffset;
+			missile->position[1] = camera->ray.origin[1] + camera->ray.direction[1] * spawnOffset;
+			missile->position[2] = camera->ray.origin[2] + camera->ray.direction[2] * spawnOffset;
+
 			missile->bodyOrientation[0] = camera->ray.direction[0];
 			missile->bodyOrientation[1] = camera->ray.direction[1];
 			missile->bodyOrientation[2] = camera->ray.direction[2];
-			missile->acceleration[0] = camera->ray.direction[0] * 10.0f;
-			missile->acceleration[1] = camera->ray.direction[1] * 10.0f;
-			missile->acceleration[2] = camera->ray.direction[2] * 10.0f;
-			missile->velocity[0] = camera->ray.direction[0] * 50.0f;
-			missile->velocity[1] = camera->ray.direction[1] * 50.0f;
-			missile->velocity[2] = camera->ray.direction[2] * 50.0f;
+
+			missile->velocity[0] = camera->ray.direction[0] * 500.0f;
+			missile->velocity[1] = camera->ray.direction[1] * 500.0f;
+			missile->velocity[2] = camera->ray.direction[2] * 500.0f;
+
 			missile->targetDirection[0] = camera->ray.direction[0];
 			missile->targetDirection[1] = camera->ray.direction[1];
 			missile->targetDirection[2] = camera->ray.direction[2];
-			missile->targetPosition[0] = camera->ray.origin[0] + camera->ray.direction[0] * 100.0f;
-			missile->targetPosition[1] = camera->ray.origin[1] + camera->ray.direction[1] * 100.0f;
-			missile->targetPosition[2] = camera->ray.origin[2] + camera->ray.direction[2] * 100.0f;
+
+			float virtualTargetDist = 1000.0f;
+			missile->targetPosition[0] = camera->ray.origin[0] + camera->ray.direction[0] * virtualTargetDist;
+			missile->targetPosition[1] = camera->ray.origin[1] + camera->ray.direction[1] * virtualTargetDist;
+			missile->targetPosition[2] = camera->ray.origin[2] + camera->ray.direction[2] * virtualTargetDist;
+
+			missile->prevLOS[0] = missile->targetDirection[0];
+			missile->prevLOS[1] = missile->targetDirection[1];
+			missile->prevLOS[2] = missile->targetDirection[2];
+
+			missile->seeker.lockState = Lunching;
+			missile->remainingTime = randRange(45.0f, 120.0f);
+			missile->fuelMass = randRange(150.0f, 500.0f);
+			missile->totalMass = missile->dryMass + missile->fuelMass;
+			missile->burning = 1;
 
 			shouldFireThisMissile = true;
-			hasFired = true; // Mark that we've fired one missile
+			hasFired = true;
+			timeSinceLastFire = 0.0f;
+			firedMissileTime = 1.5f;
+			firedMissileIdx = i;
+			*fire = false;
 		}
 
-		renderAllMissileFires(ocl,
-							  missiles,
-							  &missile->seeker.seekerCamera,
-							  &tempTimeTookMs,
-							  1,
-							  &foundTarget,
-							  &targetDir, i);
-		totalTimeTookMs += tempTimeTookMs;
+		float dx = missile->position[0] - camera->ray.origin[0];
+		float dy = missile->position[1] - camera->ray.origin[1];
+		float dz = missile->position[2] - camera->ray.origin[2];
+		float distanceToCamera = sqrtf(dx * dx + dy * dy + dz * dz);
+
+		if (active && distanceToCamera > 35.0f) {
+			renderAllMissileFires(ocl, missiles, &missile->seeker.seekerCamera, &tempTimeTookMs, 1, &foundTarget, &targetDir, i);
+			totalTimeTookMs += tempTimeTookMs;
+
+			if (foundTarget) {
+				float rayOrigin[3] = {
+					missile->seeker.seekerCamera.ray.origin[0],
+					missile->seeker.seekerCamera.ray.origin[1],
+					missile->seeker.seekerCamera.ray.origin[2]};
+
+				float hitDistance = 1000.0f;
+				targetPos[0] = rayOrigin[0] + targetDir[0] * hitDistance;
+				targetPos[1] = rayOrigin[1] + targetDir[1] * hitDistance;
+				targetPos[2] = rayOrigin[2] + targetDir[2] * hitDistance;
+
+				targetVel[0] = 0.0f;
+				targetVel[1] = 0.0f;
+				targetVel[2] = 0.0f;
+			}
+		}
+
 		float tmp1 = 0.0f;
 		float tmp2 = 0.0f;
-		printf("active: %d\n", missiles->active[i]);
-		missileSeekStep(missile, shouldFireThisMissile, foundTarget, targetDir, &missiles->active[i], deltaTime, &tmp1, &tmp2);
+		missileSeekStep(missile, missiles, shouldFireThisMissile, foundTarget, targetDir, targetPos, targetVel, &missiles->active[i], deltaTime, &tmp1, &tmp2);
 		totalTimeTookMs += tmp1 + tmp2;
 	}
 	*timeTookMs = totalTimeTookMs;
@@ -3289,6 +3324,56 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		addTextOpenCL(ocl, font, text, 5, 125, red);
 	}
 
+	int missileUIy = 170;
+	for (int i = 0; i < missiles->count; i++) {
+		struct Missile *m = missiles->missiles[i];
+		uint8_t stateColor[3] = {128, 128, 128};
+		const char *stateName = "Idle";
+
+		if (missiles->active[i]) {
+			if (m->seeker.lockState == Tracking) {
+				stateColor[0] = 0;
+				stateColor[1] = 255;
+				stateColor[2] = 0;
+				stateName = "TRACKING";
+			} else if (m->seeker.lockState == Searching) {
+				stateColor[0] = 255;
+				stateColor[1] = 255;
+				stateColor[2] = 0;
+				stateName = "SEARCHING";
+			} else if (m->seeker.lockState == Lunching) {
+				stateColor[0] = 255;
+				stateColor[1] = 128;
+				stateColor[2] = 0;
+				stateName = "LAUNCHING";
+			}
+
+			float speed = sqrtf(m->velocity[0] * m->velocity[0] + m->velocity[1] * m->velocity[1] + m->velocity[2] * m->velocity[2]);
+			float dist = sqrtf(m->targetPosition[0] * m->targetPosition[0] + m->targetPosition[1] * m->targetPosition[1] + m->targetPosition[2] * m->targetPosition[2]);
+
+			snprintf(text, sizeof(text), "M%d: %s Spd:%.0f/%.0fm/s Fuel:%.0fkg", i, stateName, speed, m->maxSpeed, m->fuelMass);
+			addTextOpenCL(ocl, font, text, 5, missileUIy, stateColor);
+
+			snprintf(text, sizeof(text), "    Conf:%.0f%% MinTh:%.0f%% Dist:%.0fm", m->seeker.lastDetectionConfidence * 100.0f, m->minTrackConfidence * 100.0f, dist);
+			addTextOpenCL(ocl, font, text, 5, missileUIy + 15, stateColor);
+
+			missileUIy += 35;
+		}
+	}
+
+	if (firedMissileTime > 0.0f && firedMissileIdx >= 0 && firedMissileIdx < missiles->count) {
+		uint8_t notifyColor[3] = {255, 100, 0};
+		snprintf(text, sizeof(text), ">>> MISSILE %d FIRED <<<", firedMissileIdx);
+		addTextOpenCL(ocl, font, text, ScreenWidth / 2 - 150, 50, notifyColor);
+
+		struct Missile *m = missiles->missiles[firedMissileIdx];
+		if (m->seeker.lockState == Tracking) {
+			uint8_t trackColor[3] = {0, 255, 100};
+			snprintf(text, sizeof(text), "SEEKER LOCKED ON TARGET!");
+			addTextOpenCL(ocl, font, text, ScreenWidth / 2 - 120, 70, trackColor);
+		}
+	}
+
 #ifdef DEBUG
 	snprintf(text, sizeof(text), "Cam Pos: %.1f %.1f %.1f", camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]);
 	addTextOpenCL(ocl, font, text, 5, 20, white);
@@ -4533,28 +4618,11 @@ int main() {
 			enum RenderMode oldMode = camera.renderMode;
 			camera.renderMode = (camera.renderMode + 1) % RENDER_MODE_COUNT;
 		}
-		if (paused) {
-			printf("Simulation Paused \n");
-		} else {
-			printf("Simulation Running \n");
-		}
 		if (isKeyPressed(GLFW_KEY_P)) {
-			printf("Simulation Paused\n");
 			paused = !paused;
 		}
-		if (fireMissile) {
-			printf("1. Missile Fired\n");
-		} else {
-			printf("2. No Missile Fired\n");
-		}
 		if (isKeyPressed(GLFW_KEY_F)) {
-			printf("Fire Missile\n");
 			fireMissile = true;
-		}
-		if (fireMissile) {
-			printf("3. Missile Fired\n");
-		} else {
-			printf("4. No Missile Fired\n");
 		}
 		if (isKeyPressed(GLFW_KEY_O)) {
 			camera.AntiAlias = !camera.AntiAlias;
@@ -4610,9 +4678,14 @@ int main() {
 		clock_t startGridTime = clock();
 		if (!paused) {
 			float tmp = 0.0f;
-			renderAllMissileFiresView(&ocl, &missiles, &tmp, fireMissile, &camera, 1 / 60.0f);
-			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime); // Always update grid data
+			renderAllMissileFiresView(&ocl, &missiles, &tmp, &fireMissile, &camera, 1 / 60.0f);
+			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime);
 			fireSimStep(fireParticles, 1 / TPS, &gpuTimings.fireSimulationTime);
+			firedMissileTime -= 1 / 60.0f;
+			if (firedMissileTime < 0.0f) {
+				firedMissileTime = 0.0f;
+				firedMissileIdx = -1;
+			}
 		}
 		clock_t endGridTime = clock();
 		dt1 = (float)(endGridTime - startGridTime) / (float)CLOCKS_PER_SEC;

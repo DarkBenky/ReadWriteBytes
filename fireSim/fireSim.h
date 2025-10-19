@@ -2,8 +2,9 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 250
-#define MAX_FIRE_SIMS 2
+#define MAX_FIRE_SIMS 16
 #define G 9.81f
+#define MAX_FLOAT 3.402823466e+38F
 
 #include "../openGlShaders/gpuStruct.h"
 #include <stdbool.h>
@@ -39,12 +40,25 @@ enum MissileLock{
     Lunching
 };
 
+struct SensorReading {
+    float position[3];
+    float signalStrength;
+    float signalType;
+    float confidence;
+};
+
 struct Seeker {
     struct Camera seekerCamera;
-    float seekerFov; // Seeker gimbal limit (degrees)
-    int seekerSteps; // Number of steps preferred in one simulation step
+    float seekerFov;
+    int seekerSteps;
     float searchMultiplayer;
     enum  MissileLock lockState;
+    
+    struct SensorReading sensorReadings[16];
+    int sensorReadingCount;
+    float coneSearchRadius;
+    float coneSearchDepth;
+    float lastDetectionConfidence;
 };
 
 
@@ -99,6 +113,7 @@ struct Missile {
     float maxAoA;                         // Maximum safe angle of attack (radians)
     // Example: Higher maxAoA (e.g., 0.52 rad/30°) allows more aggressive turns but risks stall
     float maxLoadFactor;                  // Maximum structural g-load
+    float maxSpeed;                       // Maximum velocity limit (m/s)
     
     // Guidance & control
     float guidanceGain;                   // Proportional navigation gain constant
@@ -108,6 +123,16 @@ struct Missile {
     // Example: Lower value (0.6) = aggressive turns, higher (0.9) = energy conservation
     float optimalSpeed;                   // Design cruise speed for best performance (m/s)
     
+    // Sensor parameters
+    float searchConeAngle;                // Search mode cone width (radians)
+    float searchConeDepth;                // Search mode detection range (meters)
+    float trackingConeAngle;              // Tracking mode cone width (radians)
+    float trackingConeDepth;              // Tracking mode detection range (meters)
+    float sensorFusionWeight;             // How much to trust sensor data vs image (0-1)
+    float engineSignalSensitivity;        // Multiplier for engine thrust detection
+    float velocitySignalSensitivity;      // Multiplier for velocity signal detection
+    float minTrackConfidence;             // Minimum confidence to maintain tracking (0-1)
+    
     // Simulation
     float remainingTime;                  // Time until self-destruct (seconds)
     struct FireSOA *fireSim;              // Exhaust plume and visual effects
@@ -116,6 +141,8 @@ struct Missile {
     float machNumber;                     // Current Mach number (speed/speed_of_sound)
     float dynamicPressure;                // Current dynamic pressure 0.5*ρ*v² (Pa)
     float prevLOS[3];                     // Previous line-of-sight vector for guidance
+    float losRateSmoothed[3];             // Smoothed LOS rate for stable guidance
+    float losRateWeight;                  // Smoothing factor for LOS rate (0-1)
 };
 
 struct Missiles {
@@ -136,7 +163,10 @@ void cleanupMissile(struct Missile *missile);
 
 void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *missileModel);
 void CleanupMissiles(struct Missiles *missiles);
-void missileSeekStep(struct Missile *missile, bool fire, bool foundTarget, float targetDir[3], bool *active, float deltaTime, float *timeTook, float *fireSimulationTime);
+void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool fire, bool foundTarget, float targetDir[3], float targetPos[3], float targetVel[3], bool *active, float deltaTime, float *timeTook, float *fireSimulationTime);
 float randRange(float min, float max);
+
+void scanConeForTargets(struct Missile *missile, struct Missiles *allMissiles, float coneAngle, float coneDepth);
+void fuseSensorData(struct Missile *missile, float *fusedTargetPos, float *fusedConfidence);
 
 #endif
