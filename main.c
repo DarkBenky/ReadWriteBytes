@@ -23,10 +23,8 @@
 #include "openGlShaders/gpuStruct.h"
 
 void *SharedMem = NULL;
-
-#define SEEKER_SIZE 128 // Size of seeker view (64x64 pixels)
-#define chartPosY 480	// Y position on screen for timing chart
-#define chartPosX 700	// X position on screen for timing chart
+#define chartPosY 480 // Y position on screen for timing chart
+#define chartPosX 700 // X position on screen for timing chart
 #define MAX_TEXT_LENGTH 2048
 // temporary buffer for saving text
 char text[MAX_TEXT_LENGTH];
@@ -360,50 +358,125 @@ int launchOverlayImageOpenCL(
 	return 1;
 }
 
-void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs, int mode, bool *foundTarget, float (*targetDirection)[3], int idx) {
+int renderDepthBufferFastOpenCL(
+	struct OpenCLContext *ocl,
+	cl_mem v1_buffer,	   // Device buffer: triangle vertex 1 data
+	cl_mem v2_buffer,	   // Device buffer: triangle vertex 2 data
+	cl_mem v3_buffer,	   // Device buffer: triangle vertex 3 data
+	cl_mem normals_buffer, // Device buffer: triangle normals (can be NULL)
+	cl_mem output_buffer,  // Device buffer: output depth buffer
+	int triangle_count,	   // Number of triangles to render
+	float cam_pos[3],	   // Camera position
+	float cam_dir[3],	   // Camera direction
+	float fov,			   // Field of view
+	int screen_width,	   // Screen width
+	int screen_height,	   // Screen height
+	float *out_depth_cpu,  // CPU buffer to read back depth data (optional)
+	float *outGpuMs		   // Output GPU time in milliseconds (optional)
+) {
+	if (!ocl || !ocl->renderDepthBufferFast_kernel) {
+		fprintf(stderr, "Depth kernel or context not initialized\n");
+		return 0;
+	}
+
+	if (!v1_buffer || !v2_buffer || !v3_buffer || !output_buffer || triangle_count <= 0) {
+		fprintf(stderr, "Invalid parameters for depth rendering\n");
+		return 0;
+	}
+
+	cl_int err;
+	cl_event evt = NULL;
+
+	// Prepare camera parameters
+	cl_float3 cl_cam_pos = {cam_pos[0], cam_pos[1], cam_pos[2]};
+	cl_float3 cl_cam_dir = {cam_dir[0], cam_dir[1], cam_dir[2]};
+	cl_int cl_screen_width = screen_width;
+	cl_int cl_screen_height = screen_height;
+	cl_float cl_fov = fov;
+	cl_int cl_triangle_count = triangle_count;
+
+	// Set kernel arguments
+	err = clSetKernelArg(ocl->renderDepthBufferFast_kernel, 0, sizeof(cl_mem), &v1_buffer);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 1, sizeof(cl_mem), &v2_buffer);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 2, sizeof(cl_mem), &v3_buffer);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 3, sizeof(cl_mem), &normals_buffer);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 4, sizeof(cl_mem), &output_buffer);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 5, sizeof(cl_int), &cl_triangle_count);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 6, sizeof(cl_float3), &cl_cam_pos);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 7, sizeof(cl_float3), &cl_cam_dir);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 8, sizeof(cl_float), &cl_fov);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 9, sizeof(cl_int), &cl_screen_width);
+	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 10, sizeof(cl_int), &cl_screen_height);
+
+	if (err != CL_SUCCESS) {
+		fprintf(stderr, "Error setting renderDepthBufferFast kernel args: %s (%d)\n", clErrorString(err), err);
+		return 0;
+	}
+
+	// Execute kernel
+	size_t global_size = triangle_count;
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderDepthBufferFast_kernel, 1, NULL,
+								 &global_size, NULL, 0, NULL, &evt);
+
+	if (err != CL_SUCCESS) {
+		fprintf(stderr, "Error enqueuing renderDepthBufferFast kernel: %s (%d)\n", clErrorString(err), err);
+		return 0;
+	}
+
+	// Wait for kernel to complete
+	clFinish(ocl->queue);
+
+	// Read back depth buffer to CPU if requested
+	if (out_depth_cpu != NULL) {
+		size_t buffer_size = screen_width * screen_height * sizeof(float);
+		err = clEnqueueReadBuffer(ocl->queue, output_buffer, CL_TRUE, 0, buffer_size,
+								  out_depth_cpu, 0, NULL, NULL);
+		if (err != CL_SUCCESS) {
+			fprintf(stderr, "Error reading back depth buffer: %s (%d)\n", clErrorString(err), err);
+			if (evt) clReleaseEvent(evt);
+			return 0;
+		}
+	}
+
+	// Calculate GPU time if requested
+	if (outGpuMs != NULL) {
+		cl_ulong t0 = 0, t1 = 0;
+		if (evt) {
+			clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(t0), &t0, NULL);
+			clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(t1), &t1, NULL);
+			*outGpuMs = (t1 - t0) * 1e-6f;
+		} else {
+			*outGpuMs = 0.0f;
+		}
+	}
+
+	if (evt) clReleaseEvent(evt);
+	return 1;
+}
+
+void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs, bool *foundTarget, float (*targetDirection)[3], int idx) {
 	if (!missiles || missiles->count == 0) return;
 
 	cl_int err;
 	float zeroFloat = 0.0f;
 
-	// make screen size variables visible to both branches
 	cl_int screenWidth = ScreenWidth;
 	cl_int screenHeight = ScreenHeight;
 
-	// Clear fire rendering buffers once
-	if (mode != 0) {
-		// use seeker size when in seeker mode
-		screenWidth = SEEKER_SIZE;
-		screenHeight = SEEKER_SIZE;
+	// Clear fire rendering buffers
+	err = clEnqueueFillBuffer(ocl->queue, ocl->FireScreenDistances, &zeroFloat, sizeof(float), 0,
+							  ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenNormals, &zeroFloat, sizeof(float), 0,
+							   ScreenWidth * ScreenHeight * sizeof(float) * 3, 0, NULL, NULL);
+	err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenAlphas, &zeroFloat, sizeof(float), 0,
+							   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
 
-		err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_seeker_distances, &zeroFloat, sizeof(float), 0,
-								  SEEKER_SIZE * SEEKER_SIZE * sizeof(float), 0, NULL, NULL);
-		err |= clEnqueueFillBuffer(ocl->queue, ocl->buffer_seeker_normals, &zeroFloat, sizeof(float), 0,
-								   SEEKER_SIZE * SEEKER_SIZE * sizeof(float) * 3, 0, NULL, NULL);
-		err |= clEnqueueFillBuffer(ocl->queue, ocl->buffer_seeker_view, &zeroFloat, sizeof(float), 0,
-								   SEEKER_SIZE * SEEKER_SIZE * sizeof(float), 0, NULL, NULL);
+	cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
 
-		cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
-
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 0, sizeof(cl_mem), &ocl->buffer_seeker_colors);
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 1, sizeof(cl_float3), &backgroundColor);
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 2, sizeof(cl_int), &screenWidth);
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 3, sizeof(cl_int), &screenHeight);
-	} else {
-		err = clEnqueueFillBuffer(ocl->queue, ocl->FireScreenDistances, &zeroFloat, sizeof(float), 0,
-								  ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-		err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenNormals, &zeroFloat, sizeof(float), 0,
-								   ScreenWidth * ScreenHeight * sizeof(float) * 3, 0, NULL, NULL);
-		err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenAlphas, &zeroFloat, sizeof(float), 0,
-								   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-
-		cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
-
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 1, sizeof(cl_float3), &backgroundColor);
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 2, sizeof(cl_int), &screenWidth);
-		err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 3, sizeof(cl_int), &screenHeight);
-	}
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 1, sizeof(cl_float3), &backgroundColor);
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 2, sizeof(cl_int), &screenWidth);
+	err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 3, sizeof(cl_int), &screenHeight);
 
 	size_t global_size[2] = {(size_t)screenWidth, (size_t)screenHeight};
 	err = clEnqueueNDRangeKernel(ocl->queue, ocl->clearColorBuffer_kernel, 2, NULL,
@@ -416,10 +489,7 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 	// Render each missile's body and fire
 	for (int i = 0; i < missiles->count; i++) {
 		struct Missile *missile = missiles->missiles[i];
-		if ((!missile || !missiles->active[i]) && mode == 0) continue;
-		if (idx == i && mode != 0) {
-			continue;
-		}
+		if (!missile || !missiles->active[i]) continue;
 
 		// === RENDER MISSILE BODY ===
 		cl_float3 missile_pos = {missile->position[0], missile->position[1], missile->position[2]};
@@ -453,19 +523,11 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 		err |= clSetKernelArg(ocl->renderMissile_kernel, 21, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
 		err |= clSetKernelArg(ocl->renderMissile_kernel, 22, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
 
-		if (mode != 0) {
-			// seeker mode
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 17, sizeof(cl_mem), &ocl->buffer_seeker_distances);
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 18, sizeof(cl_mem), &ocl->buffer_seeker_colors);
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 19, sizeof(cl_mem), &ocl->buffer_seeker_normals);
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 23, sizeof(cl_mem), &ocl->buffer_seeker_view);
-		} else {
-			// normal screen mode
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 17, sizeof(cl_mem), &ocl->FireScreenDistances);
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 18, sizeof(cl_mem), &ocl->FireScreenColors);
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 19, sizeof(cl_mem), &ocl->FireScreenNormals);
-			err |= clSetKernelArg(ocl->renderMissile_kernel, 23, sizeof(cl_mem), &ocl->FireScreenAlphas);
-		}
+		// normal screen mode
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 17, sizeof(cl_mem), &ocl->FireScreenDistances);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 18, sizeof(cl_mem), &ocl->FireScreenColors);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 19, sizeof(cl_mem), &ocl->FireScreenNormals);
+		err |= clSetKernelArg(ocl->renderMissile_kernel, 23, sizeof(cl_mem), &ocl->FireScreenAlphas);
 
 		if (err != CL_SUCCESS) {
 			printf("Error setting missile render kernel args for missile %d: %d\n", i, err);
@@ -568,19 +630,11 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 		err |= clSetKernelArg(ocl->fire_render_kernel, 23, sizeof(cl_int), &numPoints);
 		err |= clSetKernelArg(ocl->fire_render_kernel, 24, sizeof(cl_int), &particleRadius);
 
-		if (mode != 0) {
-			// seeker mode
-			err |= clSetKernelArg(ocl->fire_render_kernel, 19, sizeof(cl_mem), &ocl->buffer_seeker_distances);
-			err |= clSetKernelArg(ocl->fire_render_kernel, 20, sizeof(cl_mem), &ocl->buffer_seeker_colors);
-			err |= clSetKernelArg(ocl->fire_render_kernel, 21, sizeof(cl_mem), &ocl->buffer_seeker_normals);
-			err |= clSetKernelArg(ocl->fire_render_kernel, 22, sizeof(cl_mem), &ocl->buffer_seeker_view);
-		} else {
-			// normal screen mode
-			err |= clSetKernelArg(ocl->fire_render_kernel, 19, sizeof(cl_mem), &ocl->FireScreenDistances);
-			err |= clSetKernelArg(ocl->fire_render_kernel, 20, sizeof(cl_mem), &ocl->FireScreenColors);
-			err |= clSetKernelArg(ocl->fire_render_kernel, 21, sizeof(cl_mem), &ocl->FireScreenNormals);
-			err |= clSetKernelArg(ocl->fire_render_kernel, 22, sizeof(cl_mem), &ocl->FireScreenAlphas);
-		}
+		// normal screen mode
+		err |= clSetKernelArg(ocl->fire_render_kernel, 19, sizeof(cl_mem), &ocl->FireScreenDistances);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 20, sizeof(cl_mem), &ocl->FireScreenColors);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 21, sizeof(cl_mem), &ocl->FireScreenNormals);
+		err |= clSetKernelArg(ocl->fire_render_kernel, 22, sizeof(cl_mem), &ocl->FireScreenAlphas);
 
 		if (err != CL_SUCCESS) {
 			printf("Error setting fire kernel args for missile %d: %d\n", i, err);
@@ -615,7 +669,7 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 	*timeTookMs = totalFireTime + totalMissileRenderTime;
 
 	// Apply blur to all fires at once
-	if (ocl->blur_fire_kernel != NULL && mode == 0) {
+	if (ocl->blur_fire_kernel != NULL) {
 		const int NUM_BLUR_PASSES = 2;
 		cl_int blurRadius = 3;
 		cl_float sigmaColor = 0.8f;
@@ -668,87 +722,6 @@ void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles,
 									  0, 0, screenWidth * screenHeight * sizeof(float),
 									  0, NULL, NULL);
 			clFinish(ocl->queue);
-		}
-		// Updated seeker mode code with optimized GPU readback
-
-	} else if (mode != 0) {
-		// Seeker functionality
-		cl_int seekerW = SEEKER_SIZE;
-		cl_int seekerH = SEEKER_SIZE;
-		cl_float3 cam_pos_k = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
-		cl_float3 cam_dir_k = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
-		cl_float fov_k = camera->fov;
-		cl_int sampleRadius = 5;
-		cl_int iterations = 1;
-
-		// Set kernel arguments
-		err = clSetKernelArg(ocl->missile_seeker_kernel, 0, sizeof(cl_mem), &ocl->buffer_seeker_distances);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 1, sizeof(cl_mem), &ocl->buffer_seeker_temp);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 2, sizeof(cl_mem), &ocl->seeker_output);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 3, sizeof(cl_mem), &ocl->seeker_dir);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 4, sizeof(cl_int), &seekerW);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 5, sizeof(cl_int), &seekerH);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 6, sizeof(cl_float3), &cam_pos_k);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 7, sizeof(cl_float3), &cam_dir_k);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 8, sizeof(cl_float), &fov_k);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 9, sizeof(cl_int), &sampleRadius);
-		err |= clSetKernelArg(ocl->missile_seeker_kernel, 10, sizeof(cl_int), &iterations);
-
-		if (err != CL_SUCCESS) {
-			printf("Error setting kernel arguments: %d\n", err);
-			return; // or handle error appropriately
-		}
-
-		// Launch kernel
-		size_t seeker_global_size[2] = {SEEKER_SIZE, SEEKER_SIZE};
-		err = clEnqueueNDRangeKernel(ocl->queue, ocl->missile_seeker_kernel, 2, NULL,
-									 seeker_global_size, NULL, 0, NULL, NULL);
-
-		if (err != CL_SUCCESS) {
-			printf("Error executing missile seeker kernel: %d\n", err);
-			return;
-		}
-
-		// Use mapped memory for faster readback
-		cl_float4 *hotspot = (cl_float4 *)clEnqueueMapBuffer(
-			ocl->queue,
-			ocl->seeker_output,
-			CL_TRUE, // Blocking - waits for kernel to complete
-			CL_MAP_READ,
-			0,
-			sizeof(cl_float4),
-			0, NULL, NULL, &err);
-
-		cl_float3 *hotspotDir = NULL;
-		if (err == CL_SUCCESS) {
-			hotspotDir = (cl_float3 *)clEnqueueMapBuffer(
-				ocl->queue,
-				ocl->seeker_dir,
-				CL_TRUE,
-				CL_MAP_READ,
-				0,
-				sizeof(cl_float3),
-				0, NULL, NULL, &err);
-		}
-
-		if (err == CL_SUCCESS && hotspot != NULL && hotspotDir != NULL) {
-			*foundTarget = (hotspot->z > 0.0f);
-			if (*foundTarget) {
-				printf("Target found by seeker at (%f, %f, %f)\n", hotspotDir->x, hotspotDir->y, hotspotDir->z);
-				targetDirection[0][0] = hotspotDir->x;
-				targetDirection[0][1] = hotspotDir->y;
-				targetDirection[0][2] = hotspotDir->z;
-			}
-
-			// Unmap buffers
-			clEnqueueUnmapMemObject(ocl->queue, ocl->seeker_output, hotspot, 0, NULL, NULL);
-			clEnqueueUnmapMemObject(ocl->queue, ocl->seeker_dir, hotspotDir, 0, NULL, NULL);
-		} else {
-			printf("Error mapping seeker output buffers: %d\n", err);
-			// Clean up any successful maps
-			if (hotspot != NULL) {
-				clEnqueueUnmapMemObject(ocl->queue, ocl->seeker_output, hotspot, 0, NULL, NULL);
-			}
 		}
 	}
 }
@@ -823,7 +796,7 @@ void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missi
 		float distanceToCamera = sqrtf(dx * dx + dy * dy + dz * dz);
 
 		if (active && distanceToCamera > 35.0f) {
-			renderAllMissileFires(ocl, missiles, &missile->seeker.seekerCamera, &tempTimeTookMs, 1, &foundTarget, &targetDir, i);
+			renderAllMissileFires(ocl, missiles, &missile->seeker.seekerCamera, &tempTimeTookMs, &foundTarget, &targetDir, i);
 			totalTimeTookMs += tempTimeTookMs;
 
 			if (foundTarget) {
@@ -2398,6 +2371,12 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	ocl->renderDepth = clCreateKernel(ocl->program, "renderDepthBufferFast", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating missile render kernel: %s\n", clErrorString(err));
+		return 0;
+	}
+
 	ocl->renderFireTemperature_kernel = clCreateKernel(ocl->program, "filterOverlap", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating renderFireTemperature kernel: %d\n", err);
@@ -2539,79 +2518,11 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	// ocl->seeker_output = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, sizeof(cl_float4), NULL, &err);
-
-	// if (err != CL_SUCCESS) {
-	// 	printf("Error creating seeker output buffer: %d\n", err);
-	// 	return 0;
-	// }
-
-	// ocl->seeker_dir = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY, sizeof(cl_float3), NULL, &err);
-
-	// if (err != CL_SUCCESS) {
-	// 	printf("Error creating seeker dir buffer: %d\n", err);
-	// 	return 0;
-	// }
-
-	ocl->buffer_seeker_view = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-											 SEEKER_SIZE * SEEKER_SIZE * sizeof(float), NULL, &err);
-
-	if (err != CL_SUCCESS) {
-		printf("Error creating seeker view buffer: %d\n", err);
-		return 0;
-	}
-
-	ocl->buffer_seeker_colors = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-											   SEEKER_SIZE * SEEKER_SIZE * sizeof(float), NULL, &err);
-
-	if (err != CL_SUCCESS) {
-		printf("Error creating seeker view buffer: %d\n", err);
-		return 0;
-	}
-
-	ocl->buffer_seeker_overview = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-												 SEEKER_SIZE * SEEKER_SIZE * sizeof(float), NULL, &err);
-
-	if (err != CL_SUCCESS) {
-		printf("Error creating seeker view buffer: %d\n", err);
-		return 0;
-	}
-
-	ocl->seeker_output = clCreateBuffer(
-		ocl->context,
-		CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR,
-		sizeof(cl_float4),
-		NULL,
-		&err);
-
-	ocl->seeker_dir = clCreateBuffer(
-		ocl->context,
-		CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR,
-		sizeof(cl_float3),
-		NULL,
-		&err);
-
-	ocl->buffer_seeker_temp = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-											 SEEKER_SIZE * SEEKER_SIZE * sizeof(float), NULL, &err);
-
-	if (err != CL_SUCCESS) {
-		printf("Error creating seeker temp buffer: %d\n", err);
-		return 0;
-	}
-
 	ocl->buffer_seeker_distances = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-												  SEEKER_SIZE * SEEKER_SIZE * sizeof(float), NULL, &err);
+												  MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE * sizeof(float), NULL, &err);
 
 	if (err != CL_SUCCESS) {
 		printf("Error creating seeker view buffer: %d\n", err);
-		return 0;
-	}
-
-	ocl->buffer_seeker_normals = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
-												SEEKER_SIZE * SEEKER_SIZE * 3 * sizeof(float), NULL, &err);
-
-	if (err != CL_SUCCESS) {
-		printf("Error creating seeker temp buffer: %d\n", err);
 		return 0;
 	}
 
@@ -3175,7 +3086,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	bool temp = false;
 	float tempVec[3] = {0.0f, 0.0f, 0.0f};
 
-	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime, renderFromMainCamera, &temp, &tempVec, 0);
+	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime, &temp, &tempVec, 0);
 	renderFireParticles(ocl, fireParticles, camera, &gpuTimings->fireRenderingTime);
 
 	// Write data to GPU buffers

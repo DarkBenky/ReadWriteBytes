@@ -36,20 +36,10 @@ struct OpenCLContext {
 	cl_kernel composite_kernel;          // Compositing kernel
 	cl_kernel renderMissile_kernel;      // Missile rendering kernel
 	cl_kernel renderFireTemperature_kernel; // Fire temperature rendering kernel
-	cl_kernel missile_seeker_kernel;     // Missile seeker kernel
 	cl_kernel overlayImage_kernel;        // Overlay image kernel
+	cl_kernel renderDepth;
 	// buffers
-	cl_mem buffer_seeker_view;
-	cl_mem buffer_seeker_colors;
-	cl_mem buffer_seeker_temp;
-	cl_mem buffer_seeker_overview;
 	cl_mem buffer_seeker_distances;
-	cl_mem buffer_seeker_normals;
-	cl_mem seeker_output;
-	cl_mem seeker_dir;
-	cl_mem buffer_points;
-	cl_mem buffer_velocities;
-
 	cl_mem buffer_distances_temp;
 	cl_mem buffer_opacities_temp;
 	cl_mem buffer_triangle_colors;

@@ -5,12 +5,34 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <CL/cl.h>
+#define MAX_FLOAT 3.402823466e+38F
 #define G 9.81f
 #define min(a, b) ((a) < (b) ? (a) : (b))
+
+// GPU: Render distance map (seeker POV)
+//   ↓
+// CPU: glReadPixels() - copy distance buffer to CPU
+//   ↓
+// CPU: findClosestObjectToViewCenter() - select best target
+//   ↓
+// CPU: Missile simulation uses target position
 
 #define SPEED_OF_SOUND 340.29f
 #define SEA_LEVEL_DENSITY 1.225f
 #define SCALE_HEIGHT 8500.0f
+
+static float dot3(const float a[3], const float b[3]) {
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void normalize3(float v[3]) {
+	float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+	if (len > 0.0f) {
+		v[0] /= len;
+		v[1] /= len;
+		v[2] /= len;
+	}
+}
 
 float randRange(float min, float max) {
 	float scale = rand() / (float)RAND_MAX;
@@ -33,6 +55,121 @@ float getMachDragMultiplier(float mach, float transsonicPeak, float supersonicFa
 	}
 }
 
+// Returns index of hottest object in seeker FOV
+// centerWeight: 0.0-1.0, how much center alignment matters
+// tempWeight: 0.0-1.0, how much temperature matters
+// distWeight: 0.0-1.0, how much closeness matters
+// (weights should sum to 1.0 for best results)
+int findClosestObjectToViewCenter(
+	const float pos[3],
+	float dir[3],
+	float FOV,
+	const float *ObjX,
+	const float *ObjY,
+	const float *ObjZ,
+	const float *tempObj,
+	const float *seekerImageDistances,
+	int numOfObj,
+	float centerWeight,
+	float tempWeight,
+	float distWeight) {
+	if (numOfObj <= 0) return -1;
+
+	float viewDir[3] = {dir[0], dir[1], dir[2]};
+	normalize3(viewDir);
+
+	float fovHalfRad = (FOV / 2.0f) * (M_PI / 180.0f);
+	float fovCosThreshold = cosf(fovHalfRad);
+
+	int bestIdx = -1;
+	float bestScore = -FLT_MAX;
+
+	// Find max temp for normalization
+	float maxTemp = 0.0f;
+	for (int i = 0; i < numOfObj; i++) {
+		if (tempObj[i] > maxTemp) maxTemp = tempObj[i];
+	}
+	if (maxTemp < 0.001f) maxTemp = 1.0f;
+
+	for (int i = 0; i < numOfObj; i++) {
+		float objPos[3] = {ObjX[i], ObjY[i], ObjZ[i]};
+		float toObj[3] = {
+			objPos[0] - pos[0],
+			objPos[1] - pos[1],
+			objPos[2] - pos[2]};
+
+		float dist = sqrtf(toObj[0] * toObj[0] + toObj[1] * toObj[1] + toObj[2] * toObj[2]);
+
+		if (dist < 0.001f) continue;
+
+		float toObjNorm[3] = {toObj[0] / dist, toObj[1] / dist, toObj[2] / dist};
+		float cosAngle = dot3(viewDir, toObjNorm);
+
+		if (cosAngle < fovCosThreshold) continue;
+
+		// Check if object is occluded by geometry using seeker depth buffer
+		// Map object to seeker image coordinates
+		float rightVec[3], upVec[3];
+		// Create coordinate system from view direction
+		if (fabsf(viewDir[1]) < 0.99f) {
+			rightVec[0] = viewDir[2];
+			rightVec[1] = 0.0f;
+			rightVec[2] = -viewDir[0];
+		} else {
+			rightVec[0] = 1.0f;
+			rightVec[1] = 0.0f;
+			rightVec[2] = 0.0f;
+		}
+		normalize3(rightVec);
+		upVec[0] = rightVec[1] * viewDir[2] - rightVec[2] * viewDir[1];
+		upVec[1] = rightVec[2] * viewDir[0] - rightVec[0] * viewDir[2];
+		upVec[2] = rightVec[0] * viewDir[1] - rightVec[1] * viewDir[0];
+
+		float xProj = dot3(toObjNorm, rightVec);
+		float yProj = dot3(toObjNorm, upVec);
+
+		float angle = acosf(fmaxf(-1.0f, fminf(1.0f, cosAngle)));
+		float pixelX = (xProj / tanf(fovHalfRad)) * 0.5f + 0.5f;
+		float pixelY = (yProj / tanf(fovHalfRad)) * 0.5f + 0.5f;
+
+		int px = (int)(pixelX * MISSILE_SEEKER_SIZE);
+		int py = (int)(pixelY * MISSILE_SEEKER_SIZE);
+
+		// Check if object is occluded
+		if (px >= 0 && px < MISSILE_SEEKER_SIZE && py >= 0 && py < SEEKER_SIZE) {
+			int pixelIdx = py * MISSILE_SEEKER_SIZE + px;
+			float geometryDist = seekerImageDistances[pixelIdx];
+
+			// Object is occluded if geometry is closer (with small tolerance)
+			if (geometryDist > 0.0f && geometryDist < dist - 0.1f) {
+				continue;
+			}
+		}
+
+		// Angular score: 1.0 (centered) to 0.0 (edge of FOV)
+		float angularScore = 1.0f - (angle / fovHalfRad);
+
+		// Temperature with inverse square falloff (like real IR radiation)
+		float tempAtSeeker = (tempObj[i] / maxTemp) / (dist * dist);
+		float tempScore = tempAtSeeker;
+
+		// Distance score: inverse so closer is better
+		float distScore = 1.0f / (1.0f + dist);
+
+		// Combined score (higher is better)
+		float score = centerWeight * angularScore +
+					  tempWeight * tempScore +
+					  distWeight * distScore;
+
+		if (score > bestScore) {
+			bestScore = score;
+			bestIdx = i;
+		}
+	}
+
+	return bestIdx;
+}
+
 void InitializeMissile(struct Missile *missile) {
 	// Seeker initialization
 	missile->seeker.seekerCamera.ray.origin[0] = 0.0f;
@@ -46,6 +183,7 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerSteps = 1;
 	missile->seeker.lockState = Lunching;
 	missile->seeker.searchMultiplayer = randRange(3.0f, 8.0f);
+	missile->seeker.tiltSpeed = randRange(2.0f, 5.0f);
 
 	// Core simulation
 	missile->position[0] = randRange(-450.0f, 450.0f);
@@ -209,110 +347,7 @@ void setMissileTargetDirection(struct Missile *missile, float targetDir[3], floa
 	}
 }
 
-void scanConeForTargets(struct Missile *missile, struct Missiles *allMissiles, float coneAngle, float coneDepth) {
-	if (!allMissiles || allMissiles->count == 0) {
-		missile->seeker.sensorReadingCount = 0;
-		return;
-	}
-
-	missile->seeker.sensorReadingCount = 0;
-	float *rayDir = missile->seeker.seekerCamera.ray.direction;
-	float *rayOrigin = missile->seeker.seekerCamera.ray.origin;
-
-	for (int i = 0; i < allMissiles->count && missile->seeker.sensorReadingCount < 16; i++) {
-		struct Missile *target = allMissiles->missiles[i];
-		if (target == missile) continue;
-
-		float toTarget[3] = {
-			target->position[0] - rayOrigin[0],
-			target->position[1] - rayOrigin[1],
-			target->position[2] - rayOrigin[2]};
-
-		float distToTarget = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
-
-		if (distToTarget < coneDepth && distToTarget > 0.1f) {
-			float normalizedToTarget[3] = {
-				toTarget[0] / distToTarget,
-				toTarget[1] / distToTarget,
-				toTarget[2] / distToTarget};
-
-			float dotProduct = rayDir[0] * normalizedToTarget[0] +
-							   rayDir[1] * normalizedToTarget[1] +
-							   rayDir[2] * normalizedToTarget[2];
-
-			float angleToTarget = acosf(fmaxf(-1.0f, fminf(1.0f, dotProduct)));
-
-			if (angleToTarget < coneAngle) {
-				float engineSignal = (target->thrust / (target->maxGPull * G * target->totalMass + 0.1f)) * missile->engineSignalSensitivity;
-				float velocitySignal = (sqrtf(target->velocity[0] * target->velocity[0] +
-											  target->velocity[1] * target->velocity[1] +
-											  target->velocity[2] * target->velocity[2]) /
-										600.0f) *
-									   missile->velocitySignalSensitivity;
-				float thrustSignal = target->burning ? 1.0f : 0.1f;
-
-				float signalStrength = (engineSignal * 0.4f + velocitySignal * 0.3f + thrustSignal * 0.3f);
-				signalStrength *= (1.0f - angleToTarget / coneAngle) * (1.0f - distToTarget / coneDepth);
-
-				struct SensorReading *reading = &missile->seeker.sensorReadings[missile->seeker.sensorReadingCount];
-				reading->position[0] = target->position[0];
-				reading->position[1] = target->position[1];
-				reading->position[2] = target->position[2];
-				reading->signalStrength = signalStrength;
-				reading->signalType = engineSignal;
-				reading->confidence = (engineSignal > 0.3f && velocitySignal > 0.2f) ? 0.9f : 0.6f;
-
-				missile->seeker.sensorReadingCount++;
-			}
-		}
-	}
-}
-
-void fuseSensorData(struct Missile *missile, float *fusedTargetPos, float *fusedConfidence) {
-	if (missile->seeker.sensorReadingCount == 0) {
-		*fusedConfidence = 0.0f;
-		return;
-	}
-
-	float weightedPos[3] = {0.0f, 0.0f, 0.0f};
-	float totalWeight = 0.0f;
-	float maxConfidence = 0.0f;
-
-	for (int i = 0; i < missile->seeker.sensorReadingCount; i++) {
-		struct SensorReading *reading = &missile->seeker.sensorReadings[i];
-		float weight = reading->signalStrength * reading->confidence;
-
-		weightedPos[0] += reading->position[0] * weight;
-		weightedPos[1] += reading->position[1] * weight;
-		weightedPos[2] += reading->position[2] * weight;
-		totalWeight += weight;
-
-		if (reading->confidence > maxConfidence) {
-			maxConfidence = reading->confidence;
-		}
-	}
-
-	if (totalWeight > 0.001f) {
-		fusedTargetPos[0] = weightedPos[0] / totalWeight;
-		fusedTargetPos[1] = weightedPos[1] / totalWeight;
-		fusedTargetPos[2] = weightedPos[2] / totalWeight;
-		*fusedConfidence = maxConfidence * (1.0f - 0.1f * missile->seeker.sensorReadingCount);
-	} else {
-		*fusedConfidence = 0.0f;
-	}
-
-	missile->seeker.lastDetectionConfidence = *fusedConfidence;
-}
-
-void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool fire, bool foundTarget, float targetDir[3], float targetPos[3], float targetVel[3], bool *active, float deltaTime, float *timeTook, float *fireSimulationTime) {
-	if (foundTarget && *active) {
-		missile->seeker.lockState = Tracking;
-	} else if (!foundTarget && *active) {
-		missile->seeker.lockState = Searching;
-	} else if (fire && !*active) {
-		missile->seeker.lockState = Lunching;
-	}
-
+void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool fire, bool *active, float deltaTime, float *timeTook, float *fireSimulationTime, float lunchDir[3], float lunchPos[3]) {
 	float *rayDir = missile->seeker.seekerCamera.ray.direction;
 	float *rayOrigin = missile->seeker.seekerCamera.ray.origin;
 
@@ -321,165 +356,130 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 	rayOrigin[1] = missile->position[1] + missile->bodyOrientation[1] * seekerOffset;
 	rayOrigin[2] = missile->position[2] + missile->bodyOrientation[2] * seekerOffset;
 
-	if (missile->seeker.lockState == Searching) {
-		float fovRad = missile->seeker.seekerCamera.fov * missile->seeker.searchMultiplayer * (M_PI / 180.0f);
-		float maxGimbalRad = missile->seeker.seekerFov * (M_PI / 180.0f) / 2.0f;
+	if (missile->seeker.lockState == Lunching) {
+		if (fire) {
+			missile->seeker.lockState = Searching;
+			*active = true;
+		}
+		rayDir[0] = lunchDir[0];
+		rayDir[1] = lunchDir[1];
+		rayDir[2] = lunchDir[2];
 
-		float currentPitch = atan2f(rayDir[1], sqrtf(rayDir[0] * rayDir[0] + rayDir[2] * rayDir[2]));
-		float currentYaw = atan2f(rayDir[0], rayDir[2]);
+	} else if (missile->seeker.lockState == Searching) {
+		float fovHalfRad = (missile->seeker.seekerFov / 2.0f) * (M_PI / 180.0f);
 
-		float stepSize = fovRad * 0.5f;
-		currentYaw += stepSize;
+		static float searchYaw = 0.0f;
+		static float searchPitch = 0.0f;
 
-		if (currentYaw > maxGimbalRad) {
-			currentYaw = -maxGimbalRad;
-			currentPitch += stepSize;
+		float searchStep = fovHalfRad * 0.25f;
+		searchYaw += searchStep;
 
-			if (currentPitch > maxGimbalRad) {
-				currentPitch = -maxGimbalRad;
+		if (searchYaw > fovHalfRad) {
+			searchYaw = -fovHalfRad;
+			searchPitch += searchStep;
+			if (searchPitch > fovHalfRad) {
+				searchPitch = -fovHalfRad;
 			}
 		}
 
-		float cosPitch = cosf(currentPitch);
-		rayDir[0] = sinf(currentYaw) * cosPitch;
-		rayDir[1] = sinf(currentPitch);
-		rayDir[2] = cosf(currentYaw) * cosPitch;
+		float cosPitch = cosf(searchPitch);
+		rayDir[0] = sinf(searchYaw) * cosPitch;
+		rayDir[1] = sinf(searchPitch);
+		rayDir[2] = cosf(searchYaw) * cosPitch;
+		normalize3(rayDir);
 
-		float length = sqrtf(rayDir[0] * rayDir[0] + rayDir[1] * rayDir[1] + rayDir[2] * rayDir[2]);
-		rayDir[0] /= length;
-		rayDir[1] /= length;
-		rayDir[2] /= length;
+		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
+		int count = 0;
 
-		rayOrigin[0] = missile->position[0];
-		rayOrigin[1] = missile->position[1];
-		rayOrigin[2] = missile->position[2];
+		for (int i = 0; i < allMissiles->count; i++) {
+			if (i != allMissiles->count - 1 && allMissiles->active[i]) {
+				objX[count] = allMissiles->missiles[i]->position[0];
+				objY[count] = allMissiles->missiles[i]->position[1];
+				objZ[count] = allMissiles->missiles[i]->position[2];
+				count++;
+			}
+		}
 
-		float searchConeAngle = missile->searchConeAngle;
-		float searchConeDepth = missile->searchConeDepth;
-		scanConeForTargets(missile, allMissiles, searchConeAngle, searchConeDepth);
+		int bestIdx = findClosestObjectToViewCenter(
+			rayOrigin, rayDir, missile->seeker.seekerFov,
+			objX, objY, objZ, objX, missile->seeker.seekerDepthMap,
+			count, 0.4f, 0.3f, 0.3f);
 
-		float fusedPos[3];
-		float fusedConfidence;
-		fuseSensorData(missile, fusedPos, &fusedConfidence);
+		if (bestIdx >= 0 && bestIdx < count) {
+			float toTarget[3] = {
+				objX[bestIdx] - rayOrigin[0],
+				objY[bestIdx] - rayOrigin[1],
+				objZ[bestIdx] - rayOrigin[2]};
+			float dist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
 
-		if (fusedConfidence > missile->minTrackConfidence) {
-			float toFusedTarget[3] = {
-				fusedPos[0] - rayOrigin[0],
-				fusedPos[1] - rayOrigin[1],
-				fusedPos[2] - rayOrigin[2]};
-			float fusedDist = sqrtf(toFusedTarget[0] * toFusedTarget[0] + toFusedTarget[1] * toFusedTarget[1] + toFusedTarget[2] * toFusedTarget[2]);
-			if (fusedDist > 0.1f) {
-				rayDir[0] = toFusedTarget[0] / fusedDist;
-				rayDir[1] = toFusedTarget[1] / fusedDist;
-				rayDir[2] = toFusedTarget[2] / fusedDist;
+			if (dist > 0.1f) {
+				rayDir[0] = toTarget[0] / dist;
+				rayDir[1] = toTarget[1] / dist;
+				rayDir[2] = toTarget[2] / dist;
+
+				missile->targetPosition[0] = objX[bestIdx];
+				missile->targetPosition[1] = objY[bestIdx];
+				missile->targetPosition[2] = objZ[bestIdx];
+
+				missile->seeker.lockState = Tracking;
 			}
 		}
 
 	} else if (missile->seeker.lockState == Tracking) {
-		rayDir[0] = targetDir[0];
-		rayDir[1] = targetDir[1];
-		rayDir[2] = targetDir[2];
+		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
+		int count = 0;
 
-		missile->targetDirection[0] = targetDir[0];
-		missile->targetDirection[1] = targetDir[1];
-		missile->targetDirection[2] = targetDir[2];
-
-		if (foundTarget) {
-			float coneAngle = missile->trackingConeAngle;
-			float coneDepth = missile->trackingConeDepth;
-			scanConeForTargets(missile, allMissiles, coneAngle, coneDepth);
-
-			float fusedPos[3];
-			float fusedConfidence;
-			fuseSensorData(missile, fusedPos, &fusedConfidence);
-
-			float toTarget[3] = {
-				targetPos[0] - missile->position[0],
-				targetPos[1] - missile->position[1],
-				targetPos[2] - missile->position[2]};
-
-			float targetDistance = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
-
-			float finalTargetPos[3];
-			if (fusedConfidence > missile->minTrackConfidence) {
-				finalTargetPos[0] = fusedPos[0] * missile->sensorFusionWeight + targetPos[0] * (1.0f - missile->sensorFusionWeight);
-				finalTargetPos[1] = fusedPos[1] * missile->sensorFusionWeight + targetPos[1] * (1.0f - missile->sensorFusionWeight);
-				finalTargetPos[2] = fusedPos[2] * missile->sensorFusionWeight + targetPos[2] * (1.0f - missile->sensorFusionWeight);
-			} else {
-				finalTargetPos[0] = targetPos[0];
-				finalTargetPos[1] = targetPos[1];
-				finalTargetPos[2] = targetPos[2];
+		for (int i = 0; i < allMissiles->count; i++) {
+			if (i != allMissiles->count - 1 && allMissiles->active[i]) {
+				objX[count] = allMissiles->missiles[i]->position[0];
+				objY[count] = allMissiles->missiles[i]->position[1];
+				objZ[count] = allMissiles->missiles[i]->position[2];
+				count++;
 			}
+		}
 
-			if (targetDistance > 10.0f) {
-				float closingSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
-										   missile->velocity[1] * missile->velocity[1] +
-										   missile->velocity[2] * missile->velocity[2]);
+		int bestIdx = findClosestObjectToViewCenter(
+			rayOrigin, rayDir, missile->seeker.seekerFov,
+			objX, objY, objZ, objX, missile->seeker.seekerDepthMap,
+			count, 0.5f, 0.3f, 0.2f);
 
-				float timeToIntercept = targetDistance / fmaxf(closingSpeed, 100.0f);
+		if (bestIdx >= 0 && bestIdx < count) {
+			float toTarget[3] = {
+				objX[bestIdx] - rayOrigin[0],
+				objY[bestIdx] - rayOrigin[1],
+				objZ[bestIdx] - rayOrigin[2]};
+			float dist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
 
-				float predictedPos[3] = {
-					finalTargetPos[0] + targetVel[0] * timeToIntercept,
-					finalTargetPos[1] + targetVel[1] * timeToIntercept,
-					finalTargetPos[2] + targetVel[2] * timeToIntercept};
+			if (dist > 0.1f) {
+				float maxTilt = missile->seeker.tiltSpeed * deltaTime;
 
-				missile->targetPosition[0] = predictedPos[0];
-				missile->targetPosition[1] = predictedPos[1];
-				missile->targetPosition[2] = predictedPos[2];
-			} else {
-				missile->targetPosition[0] = finalTargetPos[0];
-				missile->targetPosition[1] = finalTargetPos[1];
-				missile->targetPosition[2] = finalTargetPos[2];
+				float targetDir[3] = {toTarget[0] / dist, toTarget[1] / dist, toTarget[2] / dist};
+
+				float dot = rayDir[0] * targetDir[0] + rayDir[1] * targetDir[1] + rayDir[2] * targetDir[2];
+				dot = fmaxf(-1.0f, fminf(1.0f, dot));
+
+				float angle = acosf(dot);
+				float t = (angle > 0.001f) ? fminf(maxTilt / angle, 1.0f) : 1.0f;
+
+				rayDir[0] = rayDir[0] * (1.0f - t) + targetDir[0] * t;
+				rayDir[1] = rayDir[1] * (1.0f - t) + targetDir[1] * t;
+				rayDir[2] = rayDir[2] * (1.0f - t) + targetDir[2] * t;
+				normalize3(rayDir);
+
+				missile->targetPosition[0] = objX[bestIdx];
+				missile->targetPosition[1] = objY[bestIdx];
+				missile->targetPosition[2] = objZ[bestIdx];
+
+				missile->targetDirection[0] = rayDir[0];
+				missile->targetDirection[1] = rayDir[1];
+				missile->targetDirection[2] = rayDir[2];
+
+				missile->prevLOS[0] = rayDir[0];
+				missile->prevLOS[1] = rayDir[1];
+				missile->prevLOS[2] = rayDir[2];
 			}
 		} else {
-			float virtualTargetDistance = 1000.0f;
-			missile->targetPosition[0] = missile->position[0] + targetDir[0] * virtualTargetDistance;
-			missile->targetPosition[1] = missile->position[1] + targetDir[1] * virtualTargetDistance;
-			missile->targetPosition[2] = missile->position[2] + targetDir[2] * virtualTargetDistance;
-		}
-
-		float turnRate = 3.0f;
-		float targetLength = sqrtf(targetDir[0] * targetDir[0] + targetDir[1] * targetDir[1] + targetDir[2] * targetDir[2]);
-
-		if (targetLength > 0.001f) {
-			float normalizedTarget[3] = {targetDir[0] / targetLength, targetDir[1] / targetLength, targetDir[2] / targetLength};
-
-			float dotProduct = missile->bodyOrientation[0] * normalizedTarget[0] +
-							   missile->bodyOrientation[1] * normalizedTarget[1] +
-							   missile->bodyOrientation[2] * normalizedTarget[2];
-
-			dotProduct = fmaxf(-1.0f, fminf(1.0f, dotProduct));
-
-			float maxTurnAngle = turnRate * deltaTime;
-			float currentAngle = acosf(dotProduct);
-			float t = (currentAngle > 0.001f) ? fminf(maxTurnAngle / currentAngle, 1.0f) : 1.0f;
-
-			missile->bodyOrientation[0] = missile->bodyOrientation[0] * (1.0f - t) + normalizedTarget[0] * t;
-			missile->bodyOrientation[1] = missile->bodyOrientation[1] * (1.0f - t) + normalizedTarget[1] * t;
-			missile->bodyOrientation[2] = missile->bodyOrientation[2] * (1.0f - t) + normalizedTarget[2] * t;
-
-			float length = sqrtf(missile->bodyOrientation[0] * missile->bodyOrientation[0] +
-								 missile->bodyOrientation[1] * missile->bodyOrientation[1] +
-								 missile->bodyOrientation[2] * missile->bodyOrientation[2]);
-			if (length > 0.001f) {
-				missile->bodyOrientation[0] /= length;
-				missile->bodyOrientation[1] /= length;
-				missile->bodyOrientation[2] /= length;
-			}
-		}
-
-	} else if (missile->seeker.lockState == Lunching) {
-		rayDir[0] = missile->targetDirection[0];
-		rayDir[1] = missile->targetDirection[1];
-		rayDir[2] = missile->targetDirection[2];
-
-		rayOrigin[0] = missile->position[0];
-		rayOrigin[1] = missile->position[1];
-		rayOrigin[2] = missile->position[2];
-
-		if (fire) {
-			missile->seeker.lockState = Tracking;
-			*active = true;
+			missile->seeker.lockState = Searching;
 		}
 	}
 
@@ -936,13 +936,6 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 						(end.tv_nsec - start.tv_nsec) / 1e6);
 }
 
-void cleanupMissile(struct Missile *missile) {
-	if (missile->fireSim) {
-		free(missile->fireSim);
-		missile->fireSim = NULL;
-	}
-}
-
 void InitializeFireParticles(struct FireSOA *particles) {
 	particles->buoyancy = 14.0f;
 	particles->drag = 0.985f;
@@ -1101,27 +1094,6 @@ void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *
 
 		missiles->active[i] = false;
 	}
-}
-
-// void UpdateAllMissiles(struct Missiles *missiles, float deltaTime, float *simTime, float *fireSimulationTime) {
-// 	for (int i = 0; i < missiles->count; i++) {
-// 		if (!missiles->active[i] && missiles->missiles[i]->seeker.lockState != Lunching) {
-// 			missileSimStep(missiles->missiles[i], deltaTime, simTime, &missiles->active[i], fireSimulationTime);
-// 		} else {
-// 			printf("Waiting for launch...\n");
-// 		}
-// 	}
-// }
-
-void CleanupMissiles(struct Missiles *missiles) {
-	for (int i = 0; i < missiles->count; i++) {
-		if (missiles->missiles[i]) {
-			cleanupMissile(missiles->missiles[i]);
-			free(missiles->missiles[i]);
-			missiles->missiles[i] = NULL;
-		}
-	}
-	missiles->count = 0;
 }
 
 #ifdef FIRE_BENCHMARK

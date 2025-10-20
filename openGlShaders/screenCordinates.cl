@@ -1,442 +1,5 @@
 #define FLT_MAX 3.402823466e+38F
 
-typedef struct {
-    float   BoundingBox[6]; // minX, minY, minZ, maxX, maxY, maxZ
-    int     LeftChild;        // Index of left child node -1 => no child
-    int     RightChild;       // Index of right child node -1 => no child
-    int     TriangleIndex;    // -1 => internal node
-} BVHNode;
-
-typedef struct{
-    float3  v1; // Vertex 1
-    float3  v2; // Vertex 2
-    float3  v3; // Vertex 3
-    float3  normal; // Normal vector
-    float3  color; // RGB color
-    float   Roughness; // Material roughness
-    float   Metallic; // Material metallic
-    float   Emission; // Material emission
-    int     TriangleIndex; // Index of the triangle
-} Triangle;
-
-typedef struct  {
-    __global BVHNode  *Nodes; // Array of BVH nodes
-    __global Triangle *Triangles; // Array of triangles
-    int NodesCount; // Number of nodes in the BVH
-    int TrianglesCount; // Number of triangles in the BVH
-} BVHLinear;
-
-typedef struct {
-    float3  PointOfIntersection;
-    float3  NormalAtIntersection;
-    float3  ColorAtIntersection;
-    float   Distance; 
-    int     TriangleIndex;
-    bool    Hit;
-} IntersectionTriangle;
-
-typedef struct {
-    int     TriangleIndex; // Index of the triangle if this is a leaf node, -1 otherwise
-    bool    IsLeaf; // True if this is a leaf node, false if it has children
-    bool    IsHit; // True if this bounding box was hit by the ray
-} IntersectionBoundingBox;
-
-typedef struct {
-    float3 Position;
-    float3 Direction;
-} Ray;
-
-float3 reflectVector(float3 incident, float3 normal) {
-    return incident - 2.0f * dot(incident, normal) * normal;
-}
-
-IntersectionBoundingBox intersectBoundingBox(
-    Ray ray, 
-    __global const BVHNode *bvhNodes, 
-    int nodeIndex
-) {
-    IntersectionBoundingBox result;
-    result.IsHit = false;
-    result.IsLeaf = false;
-    result.TriangleIndex = -1;
-
-    const BVHNode node = bvhNodes[nodeIndex];
-
-    // FIX: Add safety checks for division by zero
-    float tMin, tMax;
-    if (fabs(ray.Direction.x) > 1e-6f) {
-        tMin = (node.BoundingBox[0] - ray.Position.x) / ray.Direction.x;
-        tMax = (node.BoundingBox[3] - ray.Position.x) / ray.Direction.x;
-        if (tMin > tMax) {
-            float temp = tMin; tMin = tMax; tMax = temp;
-        }
-    } else {
-        // Ray is parallel to X planes
-        if (ray.Position.x < node.BoundingBox[0] || ray.Position.x > node.BoundingBox[3]) {
-            return result;
-        }
-        tMin = -FLT_MAX;
-        tMax = FLT_MAX;
-    }
-
-    // Similar fixes for Y and Z axes
-    float tyMin, tyMax;
-    if (fabs(ray.Direction.y) > 1e-6f) {
-        tyMin = (node.BoundingBox[1] - ray.Position.y) / ray.Direction.y;
-        tyMax = (node.BoundingBox[4] - ray.Position.y) / ray.Direction.y;
-        if (tyMin > tyMax) {
-            float temp = tyMin; tyMin = tyMax; tyMax = temp;
-        }
-    } else {
-        if (ray.Position.y < node.BoundingBox[1] || ray.Position.y > node.BoundingBox[4]) {
-            return result;
-        }
-        tyMin = -FLT_MAX;
-        tyMax = FLT_MAX;
-    }
-
-    if ((tMin > tyMax) || (tyMin > tMax)) return result;
-    if (tyMin > tMin) tMin = tyMin;
-    if (tyMax < tMax) tMax = tyMax;
-
-    float tzMin, tzMax;
-    if (fabs(ray.Direction.z) > 1e-6f) {
-        tzMin = (node.BoundingBox[2] - ray.Position.z) / ray.Direction.z;
-        tzMax = (node.BoundingBox[5] - ray.Position.z) / ray.Direction.z;
-        if (tzMin > tzMax) {
-            float temp = tzMin; tzMin = tzMax; tzMax = temp;
-        }
-    } else {
-        if (ray.Position.z < node.BoundingBox[2] || ray.Position.z > node.BoundingBox[5]) {
-            return result;
-        }
-        tzMin = -FLT_MAX;
-        tzMax = FLT_MAX;
-    }
-
-    if ((tMin > tzMax) || (tzMin > tMax)) return result;
-    if (tzMin > tMin) tMin = tzMin;
-    if (tzMax < tMax) tMax = tzMax;
-
-    result.IsHit = true;
-    if (node.TriangleIndex != -1) {
-        result.IsLeaf = true;
-        result.TriangleIndex = node.TriangleIndex;
-    }
-
-    return result;
-}
-
-IntersectionTriangle intersectTriangle(
-    Ray ray, 
-    __global const Triangle *triangles, 
-    int triangleIndex
-) {
-    IntersectionTriangle result;
-    result.Hit = false;
-    result.TriangleIndex = -1;
-
-    const Triangle triangle = triangles[triangleIndex];
-
-    // Möller–Trumbore intersection algorithm
-    float3 edge1 = triangle.v2 - triangle.v1;
-    float3 edge2 = triangle.v3 - triangle.v1;
-    float3 h = cross(ray.Direction, edge2);
-    float a = dot(edge1, h);
-
-    if (fabs(a) < 1e-6f) {
-        return result; // Ray is parallel to the triangle
-    }
-
-    float f = 1.0f / a;
-    float3 s = ray.Position - triangle.v1;
-    float u = f * dot(s, h);
-
-    if (u < 0.0f || u > 1.0f) {
-        return result; // Not hit
-    }
-
-    float3 q = cross(s, edge1);
-    float v = f * dot(ray.Direction, q);
-
-    if (v < 0.0f || u + v > 1.0f) {
-        return result; // Not hit
-    }
-
-    // Calculate t to find the intersection point
-    float t = f * dot(edge2, q);
-    
-    if (t < 0.0f) {
-        return result; // Not hit
-    }
-
-    // Hit detected
-    result.Hit = true;
-    result.TriangleIndex = triangleIndex;
-    result.PointOfIntersection = ray.Position + ray.Direction * t;
-    
-    // Calculate normal at intersection
-    result.NormalAtIntersection = triangle.normal;
-    
-    // Set color at intersection
-    result.ColorAtIntersection = triangle.color;
-    
-    // Set distance from ray origin to intersection point
-    result.Distance = t;
-
-    return result;
-}
-
-
-float fract(float x) {
-    return x - floor(x);
-}
-
-// Add this helper function for better random number generation
-float hash(float seed) {
-    return fract(sin(seed * 12.9898f) * 43758.5453f);
-}
-
-float3 generateRoughnessBiasedDirection(
-    float3 normal, 
-    float3 perfectReflection, 
-    float roughness, 
-    float randomSeed
-) {
-    // Generate random numbers for spherical coordinates
-    float r1 = hash(randomSeed * 73.156f);
-    float r2 = hash(randomSeed * 47.832f);
-    
-    // Convert roughness to cone angle (more roughness = wider cone)
-    float maxAngle = roughness * 1.57079632679f; // roughness * PI/2 (max 90 degrees)
-    
-    // Generate random direction within cone around perfect reflection
-    float cosTheta = cos(r1 * maxAngle);
-    float sinTheta = sin(r1 * maxAngle);
-    float phi = r2 * 6.28318530718f; // 2 * PI
-    
-    // Create local coordinate system around perfect reflection
-    float3 up = (fabs(perfectReflection.z) < 0.999f) ? 
-                (float3)(0.0f, 0.0f, 1.0f) : (float3)(1.0f, 0.0f, 0.0f);
-    float3 tangent = normalize(cross(up, perfectReflection));
-    float3 bitangent = cross(perfectReflection, tangent);
-    
-    // Generate direction in cone
-    float3 randomDir = sinTheta * cos(phi) * tangent + 
-                       sinTheta * sin(phi) * bitangent + 
-                       cosTheta * perfectReflection;
-    
-    // For very rough surfaces, blend with diffuse (Lambertian) reflection
-    if (roughness > 0.5f) {
-        // Generate diffuse direction
-        float3 diffuseDir = normalize(normal + (float3)(
-            hash(randomSeed * 91.234f) * 2.0f - 1.0f,
-            hash(randomSeed * 67.891f) * 2.0f - 1.0f,
-            hash(randomSeed * 123.456f) * 2.0f - 1.0f
-        ));
-        
-        // Ensure diffuse direction is in correct hemisphere
-        if (dot(diffuseDir, normal) < 0.0f) {
-            diffuseDir = -diffuseDir;
-        }
-        
-        // Blend between specular and diffuse based on roughness
-        float blendFactor = (roughness - 0.5f) * 2.0f; // 0 to 1 for roughness 0.5 to 1.0
-        randomDir = normalize(mix(randomDir, diffuseDir, blendFactor));
-    }
-    
-    return normalize(randomDir);
-}
-
-
-float3 Trace(Ray ray, __global const BVHLinear *bvh, int maxDepth) {
-    float3 incomingLight = (float3)(0.0f, 0.0f, 0.0f);
-    float3 rayColor = (float3)(1.0f, 1.0f, 1.0f);
-    
-    for (int depth = 0; depth < maxDepth; depth++) {
-        IntersectionTriangle hit;
-        hit.Hit = false;
-        hit.Distance = FLT_MAX;
-        hit.TriangleIndex = -1;
-        
-        // Traverse BVH to find closest intersection
-        int stack[32]; // Reduced stack size
-        int stackPtr = 0;
-        stack[stackPtr++] = 0;
-        
-        while (stackPtr > 0 && stackPtr < 32) {
-            int nodeIndex = stack[--stackPtr];
-            
-            if (nodeIndex >= bvh->NodesCount || nodeIndex < 0) continue;
-            
-            IntersectionBoundingBox boxHit = intersectBoundingBox(ray, bvh->Nodes, nodeIndex);
-            
-            if (!boxHit.IsHit) continue;
-            
-            if (boxHit.IsLeaf) {
-                if (boxHit.TriangleIndex >= 0 && boxHit.TriangleIndex < bvh->TrianglesCount) {
-                    IntersectionTriangle triHit = intersectTriangle(ray, bvh->Triangles, boxHit.TriangleIndex);
-                    
-                    if (triHit.Hit && triHit.Distance < hit.Distance && triHit.Distance > 0.001f) {
-                        hit = triHit;
-                    }
-                }
-            } else {
-                const BVHNode node = bvh->Nodes[nodeIndex];
-                if (node.LeftChild >= 0 && stackPtr < 31) {
-                    stack[stackPtr++] = node.LeftChild;
-                }
-                if (node.RightChild >= 0 && stackPtr < 31) {
-                    stack[stackPtr++] = node.RightChild;
-                }
-            }
-        }
-        
-        if (!hit.Hit) break;
-        
-        if (hit.TriangleIndex >= 0 && hit.TriangleIndex < bvh->TrianglesCount) {
-            const Triangle hitTriangle = bvh->Triangles[hit.TriangleIndex];
-            float3 emission = hitTriangle.color * hitTriangle.Emission;
-            float roughness = hitTriangle.Roughness;
-            float metallic = hitTriangle.Metallic;
-            
-            incomingLight += rayColor * emission;
-            
-            // Calculate perfect reflection direction
-            float3 incidentDir = normalize(ray.Direction);
-            float3 normal = normalize(hit.NormalAtIntersection);
-            float3 perfectReflection = reflectVector(incidentDir, normal);
-            
-            // Generate roughness-based random seed
-            float randomSeed = (float)depth + dot(hit.PointOfIntersection, (float3)(12.9898f, 78.233f, 37.719f));
-            
-            // Generate direction based on roughness
-            float3 newDirection;
-            if (metallic > 0.5f) {
-                // For metals: use roughness-biased reflection
-                newDirection = generateRoughnessBiasedDirection(normal, perfectReflection, roughness, randomSeed);
-            } else {
-                // For dielectrics: mix between diffuse and specular based on roughness
-                if (roughness > 0.8f) {
-                    // Very rough surface - mostly diffuse
-                    float3 diffuseDir = normalize(normal + (float3)(
-                        hash(randomSeed * 91.234f) * 2.0f - 1.0f,
-                        hash(randomSeed * 67.891f) * 2.0f - 1.0f,
-                        hash(randomSeed * 123.456f) * 2.0f - 1.0f
-                    ));
-                    
-                    if (dot(diffuseDir, normal) < 0.0f) {
-                        diffuseDir = -diffuseDir;
-                    }
-                    newDirection = diffuseDir;
-                } else {
-                    // Smooth to moderately rough - use roughness-biased reflection
-                    newDirection = generateRoughnessBiasedDirection(normal, perfectReflection, roughness, randomSeed);
-                }
-            }
-            
-            // Update ray for next bounce
-            ray.Position = hit.PointOfIntersection + normal * 0.001f;
-            ray.Direction = normalize(newDirection);
-            
-            // Attenuate ray color based on material properties
-            float3 baseReflectance = mix(hit.ColorAtIntersection, (float3)(0.04f, 0.04f, 0.04f), metallic);
-            
-            // Fresnel calculation
-            float cosTheta = max(0.0f, dot(-incidentDir, normal));
-            float3 F0 = mix((float3)(0.04f, 0.04f, 0.04f), hit.ColorAtIntersection, metallic);
-            float3 fresnel = F0 + (1.0f - F0) * pow(1.0f - cosTheta, 5.0f);
-            
-            // Energy conservation: less diffuse for rough metals
-            float diffuseWeight = (1.0f - metallic) * (1.0f - roughness * 0.5f);
-            float3 diffuseColor = hit.ColorAtIntersection * diffuseWeight;
-            float3 specularColor = fresnel;
-            
-            rayColor *= (diffuseColor + specularColor) * (1.0f + roughness * 0.2f); // Slight energy boost for rough surfaces
-            
-            // Russian roulette termination with roughness consideration
-            float maxComponent = max(max(rayColor.x, rayColor.y), rayColor.z);
-            float survivalProbability = min(0.95f, maxComponent * (1.0f + roughness * 0.3f));
-            
-            if (hash(randomSeed * 151.847f) > survivalProbability) break;
-            
-            rayColor /= survivalProbability; // Unbiased estimator
-        } else {
-            break;
-        }
-    }
-    
-    return incomingLight;
-}
-
-__kernel void applyRayTracedReflections(
-    __global float *ScreenColors,
-    __global const float *ScreenDistances,
-    __global const float *ScreenNormals,
-    __global const float *ScreenMaterialRoughness,
-    __global const float *ScreenMaterialMetallic,
-    __global const float *ScreenMaterialEmission,
-    const float3 camPos,
-    const float3 camDir,
-    const float fov,
-    const int screenWidth,
-    const int screenHeight,
-    __global const float *SkyBoxTop,
-    __global const float *SkyBoxBottom,
-    __global const float *SkyBoxLeft,
-    __global const float *SkyBoxRight,
-    __global const float *SkyBoxFront,
-    __global const float *SkyBoxBack,
-    const int skyBoxWidth,
-    const int skyBoxHeight
-) {
-    int x = get_global_id(0);
-    int y = get_global_id(1);
-    
-    if (x >= screenWidth || y >= screenHeight) return;
-    
-    int pixelIndex = y * screenWidth + x;
-    float depth = ScreenDistances[pixelIndex];
-    
-    if (depth <= 0.001f) return;
-    
-    int normalIndex = pixelIndex * 3;
-    float3 normal = (float3)(ScreenNormals[normalIndex], 
-                             ScreenNormals[normalIndex + 1], 
-                             ScreenNormals[normalIndex + 2]);
-    
-    float3 forward = normalize(camDir);
-    float3 camUp = (float3)(0.0f, 1.0f, 0.0f);
-    float3 right = normalize(cross(forward, camUp));
-    float3 up = cross(right, forward);
-    
-    float ndcX = (x + 0.5f) / screenWidth * 2.0f - 1.0f;
-    float ndcY = -((y + 0.5f) / screenHeight * 2.0f - 1.0f);
-    
-    float3 rayDir = normalize(forward + ndcX * right * fov + ndcY * up * fov);
-    float3 worldPos = camPos + rayDir * depth;
-    
-    float3 viewDir = normalize(camPos - worldPos);
-    float3 reflectedDir = reflectVector(-viewDir, normalize(normal));
-
-    float3 rayTracedColor = Trace(
-        (Ray){worldPos, rayDir}, 
-        (__global const BVHLinear *)ScreenColors, // Assuming ScreenColors contains BVH data
-        3 // Max depth for ray tracing
-    );
-
-    // Mix ScreenColors with ray-traced reflections
-    int colorIndex = pixelIndex * 3;
-    float3 currentColor = (float3)(ScreenColors[colorIndex], 
-                                   ScreenColors[colorIndex + 1], 
-                                   ScreenColors[colorIndex + 2]);
-    float3 finalColor = mix(currentColor, rayTracedColor, 0.5f); // 50% reflection mix
-    
-    ScreenColors[colorIndex]     = clamp(finalColor.x, 0.0f, 1.0f);
-    ScreenColors[colorIndex + 1] = clamp(finalColor.y, 0.0f, 1.0f);
-    ScreenColors[colorIndex + 2] = clamp(finalColor.z, 0.0f, 1.0f);
-}
-
 void renderFont(
     const int fontSizeX,     // Total font texture width
     const int fontSizeY,     // Total font texture height  
@@ -1093,7 +656,6 @@ __kernel void applyReflections(
     ScreenColors[colorIndex + 2] = clamp(finalColor.z, 0.0f, 1.0f);
 }
 
-// 3. Calculate smooth normals from blurred distance field using gradients
 __kernel void calculate_normals_from_blurred_distances(
     __global const float *BlurredDistances,
     __global float *ScreenNormals,
@@ -1145,7 +707,6 @@ __kernel void calculate_normals_from_blurred_distances(
     ScreenNormals[baseIndex + 2] = normal.z;
 }
 
-// 2. Apply bilateral Gaussian blur to distances (preserves depth discontinuities)
 __kernel void blur_distances(
     __global const float *ScreenDistances,
     __global const float *ScreenOpacities,
@@ -1314,7 +875,6 @@ __kernel void drawBoundingBox(
     }
 }
 
-// 1. Project particles to screen-space z-buffer (distances + velocities + basic opacity)
 __kernel void project_points_to_screen(
     __global const float* points,
     __global const float* velocities,
@@ -1440,7 +1000,6 @@ __kernel void project_points_to_screen(
     }
 }
 
-// Helper function to calculate vertex normals from adjacent triangles
 float3 calculateVertexNormal(
     const float3 vertex,
     const int currentTriangleId,
@@ -1599,6 +1158,106 @@ __kernel void calculateVertexCoordinate(
     validTriangles[triangleId] = 1;
 }
 
+__kernel void ShadePixels(
+    __global const float* projectedVerts,
+    __global const float* bboxes,
+    __global const int* validTriangles,
+    __global float* ScreenColors,
+    __global float* ScreenDistances,
+    __global float* ScreenNormals,
+
+    const int screenWidth,
+    const int screenHeight,
+    const int numTriangles,
+
+    __global const float* TriangleColors,
+    __global const float* roughness,
+    __global const float* metallic,
+    __global const float* emission,
+
+    __global float* ScreenMaterialRoughness,
+    __global float* ScreenMaterialMetallic,
+    __global float* ScreenMaterialEmission,
+    
+    __global const float* normals
+) {
+    int px = get_global_id(0);
+    int py = get_global_id(1);
+    if (px >= screenWidth || py >= screenHeight) return;
+
+    const float cx = (float)px + 0.5f;
+    const float cy = (float)py + 0.5f;
+    const int idx = py * screenWidth + px;
+
+    // start with existing depth (or FLT_MAX if zero)
+    float bestDepth = ScreenDistances[idx] > 0.0f
+        ? ScreenDistances[idx] : FLT_MAX;
+    int   bestTri   = -1;
+
+    const int CHUNK = 64;
+    for (int s = 0; s < numTriangles; s += CHUNK) {
+        int e = min(s + CHUNK, numTriangles);
+        for (int t = s; t < e; ++t) {
+            if (validTriangles[t] == 0) continue;
+
+            // bbox test
+            int bi = t * 4;
+            float minX = bboxes[bi  ], maxX = bboxes[bi+1];
+            float minY = bboxes[bi+2], maxY = bboxes[bi+3];
+            if (cx < minX || cx > maxX || cy < minY || cy > maxY)
+                continue;
+
+            // load projected verts
+            int ov = t * 9;
+            float2 p0 = (float2)(projectedVerts[ov], projectedVerts[ov+1]);
+            float2 p1 = (float2)(projectedVerts[ov+3], projectedVerts[ov+4]);
+            float2 p2 = (float2)(projectedVerts[ov+6], projectedVerts[ov+7]);
+            float   z0 = projectedVerts[ov+2];
+            float   z1 = projectedVerts[ov+5];
+            float   z2 = projectedVerts[ov+8];
+
+            // edge‐function / barycentric
+            float2 v0 = p1 - p0;
+            float2 v1 = p2 - p0;
+            float2 v2 = (float2)(cx, cy) - p0;
+            float  denom = v0.x * v1.y - v1.x * v0.y;
+            if (fabs(denom) < 1e-6f) continue;
+            float invDen = 1.0f / denom;
+            float u = (v2.x * v1.y - v1.x * v2.y) * invDen;
+            float v = (v0.x * v2.y - v2.x * v0.y) * invDen;
+            if (u < 0.0f || v < 0.0f || u + v > 1.0f) continue;
+
+            // interpolate depth
+            float w = 1.0f - u - v;
+            float d = w*z0 + u*z1 + v*z2;
+            if (d < bestDepth) {
+                bestDepth = d;
+                bestTri   = t;
+            }
+        }
+        if (bestDepth < 0.1f) break;
+    }
+
+    // commit result
+    if (bestTri >= 0 && (ScreenDistances[idx] == 0.0f || bestDepth < ScreenDistances[idx])) {
+        ScreenDistances[idx] = bestDepth;
+
+        // normal + color load
+        int mb = bestTri * 3;
+        float3 N = normalize(vload3(0, normals + mb));
+        vstore3(N, idx, ScreenNormals);
+
+        float3 C = vload3(0, TriangleColors + mb);
+        float  L = max(0.65f, dot(N, (float3)(0.3f,0.7f,0.5f)));
+        float3 col = clamp(C * L + C * emission[bestTri], 0.0f, 1.0f);
+        vstore3(col, idx, ScreenColors);
+
+        ScreenMaterialRoughness[idx] = roughness[bestTri];
+        ScreenMaterialMetallic [idx] = metallic [bestTri];
+        ScreenMaterialEmission [idx] = emission[bestTri];
+    }
+}
+
 void drawLineWireframe(
     const float2 start,
     const float2 end,
@@ -1745,106 +1404,6 @@ __kernel void renderWireFrame(
                       screenWidth, screenHeight, wireColor, 1);
     drawLineWireframe(v3.xy, v1.xy, v3.z, v1.z, ScreenColors, ScreenDistances, 
                       screenWidth, screenHeight, wireColor, 1);
-}
-
-__kernel void ShadePixels(
-    __global const float* projectedVerts,
-    __global const float* bboxes,
-    __global const int* validTriangles,
-    __global float* ScreenColors,
-    __global float* ScreenDistances,
-    __global float* ScreenNormals,
-
-    const int screenWidth,
-    const int screenHeight,
-    const int numTriangles,
-
-    __global const float* TriangleColors,
-    __global const float* roughness,
-    __global const float* metallic,
-    __global const float* emission,
-
-    __global float* ScreenMaterialRoughness,
-    __global float* ScreenMaterialMetallic,
-    __global float* ScreenMaterialEmission,
-    
-    __global const float* normals
-) {
-    int px = get_global_id(0);
-    int py = get_global_id(1);
-    if (px >= screenWidth || py >= screenHeight) return;
-
-    const float cx = (float)px + 0.5f;
-    const float cy = (float)py + 0.5f;
-    const int idx = py * screenWidth + px;
-
-    // start with existing depth (or FLT_MAX if zero)
-    float bestDepth = ScreenDistances[idx] > 0.0f
-        ? ScreenDistances[idx] : FLT_MAX;
-    int   bestTri   = -1;
-
-    const int CHUNK = 64;
-    for (int s = 0; s < numTriangles; s += CHUNK) {
-        int e = min(s + CHUNK, numTriangles);
-        for (int t = s; t < e; ++t) {
-            if (validTriangles[t] == 0) continue;
-
-            // bbox test
-            int bi = t * 4;
-            float minX = bboxes[bi  ], maxX = bboxes[bi+1];
-            float minY = bboxes[bi+2], maxY = bboxes[bi+3];
-            if (cx < minX || cx > maxX || cy < minY || cy > maxY)
-                continue;
-
-            // load projected verts
-            int ov = t * 9;
-            float2 p0 = (float2)(projectedVerts[ov], projectedVerts[ov+1]);
-            float2 p1 = (float2)(projectedVerts[ov+3], projectedVerts[ov+4]);
-            float2 p2 = (float2)(projectedVerts[ov+6], projectedVerts[ov+7]);
-            float   z0 = projectedVerts[ov+2];
-            float   z1 = projectedVerts[ov+5];
-            float   z2 = projectedVerts[ov+8];
-
-            // edge‐function / barycentric
-            float2 v0 = p1 - p0;
-            float2 v1 = p2 - p0;
-            float2 v2 = (float2)(cx, cy) - p0;
-            float  denom = v0.x * v1.y - v1.x * v0.y;
-            if (fabs(denom) < 1e-6f) continue;
-            float invDen = 1.0f / denom;
-            float u = (v2.x * v1.y - v1.x * v2.y) * invDen;
-            float v = (v0.x * v2.y - v2.x * v0.y) * invDen;
-            if (u < 0.0f || v < 0.0f || u + v > 1.0f) continue;
-
-            // interpolate depth
-            float w = 1.0f - u - v;
-            float d = w*z0 + u*z1 + v*z2;
-            if (d < bestDepth) {
-                bestDepth = d;
-                bestTri   = t;
-            }
-        }
-        if (bestDepth < 0.1f) break;
-    }
-
-    // commit result
-    if (bestTri >= 0 && (ScreenDistances[idx] == 0.0f || bestDepth < ScreenDistances[idx])) {
-        ScreenDistances[idx] = bestDepth;
-
-        // normal + color load
-        int mb = bestTri * 3;
-        float3 N = normalize(vload3(0, normals + mb));
-        vstore3(N, idx, ScreenNormals);
-
-        float3 C = vload3(0, TriangleColors + mb);
-        float  L = max(0.65f, dot(N, (float3)(0.3f,0.7f,0.5f)));
-        float3 col = clamp(C * L + C * emission[bestTri], 0.0f, 1.0f);
-        vstore3(col, idx, ScreenColors);
-
-        ScreenMaterialRoughness[idx] = roughness[bestTri];
-        ScreenMaterialMetallic [idx] = metallic [bestTri];
-        ScreenMaterialEmission [idx] = emission[bestTri];
-    }
 }
 
 __kernel void renderTriangles(
@@ -3221,232 +2780,6 @@ __kernel void filterOverlap(
     }
 }
 
-// float3 screenToDirection(
-//     int x, int y,
-//     const int screenWidth,
-//     const int screenHeight,
-//     const float3 camDir,
-//     const float fov
-// ) {
-//     float aspectRatio = (float)screenWidth / (float)screenHeight;
-//     float tanHalfFov = tan(fov * 0.5f);
-    
-//     // Normalized device coordinates (-1 to 1)
-//     float ndcX = (2.0f * x) / screenWidth - 1.0f;
-//     float ndcY = 1.0f - (2.0f * y) / screenHeight;
-    
-//     // Calculate camera right and up vectors
-//     float3 worldUp = (float3)(0.0f, 1.0f, 0.0f);
-//     float3 camRight = normalize(cross(camDir, worldUp));
-//     float3 camUp = normalize(cross(camRight, camDir));
-    
-//     // Calculate ray direction (normalized vector pointing to hotspot)
-//     float3 rayDir = normalize(
-//         camDir + 
-//         camRight * ndcX * aspectRatio * tanHalfFov +
-//         camUp * ndcY * tanHalfFov
-//     );
-    
-//     return rayDir;
-// }
-
-// void downSample(
-//     int x, int y,
-//     __global float* inputBuffer,
-//     __global float* tempBuffer,
-//     const int screenWidth,
-//     const int screenHeight,
-//     const int sampleRadius
-// ) {
-//     int startX = max(0, x - sampleRadius);
-//     int endX = min(screenWidth - 1, x + sampleRadius);
-//     int startY = max(0, y - sampleRadius);
-//     int endY = min(screenHeight - 1, y + sampleRadius);
-    
-//     float accumColor = 0.0f;
-//     int count = 0;
-    
-//     for (int j = startY; j <= endY; j++) {
-//         for (int i = startX; i <= endX; i++) {
-//             int idx = j * screenWidth + i;
-//             float color = inputBuffer[idx];
-//             if (color > 0.001f) {
-//                 accumColor += color;
-//                 count++;
-//             }
-//         }
-//     }
-    
-//     int outIdx = y * screenWidth + x;
-//     if (count > 0) {
-//         tempBuffer[outIdx] = accumColor / (float)count;
-//     } else {
-//         tempBuffer[outIdx] = 0.0f;
-//     }
-// }
-
-// void boxBlur(
-//     int x, int y,
-//     __global float* tempBuffer,
-//     __global float* outputBuffer,
-//     const int screenWidth,
-//     const int screenHeight,
-//     const int sampleRadius
-// ) {
-//     int startX = max(0, x - sampleRadius);
-//     int endX = min(screenWidth - 1, x + sampleRadius);
-//     int startY = max(0, y - sampleRadius);
-//     int endY = min(screenHeight - 1, y + sampleRadius);
-    
-//     float accumColor = 0.0f;
-//     int count = 0;
-    
-//     for (int j = startY; j <= endY; j++) {
-//         for (int i = startX; i <= endX; i++) {
-//             int idx = j * screenWidth + i;
-//             float color = tempBuffer[idx];
-//             if (color > 0.001f) {
-//                 accumColor += color;
-//                 count++;
-//             }
-//         }
-//     }
-    
-//     int outIdx = y * screenWidth + x;
-//     if (count > 0) {
-//         outputBuffer[outIdx] = accumColor / (float)count;
-//     } else {
-//         outputBuffer[outIdx] = 0.0f;
-//     }
-// }
-
-// float2 findAvgStd(
-//     __global float* buffer,
-//     const int screenWidth,
-//     const int screenHeight
-// ) {
-//     float sum = 0.0f;
-//     float sumSq = 0.0f;
-//     int count = 0;
-    
-//     for (int y = 0; y < screenHeight; y++) {
-//         for (int x = 0; x < screenWidth; x++) {
-//             int idx = y * screenWidth + x;
-//             float brightness = buffer[idx];
-//             if (brightness > 0.001f) {
-//                 sum += brightness;
-//                 sumSq += brightness * brightness;
-//                 count++;
-//             }
-//         }
-//     }
-    
-//     if (count == 0) return (float2)(0.0f, 0.0f);
-    
-//     float avg = sum / (float)count;
-//     float variance = (sumSq / (float)count) - (avg * avg);
-//     variance = max(variance, 0.0f);
-//     float stddev = sqrt(variance);
-    
-//     return (float2)(avg, stddev);
-// }
-
-// __kernel void findHotSpots(
-//     __global float* inputBuffer,
-//     __global float* tempBuffer,
-//     __global float4* output,  // x=centerX, y=centerY, z=has_hotspot, w=unused
-//     __global float3* outputDirection,  // Normalized 3D direction vector pointing to hotspot
-//     const int screenWidth,
-//     const int screenHeight,
-//     const float3 camPos,
-//     const float3 camDir,
-//     const float fov,
-//     int sampleRadius,
-//     const int iterations
-// ) {
-//     int x = get_global_id(0);
-//     int y = get_global_id(1);
-    
-//     if (x >= screenWidth || y >= screenHeight) return;
-    
-//     int idx = y * screenWidth + x;
-    
-//     // Iterative processing
-//     for (int iter = 0; iter < iterations; iter++) {
-//         barrier(CLK_GLOBAL_MEM_FENCE);
-        
-//         downSample(x, y, inputBuffer, tempBuffer, screenWidth, screenHeight, sampleRadius);
-        
-//         barrier(CLK_GLOBAL_MEM_FENCE);
-        
-//         boxBlur(x, y, tempBuffer, inputBuffer, screenWidth, screenHeight, sampleRadius);
-        
-//         barrier(CLK_GLOBAL_MEM_FENCE);
-        
-//         // Statistics and thresholding
-//         if (x == 0 && y == 0) {
-//             float2 stats = findAvgStd(inputBuffer, screenWidth, screenHeight);
-//             float avgBrightness = stats.x;
-//             float stddev = stats.y;
-//             float threshold = (avgBrightness + 2.0f * stddev) * 1.5f;
-            
-//             // Apply threshold to entire buffer
-//             for (int i = 0; i < screenWidth * screenHeight; i++) {
-//                 if (inputBuffer[i] < threshold) {
-//                     inputBuffer[i] = 0.0f;
-//                 }
-//             }
-//         }
-        
-//         barrier(CLK_GLOBAL_MEM_FENCE);
-        
-//         sampleRadius = max(1, sampleRadius / 2);
-//     }
-    
-//     barrier(CLK_GLOBAL_MEM_FENCE);
-    
-//     // Find bounding box
-//     if (x == 0 && y == 0) {
-//         int minX = screenWidth;
-//         int minY = screenHeight;
-//         int maxX = -1;
-//         int maxY = -1;
-        
-//         for (int py = 0; py < screenHeight; py++) {
-//             for (int px = 0; px < screenWidth; px++) {
-//                 int pidx = py * screenWidth + px;
-//                 if (inputBuffer[pidx] > 0.001f) {
-//                     minX = min(minX, px);
-//                     maxX = max(maxX, px);
-//                     minY = min(minY, py);
-//                     maxY = max(maxY, py);
-//                 }
-//             }
-//         }
-        
-//         if (maxX >= 0 && maxY >= 0) {
-//             // Calculate center in screen space
-//             float centerX = (minX + maxX) / 2.0f;
-//             float centerY = (minY + maxY) / 2.0f;
-            
-//             // Convert to 3D direction
-//             float3 direction = screenToDirection(
-//                 (int)centerX, (int)centerY,
-//                 screenWidth, screenHeight,
-//                 camDir, fov
-//             );
-            
-//             // Output results
-//             output[0] = (float4)(centerX, centerY, 1.0f, 0.0f);
-//             outputDirection[0] = direction;
-//         } else {
-//             // No hotspot found
-//             output[0] = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
-//             outputDirection[0] = (float3)(0.0f, 0.0f, 0.0f);
-//         }
-//     }
-// }
-
 __kernel void OverlayImage(
     __global float* OutputBuffer,
     __global float* Image,
@@ -3550,179 +2883,112 @@ float3 screenToDirection(
     return rayDir;
 }
 
-__kernel void findHotSpots(
-    __global float* inputBuffer,
-    __global float* tempBuffer,
-    __global float4* output,
-    __global float3* outputDirection,
-    const int screenWidth,
-    const int screenHeight,
-    const float3 camPos,
-    const float3 camDir,
-    const float fov,
-    int sampleRadius,
-    const int iterations
+__kernel void renderDepthBufferFast(
+    __global const float *v1,          // Triangle vertex 1 (3 floats per triangle)
+    __global const float *v2,          // Triangle vertex 2
+    __global const float *v3,          // Triangle vertex 3
+    __global const float *normals,     // Triangle normals (unused but kept for compatibility)
+    __global float *ScreenDistances,   // Output: depth buffer
+    const int triangleCount,           // Number of triangles
+    const float3 camPos,               // Camera position
+    const float3 camDir,               // Camera direction
+    const float fov,                   // Field of view
+    const int screenWidth,             // Screen width
+    const int screenHeight,            // Screen height
 ) {
-    int x = get_global_id(0);
-    int y = get_global_id(1);
-    
-    if (x >= screenWidth || y >= screenHeight) return;
-    
-    int idx = y * screenWidth + x;
-    int radiusStep = sampleRadius;
-    
-    // Iterative blur and threshold processing
-    for (int iter = 0; iter < iterations; iter++) {
-        barrier(CLK_GLOBAL_MEM_FENCE);
-        
-        // Downsampling pass
-        int startX = max(0, x - radiusStep);
-        int endX = min(screenWidth - 1, x + radiusStep);
-        int startY = max(0, y - radiusStep);
-        int endY = min(screenHeight - 1, y + radiusStep);
-        
-        float accumColor = 0.0f;
-        int count = 0;
-        
-        for (int j = startY; j <= endY; j++) {
-            for (int i = startX; i <= endX; i++) {
-                int readIdx = j * screenWidth + i;
-                float color = inputBuffer[readIdx];
-                if (color > 0.001f) {
-                    accumColor += color;
-                    count++;
-                }
-            }
-        }
-        
-        if (count > 0) {
-            tempBuffer[idx] = accumColor / (float)count;
-        } else {
-            tempBuffer[idx] = 0.0f;
-        }
-        
-        barrier(CLK_GLOBAL_MEM_FENCE);
-        
-        // Box blur pass
-        accumColor = 0.0f;
-        count = 0;
-        
-        for (int j = startY; j <= endY; j++) {
-            for (int i = startX; i <= endX; i++) {
-                int readIdx = j * screenWidth + i;
-                float color = tempBuffer[readIdx];
-                if (color > 0.001f) {
-                    accumColor += color;
-                    count++;
-                }
-            }
-        }
-        
-        if (count > 0) {
-            inputBuffer[idx] = accumColor / (float)count;
-        } else {
-            inputBuffer[idx] = 0.0f;
-        }
-        
-        barrier(CLK_GLOBAL_MEM_FENCE);
-        
-        // Statistics calculation and thresholding (single thread)
-        if (x == 0 && y == 0) {
-            float sum = 0.0f;
-            float sumSq = 0.0f;
-            int validCount = 0;
-            
-            for (int py = 0; py < screenHeight; py++) {
-                for (int px = 0; px < screenWidth; px++) {
-                    int pidx = py * screenWidth + px;
-                    float brightness = inputBuffer[pidx];
-                    if (brightness > 0.001f) {
-                        sum += brightness;
-                        sumSq += brightness * brightness;
-                        validCount++;
-                    }
-                }
-            }
-            
-            if (validCount > 0) {
-                float avgBrightness = sum / (float)validCount;
-                float variance = (sumSq / (float)validCount) - (avgBrightness * avgBrightness);
-                variance = max(variance, 0.0f);
-                float stddev = sqrt(variance);
-                float threshold = (avgBrightness + 2.0f * stddev) * 1.5f;
-                
-                // Apply threshold
-                for (int i = 0; i < screenWidth * screenHeight; i++) {
-                    if (inputBuffer[i] < threshold) {
-                        inputBuffer[i] = 0.0f;
-                    }
-                }
-            }
-        }
-        
-        barrier(CLK_GLOBAL_MEM_FENCE);
-        
-        // Reduce radius for next iteration
-        radiusStep = max(1, radiusStep / 2);
+    int triangleIdx = get_global_id(0);
+    if (triangleIdx >= triangleCount) return;
+
+    // Get triangle vertices
+    int idx = triangleIdx * 3;
+    float3 v1_pos = (float3)(v1[idx], v1[idx + 1], v1[idx + 2]);
+    float3 v2_pos = (float3)(v2[idx], v2[idx + 1], v2[idx + 2]);
+    float3 v3_pos = (float3)(v3[idx], v3[idx + 1], v3[idx + 2]);
+
+    // Calculate bounding box in screen space (minimal bounds checking)
+    float aspectRatio = (float)screenWidth / (float)screenHeight;
+    float tanHalfFov = tan(fov * 0.5f);
+    float3 worldUp = (float3)(0.0f, 1.0f, 0.0f);
+    float3 camRight = normalize(cross(camDir, worldUp));
+    float3 camUp = normalize(cross(camRight, camDir));
+
+    // Project vertices to screen space
+    float2 proj1 = (float2)(0.0f), proj2 = (float2)(0.0f), proj3 = (float2)(0.0f);
+    float depth1 = 0.0f, depth2 = 0.0f, depth3 = 0.0f;
+
+    // Project v1
+    float3 relPos1 = v1_pos - camPos;
+    float dist1 = dot(relPos1, camDir);
+    if (dist1 > 0.1f) {
+        float3 relToRay = relPos1 - camDir * dist1;
+        float x1 = dot(relToRay, camRight) / (dist1 * tanHalfFov * aspectRatio);
+        float y1 = dot(relToRay, camUp) / (dist1 * tanHalfFov);
+        proj1 = (float2)(
+            (x1 + 1.0f) * 0.5f * screenWidth,
+            (1.0f - y1) * 0.5f * screenHeight
+        );
+        depth1 = dist1;
     }
-    
-    barrier(CLK_GLOBAL_MEM_FENCE);
-    
-    // Find hotspot bounding box and calculate center (single thread)
-    if (x == 0 && y == 0) {
-        int minX = screenWidth;
-        int minY = screenHeight;
-        int maxX = -1;
-        int maxY = -1;
-        float maxBrightness = 0.0f;
-        int maxBrightX = 0;
-        int maxBrightY = 0;
-        
-        // Find bounding box and brightest pixel
-        for (int py = 0; py < screenHeight; py++) {
-            for (int px = 0; px < screenWidth; px++) {
-                int pidx = py * screenWidth + px;
-                float brightness = inputBuffer[pidx];
-                
-                if (brightness > 0.001f) {
-                    minX = min(minX, px);
-                    maxX = max(maxX, px);
-                    minY = min(minY, py);
-                    maxY = max(maxY, py);
-                    
-                    if (brightness > maxBrightness) {
-                        maxBrightness = brightness;
-                        maxBrightX = px;
-                        maxBrightY = py;
-                    }
+
+    // Project v2
+    float3 relPos2 = v2_pos - camPos;
+    float dist2 = dot(relPos2, camDir);
+    if (dist2 > 0.1f) {
+        float3 relToRay = relPos2 - camDir * dist2;
+        float x2 = dot(relToRay, camRight) / (dist2 * tanHalfFov * aspectRatio);
+        float y2 = dot(relToRay, camUp) / (dist2 * tanHalfFov);
+        proj2 = (float2)(
+            (x2 + 1.0f) * 0.5f * screenWidth,
+            (1.0f - y2) * 0.5f * screenHeight
+        );
+        depth2 = dist2;
+    }
+
+    // Project v3
+    float3 relPos3 = v3_pos - camPos;
+    float dist3 = dot(relPos3, camDir);
+    if (dist3 > 0.1f) {
+        float3 relToRay = relPos3 - camDir * dist3;
+        float x3 = dot(relToRay, camRight) / (dist3 * tanHalfFov * aspectRatio);
+        float y3 = dot(relToRay, camUp) / (dist3 * tanHalfFov);
+        proj3 = (float2)(
+            (x3 + 1.0f) * 0.5f * screenWidth,
+            (1.0f - y3) * 0.5f * screenHeight
+        );
+        depth3 = dist3;
+    }
+
+    // Get bounding box
+    int minX = max(0, (int)min(proj1.x, min(proj2.x, proj3.x)));
+    int maxX = min(screenWidth - 1, (int)ceil(max(proj1.x, max(proj2.x, proj3.x))));
+    int minY = max(0, (int)min(proj1.y, min(proj2.y, proj3.y)));
+    int maxY = min(screenHeight - 1, (int)ceil(max(proj1.y, max(proj2.y, proj3.y))));
+
+    // Rasterize triangle (only write depth)
+    for (int y = minY; y <= maxY; y++) {
+        for (int x = minX; x <= maxX; x++) {
+            float2 pixel = (float2)(x + 0.5f, y + 0.5f);
+            
+            // Barycentric coordinates (fast computation)
+            float3 bary = (float3)(0.0f);
+            float denom = (proj2.y - proj3.y) * (proj1.x - proj3.x) + (proj3.x - proj2.x) * (proj1.y - proj3.y);
+            if (fabs(denom) < 1e-6f) continue;
+            
+            bary.x = ((proj2.y - proj3.y) * (pixel.x - proj3.x) + (proj3.x - proj2.x) * (pixel.y - proj3.y)) / denom;
+            bary.y = ((proj3.y - proj1.y) * (pixel.x - proj3.x) + (proj1.x - proj3.x) * (pixel.y - proj3.y)) / denom;
+            bary.z = 1.0f - bary.x - bary.y;
+
+            // Check if inside triangle
+            if (bary.x >= -1e-6f && bary.y >= -1e-6f && bary.z >= -1e-6f) {
+                // Interpolate depth
+                float depth = bary.x * depth1 + bary.y * depth2 + bary.z * depth3;
+                int pixelIdx = y * screenWidth + x;
+
+                // Update only if closer (atomic operation for thread safety)
+                if (ScreenDistances[pixelIdx] == 0.0f || depth < ScreenDistances[pixelIdx]) {
+                    ScreenDistances[pixelIdx] = depth;
                 }
             }
-        }
-        
-        if (maxX >= 0 && maxY >= 0 && maxBrightness > 0.001f) {
-            // Use weighted center (brightest point gets more weight)
-            float centerX = (minX + maxX) / 2.0f;
-            float centerY = (minY + maxY) / 2.0f;
-            
-            // Blend with brightest point for better accuracy
-            centerX = centerX * 0.3f + maxBrightX * 0.7f;
-            centerY = centerY * 0.3f + maxBrightY * 0.7f;
-            
-            // Convert center to 3D direction
-            float3 direction = screenToDirection(
-                (int)(centerX + 0.5f), (int)(centerY + 0.5f),
-                screenWidth, screenHeight,
-                camDir, fov
-            );
-            direction = normalize(direction);
-            
-            // Output results
-            output[0] = (float4)(centerX, centerY, 1.0f, maxBrightness);
-            outputDirection[0] = direction;
-        } else {
-            // No hotspot found
-            output[0] = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
-            outputDirection[0] = (float3)(0.0f, 0.0f, 0.0f);
         }
     }
 }

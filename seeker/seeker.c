@@ -1,25 +1,18 @@
 #include <math.h>
 #include <float.h>
-
-// GPU: Render distance map (seeker POV)
-//   ↓
-// CPU: glReadPixels() - copy distance buffer to CPU
-//   ↓
-// CPU: findClosestObjectToViewCenter() - select best target
-//   ↓
-// CPU: Missile simulation uses target position
+#include "../fireSim/fireSim.h"
 
 static float dot3(const float a[3], const float b[3]) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
 static void normalize3(float v[3]) {
-    float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (len > 0.0f) {
-        v[0] /= len;
-        v[1] /= len;
-        v[2] /= len;
-    }
+	float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+	if (len > 0.0f) {
+		v[0] /= len;
+		v[1] /= len;
+		v[2] /= len;
+	}
 }
 
 // Returns index of hottest object in seeker FOV
@@ -101,12 +94,12 @@ int findClosestObjectToViewCenter(
         float pixelX = (xProj / tanf(fovHalfRad)) * 0.5f + 0.5f;
         float pixelY = (yProj / tanf(fovHalfRad)) * 0.5f + 0.5f;
         
-        int px = (int)(pixelX * SEEKER_SIZE);
-        int py = (int)(pixelY * SEEKER_SIZE);
+        int px = (int)(pixelX * MISSILE_SEEKER_SIZE);
+        int py = (int)(pixelY * MISSILE_SEEKER_SIZE);
         
         // Check if object is occluded
-        if (px >= 0 && px < SEEKER_SIZE && py >= 0 && py < SEEKER_SIZE) {
-            int pixelIdx = py * SEEKER_SIZE + px;
+        if (px >= 0 && px < MISSILE_SEEKER_SIZE && py >= 0 && py < SEEKER_SIZE) {
+            int pixelIdx = py * MISSILE_SEEKER_SIZE + px;
             float geometryDist = seekerImageDistances[pixelIdx];
             
             // Object is occluded if geometry is closer (with small tolerance)

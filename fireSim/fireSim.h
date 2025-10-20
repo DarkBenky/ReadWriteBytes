@@ -2,6 +2,7 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 250
+#define MISSILE_SEEKER_SIZE 128
 #define MAX_FIRE_SIMS 16
 #define G 9.81f
 #define MAX_FLOAT 3.402823466e+38F
@@ -40,25 +41,15 @@ enum MissileLock{
     Lunching
 };
 
-struct SensorReading {
-    float position[3];
-    float signalStrength;
-    float signalType;
-    float confidence;
-};
+
 
 struct Seeker {
     struct Camera seekerCamera;
     float seekerFov;
-    int seekerSteps;
     float searchMultiplayer;
+    float seekerDepthMap[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE];
     enum  MissileLock lockState;
     
-    struct SensorReading sensorReadings[16];
-    int sensorReadingCount;
-    float coneSearchRadius;
-    float coneSearchDepth;
-    float lastDetectionConfidence;
 };
 
 
@@ -141,8 +132,6 @@ struct Missile {
     float machNumber;                     // Current Mach number (speed/speed_of_sound)
     float dynamicPressure;                // Current dynamic pressure 0.5*ρ*v² (Pa)
     float prevLOS[3];                     // Previous line-of-sight vector for guidance
-    float losRateSmoothed[3];             // Smoothed LOS rate for stable guidance
-    float losRateWeight;                  // Smoothing factor for LOS rate (0-1)
 };
 
 struct Missiles {
