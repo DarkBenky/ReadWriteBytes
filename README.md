@@ -27,6 +27,7 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
+- [ ] scale evrithin to real life scale (1.0f == 1 meter)
 - [ ] set up the githup copilot rules **https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?tool=visualstudio**
 - [ ] misslie view display
 - [ ] missiel lunch ( lock -> lunch -> if loss lock scan -> target )

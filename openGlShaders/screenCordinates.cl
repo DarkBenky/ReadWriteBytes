@@ -2894,7 +2894,7 @@ __kernel void renderDepthBufferFast(
     const float3 camDir,               // Camera direction
     const float fov,                   // Field of view
     const int screenWidth,             // Screen width
-    const int screenHeight,            // Screen height
+    const int screenHeight            // Screen height
 ) {
     int triangleIdx = get_global_id(0);
     if (triangleIdx >= triangleCount) return;

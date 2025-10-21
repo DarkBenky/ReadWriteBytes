@@ -180,7 +180,6 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerCamera.ray.direction[2] = 0.0f;
 	missile->seeker.seekerCamera.fov = 8.0f;
 	missile->seeker.seekerFov = 45.0f;
-	missile->seeker.seekerSteps = 1;
 	missile->seeker.lockState = Lunching;
 	missile->seeker.searchMultiplayer = randRange(3.0f, 8.0f);
 	missile->seeker.tiltSpeed = randRange(2.0f, 5.0f);
@@ -284,10 +283,6 @@ void InitializeMissile(struct Missile *missile) {
 	missile->prevLOS[0] = 0.0f;
 	missile->prevLOS[1] = 0.0f;
 	missile->prevLOS[2] = 0.0f;
-	missile->losRateSmoothed[0] = 0.0f;
-	missile->losRateSmoothed[1] = 0.0f;
-	missile->losRateSmoothed[2] = 0.0f;
-	missile->losRateWeight = 0.3f;
 }
 
 void setMissileTarget(struct Missile *missile, float targetPos[3]) {
@@ -401,7 +396,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 		}
 
 		int bestIdx = findClosestObjectToViewCenter(
-			rayOrigin, rayDir, missile->seeker.seekerFov,
+			rayOrigin, rayDir, missile->seeker.seekerFov * missile->seeker.searchMultiplayer,
 			objX, objY, objZ, objX, missile->seeker.seekerDepthMap,
 			count, 0.4f, 0.3f, 0.3f);
 
@@ -572,15 +567,7 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 			losRate[0] = (los[0] - missile->prevLOS[0]) / deltaTime;
 			losRate[1] = (los[1] - missile->prevLOS[1]) / deltaTime;
 			losRate[2] = (los[2] - missile->prevLOS[2]) / deltaTime;
-
-			losRate[0] = missile->losRateSmoothed[0] * missile->losRateWeight + losRate[0] * (1.0f - missile->losRateWeight);
-			losRate[1] = missile->losRateSmoothed[1] * missile->losRateWeight + losRate[1] * (1.0f - missile->losRateWeight);
-			losRate[2] = missile->losRateSmoothed[2] * missile->losRateWeight + losRate[2] * (1.0f - missile->losRateWeight);
 		}
-
-		missile->losRateSmoothed[0] = losRate[0];
-		missile->losRateSmoothed[1] = losRate[1];
-		missile->losRateSmoothed[2] = losRate[2];
 
 		missile->prevLOS[0] = los[0];
 		missile->prevLOS[1] = los[1];

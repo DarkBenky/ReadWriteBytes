@@ -124,9 +124,6 @@ struct OpenCLContext {
 	cl_mem CompositedScreenColors;
 	cl_mem CompositedScreenNormals;
 	cl_mem CompositedScreenDistances;
-	
-
-	
 
 	// Add pre-allocated host memory buffers
 	float *host_points_data;
@@ -136,6 +133,8 @@ struct OpenCLContext {
 	float *host_velocities_result;
 	float *host_normals_result;
 	float *host_screen_colors_result;
+	
+	float *mapped_seeker_distances;
 };
 
 struct Triangles {

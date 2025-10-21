@@ -2,7 +2,7 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 250
-#define MISSILE_SEEKER_SIZE 128
+#define MISSILE_SEEKER_SIZE 96
 #define MAX_FIRE_SIMS 16
 #define G 9.81f
 #define MAX_FLOAT 3.402823466e+38F
@@ -41,15 +41,13 @@ enum MissileLock{
     Lunching
 };
 
-
-
 struct Seeker {
+    float seekerDepthMap[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE];
     struct Camera seekerCamera;
     float seekerFov;
     float searchMultiplayer;
-    float seekerDepthMap[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE];
+    float tiltSpeed;
     enum  MissileLock lockState;
-    
 };
 
 
@@ -152,7 +150,7 @@ void cleanupMissile(struct Missile *missile);
 
 void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *missileModel);
 void CleanupMissiles(struct Missiles *missiles);
-void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool fire, bool foundTarget, float targetDir[3], float targetPos[3], float targetVel[3], bool *active, float deltaTime, float *timeTook, float *fireSimulationTime);
+void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool fire, bool *active, float deltaTime, float *timeTook, float *fireSimulationTime, float lunchDir[3], float lunchPos[3]);
 float randRange(float min, float max);
 
 void scanConeForTargets(struct Missile *missile, struct Missiles *allMissiles, float coneAngle, float coneDepth);

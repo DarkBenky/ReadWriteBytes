@@ -358,7 +358,7 @@ int launchOverlayImageOpenCL(
 	return 1;
 }
 
-int renderDepthBufferFastOpenCL(
+int renderDepthBuffer(
 	struct OpenCLContext *ocl,
 	cl_mem v1_buffer,	   // Device buffer: triangle vertex 1 data
 	cl_mem v2_buffer,	   // Device buffer: triangle vertex 2 data
@@ -374,7 +374,7 @@ int renderDepthBufferFastOpenCL(
 	float *out_depth_cpu,  // CPU buffer to read back depth data (optional)
 	float *outGpuMs		   // Output GPU time in milliseconds (optional)
 ) {
-	if (!ocl || !ocl->renderDepthBufferFast_kernel) {
+	if (!ocl || !ocl->renderDepth) {
 		fprintf(stderr, "Depth kernel or context not initialized\n");
 		return 0;
 	}
@@ -396,17 +396,17 @@ int renderDepthBufferFastOpenCL(
 	cl_int cl_triangle_count = triangle_count;
 
 	// Set kernel arguments
-	err = clSetKernelArg(ocl->renderDepthBufferFast_kernel, 0, sizeof(cl_mem), &v1_buffer);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 1, sizeof(cl_mem), &v2_buffer);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 2, sizeof(cl_mem), &v3_buffer);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 3, sizeof(cl_mem), &normals_buffer);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 4, sizeof(cl_mem), &output_buffer);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 5, sizeof(cl_int), &cl_triangle_count);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 6, sizeof(cl_float3), &cl_cam_pos);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 7, sizeof(cl_float3), &cl_cam_dir);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 8, sizeof(cl_float), &cl_fov);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 9, sizeof(cl_int), &cl_screen_width);
-	err |= clSetKernelArg(ocl->renderDepthBufferFast_kernel, 10, sizeof(cl_int), &cl_screen_height);
+	err = clSetKernelArg(ocl->renderDepth, 0, sizeof(cl_mem), &v1_buffer);
+	err |= clSetKernelArg(ocl->renderDepth, 1, sizeof(cl_mem), &v2_buffer);
+	err |= clSetKernelArg(ocl->renderDepth, 2, sizeof(cl_mem), &v3_buffer);
+	err |= clSetKernelArg(ocl->renderDepth, 3, sizeof(cl_mem), &normals_buffer);
+	err |= clSetKernelArg(ocl->renderDepth, 4, sizeof(cl_mem), &output_buffer);
+	err |= clSetKernelArg(ocl->renderDepth, 5, sizeof(cl_int), &cl_triangle_count);
+	err |= clSetKernelArg(ocl->renderDepth, 6, sizeof(cl_float3), &cl_cam_pos);
+	err |= clSetKernelArg(ocl->renderDepth, 7, sizeof(cl_float3), &cl_cam_dir);
+	err |= clSetKernelArg(ocl->renderDepth, 8, sizeof(cl_float), &cl_fov);
+	err |= clSetKernelArg(ocl->renderDepth, 9, sizeof(cl_int), &cl_screen_width);
+	err |= clSetKernelArg(ocl->renderDepth, 10, sizeof(cl_int), &cl_screen_height);
 
 	if (err != CL_SUCCESS) {
 		fprintf(stderr, "Error setting renderDepthBufferFast kernel args: %s (%d)\n", clErrorString(err), err);
@@ -415,7 +415,7 @@ int renderDepthBufferFastOpenCL(
 
 	// Execute kernel
 	size_t global_size = triangle_count;
-	err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderDepthBufferFast_kernel, 1, NULL,
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderDepth, 1, NULL,
 								 &global_size, NULL, 0, NULL, &evt);
 
 	if (err != CL_SUCCESS) {
@@ -423,19 +423,28 @@ int renderDepthBufferFastOpenCL(
 		return 0;
 	}
 
-	// Wait for kernel to complete
-	clFinish(ocl->queue);
-
-	// Read back depth buffer to CPU if requested
+	// Read back depth buffer to CPU if requested (using mapped memory for faster transfer)
 	if (out_depth_cpu != NULL) {
 		size_t buffer_size = screen_width * screen_height * sizeof(float);
-		err = clEnqueueReadBuffer(ocl->queue, output_buffer, CL_TRUE, 0, buffer_size,
-								  out_depth_cpu, 0, NULL, NULL);
+
+		float *mapped_ptr = clEnqueueMapBuffer(ocl->queue, output_buffer, CL_TRUE,
+											   CL_MAP_READ, 0, buffer_size, 1, &evt, NULL, &err);
 		if (err != CL_SUCCESS) {
-			fprintf(stderr, "Error reading back depth buffer: %s (%d)\n", clErrorString(err), err);
+			fprintf(stderr, "Error mapping depth buffer: %s (%d)\n", clErrorString(err), err);
 			if (evt) clReleaseEvent(evt);
 			return 0;
 		}
+
+		memcpy(out_depth_cpu, mapped_ptr, buffer_size);
+
+		err = clEnqueueUnmapMemObject(ocl->queue, output_buffer, mapped_ptr, 0, NULL, NULL);
+		if (err != CL_SUCCESS) {
+			fprintf(stderr, "Error unmapping depth buffer: %s (%d)\n", clErrorString(err), err);
+			if (evt) clReleaseEvent(evt);
+			return 0;
+		}
+	} else {
+		clFinish(ocl->queue);
 	}
 
 	// Calculate GPU time if requested
@@ -454,7 +463,7 @@ int renderDepthBufferFastOpenCL(
 	return 1;
 }
 
-void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs, bool *foundTarget, float (*targetDirection)[3], int idx) {
+void renderAllMissileFires(struct OpenCLContext *ocl, struct Missiles *missiles, struct Camera *camera, float *timeTookMs) {
 	if (!missiles || missiles->count == 0) return;
 
 	cl_int err;
@@ -731,7 +740,7 @@ float timeSinceLastFire = 0.0f;
 float firedMissileTime = 0.0f;
 int firedMissileIdx = -1;
 
-void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime) {
+void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime, struct Triangles *triangles) {
 	float totalTimeTookMs = 0.0f;
 	bool hasFired = false;
 
@@ -796,29 +805,38 @@ void renderAllMissileFiresView(struct OpenCLContext *ocl, struct Missiles *missi
 		float distanceToCamera = sqrtf(dx * dx + dy * dy + dz * dz);
 
 		if (active && distanceToCamera > 35.0f) {
-			renderAllMissileFires(ocl, missiles, &missile->seeker.seekerCamera, &tempTimeTookMs, &foundTarget, &targetDir, i);
-			totalTimeTookMs += tempTimeTookMs;
-
-			if (foundTarget) {
-				float rayOrigin[3] = {
-					missile->seeker.seekerCamera.ray.origin[0],
-					missile->seeker.seekerCamera.ray.origin[1],
-					missile->seeker.seekerCamera.ray.origin[2]};
-
-				float hitDistance = 1000.0f;
-				targetPos[0] = rayOrigin[0] + targetDir[0] * hitDistance;
-				targetPos[1] = rayOrigin[1] + targetDir[1] * hitDistance;
-				targetPos[2] = rayOrigin[2] + targetDir[2] * hitDistance;
-
-				targetVel[0] = 0.0f;
-				targetVel[1] = 0.0f;
-				targetVel[2] = 0.0f;
+			float FOV = missile->seeker.seekerCamera.fov;
+			if (missile->seeker.lockState == Searching) {
+				FOV = FOV * missile->seeker.searchMultiplayer;
 			}
+			renderDepthBuffer(ocl,
+							  ocl->buffer_triangle_v1,
+							  ocl->buffer_triangle_v2,
+							  ocl->buffer_triangle_v3,
+							  ocl->buffer_triangle_normals,
+							  ocl->buffer_seeker_distances,
+							  triangles->count,
+							  missile->seeker.seekerCamera.ray.origin,
+							  missile->seeker.seekerCamera.ray.direction,
+							  FOV,
+							  MISSILE_SEEKER_SIZE,
+							  MISSILE_SEEKER_SIZE,
+							  missile->seeker.seekerDepthMap,
+							  &tempTimeTookMs);
 		}
 
 		float tmp1 = 0.0f;
 		float tmp2 = 0.0f;
-		missileSeekStep(missile, missiles, shouldFireThisMissile, foundTarget, targetDir, targetPos, targetVel, &missiles->active[i], deltaTime, &tmp1, &tmp2);
+		missileSeekStep(
+			missile,
+			missiles,
+			fire,
+			missiles->active,
+			deltaTime,
+			&tmp1,
+			&tmp2,
+			camera->ray.direction,
+			camera->ray.origin);
 		totalTimeTookMs += tmp1 + tmp2;
 	}
 	*timeTookMs = totalTimeTookMs;
@@ -2518,13 +2536,15 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	ocl->buffer_seeker_distances = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
+	ocl->buffer_seeker_distances = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
 												  MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE * sizeof(float), NULL, &err);
 
 	if (err != CL_SUCCESS) {
 		printf("Error creating seeker view buffer: %d\n", err);
 		return 0;
 	}
+
+	ocl->mapped_seeker_distances = NULL;
 
 	// missile triangles buffer
 	int maxMissileTriangles = missiles->missileModel->count;
@@ -3687,6 +3707,9 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
 	if (ocl->buffer_skybox_right) clReleaseMemObject(ocl->buffer_skybox_right);
 	if (ocl->buffer_skybox_front) clReleaseMemObject(ocl->buffer_skybox_front);
 	if (ocl->buffer_skybox_back) clReleaseMemObject(ocl->buffer_skybox_back);
+
+	if (ocl->buffer_seeker_distances) clReleaseMemObject(ocl->buffer_seeker_distances);
+	ocl->mapped_seeker_distances = NULL;
 
 	if (ocl->kernel) clReleaseKernel(ocl->kernel);
 	if (ocl->skybox_kernel) clReleaseKernel(ocl->skybox_kernel);
