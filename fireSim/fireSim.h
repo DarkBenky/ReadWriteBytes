@@ -130,6 +130,7 @@ struct Missile {
     float machNumber;                     // Current Mach number (speed/speed_of_sound)
     float dynamicPressure;                // Current dynamic pressure 0.5*ρ*v² (Pa)
     float prevLOS[3];                     // Previous line-of-sight vector for guidance
+    int targetIdx;                       // Index of current target in missile list
 };
 
 struct Missiles {

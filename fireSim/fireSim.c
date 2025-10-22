@@ -82,7 +82,7 @@ int findClosestObjectToViewCenter(
 	float fovCosThreshold = cosf(fovHalfRad);
 
 	int bestIdx = -1;
-	float bestScore = -FLT_MAX;
+	float bestScore = -MAX_FLOAT;
 
 	// Find max temp for normalization
 	float maxTemp = 0.0f;
@@ -136,7 +136,7 @@ int findClosestObjectToViewCenter(
 		int py = (int)(pixelY * MISSILE_SEEKER_SIZE);
 
 		// Check if object is occluded
-		if (px >= 0 && px < MISSILE_SEEKER_SIZE && py >= 0 && py < SEEKER_SIZE) {
+		if (px >= 0 && px < MISSILE_SEEKER_SIZE && py >= 0 && py < MISSILE_SEEKER_SIZE) {
 			int pixelIdx = py * MISSILE_SEEKER_SIZE + px;
 			float geometryDist = seekerImageDistances[pixelIdx];
 
@@ -181,7 +181,7 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerCamera.fov = 8.0f;
 	missile->seeker.seekerFov = 45.0f;
 	missile->seeker.lockState = Lunching;
-	missile->seeker.searchMultiplayer = randRange(3.0f, 8.0f);
+	missile->seeker.searchMultiplayer = randRange(1.25f, 2.5f);
 	missile->seeker.tiltSpeed = randRange(2.0f, 5.0f);
 
 	// Core simulation
@@ -283,6 +283,8 @@ void InitializeMissile(struct Missile *missile) {
 	missile->prevLOS[0] = 0.0f;
 	missile->prevLOS[1] = 0.0f;
 	missile->prevLOS[2] = 0.0f;
+
+	missile->targetIdx = -1;
 }
 
 void setMissileTarget(struct Missile *missile, float targetPos[3]) {
@@ -378,9 +380,37 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 		}
 
 		float cosPitch = cosf(searchPitch);
-		rayDir[0] = sinf(searchYaw) * cosPitch;
-		rayDir[1] = sinf(searchPitch);
-		rayDir[2] = cosf(searchYaw) * cosPitch;
+		float localDir[3];
+		localDir[0] = sinf(searchYaw) * cosPitch;
+		localDir[1] = sinf(searchPitch);
+		localDir[2] = cosf(searchYaw) * cosPitch;
+
+		// Transform local search direction to world space using body orientation
+		float forward[3] = {missile->bodyOrientation[0], missile->bodyOrientation[1], missile->bodyOrientation[2]};
+		float right[3], up[3];
+
+		// Create right vector
+		if (fabsf(forward[1]) < 0.99f) {
+			right[0] = forward[2];
+			right[1] = 0.0f;
+			right[2] = -forward[0];
+		} else {
+			right[0] = 1.0f;
+			right[1] = 0.0f;
+			right[2] = 0.0f;
+		}
+		normalize3(right);
+
+		// Create up vector (cross product: up = right × forward)
+		up[0] = right[1] * forward[2] - right[2] * forward[1];
+		up[1] = right[2] * forward[0] - right[0] * forward[2];
+		up[2] = right[0] * forward[1] - right[1] * forward[0];
+		normalize3(up);
+
+		// Transform local direction to world space
+		rayDir[0] = forward[0] * localDir[2] + right[0] * localDir[0] + up[0] * localDir[1];
+		rayDir[1] = forward[1] * localDir[2] + right[1] * localDir[0] + up[1] * localDir[1];
+		rayDir[2] = forward[2] * localDir[2] + right[2] * localDir[0] + up[2] * localDir[1];
 		normalize3(rayDir);
 
 		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
@@ -401,6 +431,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			count, 0.4f, 0.3f, 0.3f);
 
 		if (bestIdx >= 0 && bestIdx < count) {
+			missile->targetIdx = bestIdx;
 			float toTarget[3] = {
 				objX[bestIdx] - rayOrigin[0],
 				objY[bestIdx] - rayOrigin[1],
@@ -439,6 +470,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			count, 0.5f, 0.3f, 0.2f);
 
 		if (bestIdx >= 0 && bestIdx < count) {
+			missile->targetIdx = bestIdx;
 			float toTarget[3] = {
 				objX[bestIdx] - rayOrigin[0],
 				objY[bestIdx] - rayOrigin[1],

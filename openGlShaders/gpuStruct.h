@@ -21,7 +21,7 @@ struct OpenCLContext {
 	cl_kernel triangle_kernel; // triangle kernel
 	cl_kernel skybox_kernel;
 	cl_kernel applyReflections_kernel;
-	cl_kernel applyRayTracedReflections_kernel; // Apply ray-traced reflections
+	// cl_kernel applyRayTracedReflections_kernel; // Apply ray-traced reflections
 	cl_kernel gpuTimings_kernel;				// kernel for GPU timings
 	cl_kernel renderText_kernel;				// kernel for rendering text
 	cl_kernel calculateVertex_kernel;			// Vertex calculation kernel
@@ -80,6 +80,8 @@ struct OpenCLContext {
 	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_opacities;				 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_velocities_screen;		 // ScreenWidth * ScreenHeight * sizeof(float)
+	cl_mem buffer_velocities;			 	 // NUM_PARTICLES * 3 * sizeof(float)
+	cl_mem buffer_points;				 	 // NUM_PARTICLES * 3 * sizeof(float)
 	cl_mem buffer_normals;					 // ScreenWidth * ScreenHeight * sizeof(float) * 3
 	cl_mem buffer_screen_colors;			 // ScreenWidth * ScreenHeight * sizeof(float) * 3
 	cl_mem buffer_screen_material_roughness; // ScreenWidth * ScreenHeight * sizeof(float)

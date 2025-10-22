@@ -1,4 +1,8 @@
-#define FLT_MAX 3.402823466e+38F
+#define FMAX 3.402823466e+38F
+
+float fract(float x) {
+    return x - floor(x);
+}
 
 void renderFont(
     const int fontSizeX,     // Total font texture width
@@ -550,6 +554,10 @@ float3 sampleScreenSpaceReflectionFiltered(
     }
     
     return fallbackColor;
+}
+
+float3 reflectVector(const float3 I, const float3 N) {
+    return I - 2.0f * dot(N, I) * N;
 }
 
 __kernel void applyReflections(
@@ -1189,9 +1197,9 @@ __kernel void ShadePixels(
     const float cy = (float)py + 0.5f;
     const int idx = py * screenWidth + px;
 
-    // start with existing depth (or FLT_MAX if zero)
+    // start with existing depth (or FMAX if zero)
     float bestDepth = ScreenDistances[idx] > 0.0f
-        ? ScreenDistances[idx] : FLT_MAX;
+        ? ScreenDistances[idx] : FMAX;
     int   bestTri   = -1;
 
     const int CHUNK = 64;
@@ -2905,87 +2913,64 @@ __kernel void renderDepthBufferFast(
     float3 v2_pos = (float3)(v2[idx], v2[idx + 1], v2[idx + 2]);
     float3 v3_pos = (float3)(v3[idx], v3[idx + 1], v3[idx + 2]);
 
-    // Calculate bounding box in screen space (minimal bounds checking)
-    float aspectRatio = (float)screenWidth / (float)screenHeight;
-    float tanHalfFov = tan(fov * 0.5f);
-    float3 worldUp = (float3)(0.0f, 1.0f, 0.0f);
-    float3 camRight = normalize(cross(camDir, worldUp));
-    float3 camUp = normalize(cross(camRight, camDir));
+    // Back-face culling (match renderTriangles)
+    float3 fn = vload3(0, normals + idx);
+    float3 center = (v1_pos + v2_pos + v3_pos) * (1.0f/3.0f);
+    if (dot(fn, normalize(camPos - center)) <= 0.0f) return;
 
-    // Project vertices to screen space
-    float2 proj1 = (float2)(0.0f), proj2 = (float2)(0.0f), proj3 = (float2)(0.0f);
-    float depth1 = 0.0f, depth2 = 0.0f, depth3 = 0.0f;
+    // Camera basis (match renderTriangles)
+    float3 F = normalize(camDir);
+    float3 U = (float3)(0,1,0);
+    float3 R = normalize(cross(F,U));
+    U = cross(R,F);
 
-    // Project v1
-    float3 relPos1 = v1_pos - camPos;
-    float dist1 = dot(relPos1, camDir);
-    if (dist1 > 0.1f) {
-        float3 relToRay = relPos1 - camDir * dist1;
-        float x1 = dot(relToRay, camRight) / (dist1 * tanHalfFov * aspectRatio);
-        float y1 = dot(relToRay, camUp) / (dist1 * tanHalfFov);
-        proj1 = (float2)(
-            (x1 + 1.0f) * 0.5f * screenWidth,
-            (1.0f - y1) * 0.5f * screenHeight
-        );
-        depth1 = dist1;
-    }
+    // Constants (match renderTriangles)
+    float invF = 1.0f / fov;
+    float halfW = screenWidth * 0.5f, halfH = screenHeight * 0.5f;
 
-    // Project v2
-    float3 relPos2 = v2_pos - camPos;
-    float dist2 = dot(relPos2, camDir);
-    if (dist2 > 0.1f) {
-        float3 relToRay = relPos2 - camDir * dist2;
-        float x2 = dot(relToRay, camRight) / (dist2 * tanHalfFov * aspectRatio);
-        float y2 = dot(relToRay, camUp) / (dist2 * tanHalfFov);
-        proj2 = (float2)(
-            (x2 + 1.0f) * 0.5f * screenWidth,
-            (1.0f - y2) * 0.5f * screenHeight
-        );
-        depth2 = dist2;
-    }
+    // Project vertices to screen space (match renderTriangles exactly)
+    float3 r0 = v1_pos - camPos, r1 = v2_pos - camPos, r2 = v3_pos - camPos;
+    float d0 = dot(r0,F), d1 = dot(r1,F), d2 = dot(r2,F);
+    float minD = fmin(fmin(d0,d1),d2);
+    if (minD <= 0.001f) return;
+    
+    float s0 = invF/d0, s1 = invF/d1, s2 = invF/d2;
+    float3 sp0 = (float3)(dot(r0,R)*halfW*s0 + halfW, -dot(r0,U)*halfH*s0 + halfH, d0);
+    float3 sp1 = (float3)(dot(r1,R)*halfW*s1 + halfW, -dot(r1,U)*halfH*s1 + halfH, d1);
+    float3 sp2 = (float3)(dot(r2,R)*halfW*s2 + halfW, -dot(r2,U)*halfH*s2 + halfH, d2);
 
-    // Project v3
-    float3 relPos3 = v3_pos - camPos;
-    float dist3 = dot(relPos3, camDir);
-    if (dist3 > 0.1f) {
-        float3 relToRay = relPos3 - camDir * dist3;
-        float x3 = dot(relToRay, camRight) / (dist3 * tanHalfFov * aspectRatio);
-        float y3 = dot(relToRay, camUp) / (dist3 * tanHalfFov);
-        proj3 = (float2)(
-            (x3 + 1.0f) * 0.5f * screenWidth,
-            (1.0f - y3) * 0.5f * screenHeight
-        );
-        depth3 = dist3;
-    }
+    // Bounding box
+    float minXf = fmin(fmin(sp0.x,sp1.x),sp2.x),
+          maxXf = fmax(fmax(sp0.x,sp1.x),sp2.x),
+          minYf = fmin(fmin(sp0.y,sp1.y),sp2.y),
+          maxYf = fmax(fmax(sp0.y,sp1.y),sp2.y);
+    if (maxXf < 0 || minXf >= screenWidth || maxYf < 0 || minYf >= screenHeight) return;
+    
+    int x0 = max(0,(int)minXf), x1 = min(screenWidth-1,(int)maxXf);
+    int y0 = max(0,(int)minYf), y1 = min(screenHeight-1,(int)maxYf);
 
-    // Get bounding box
-    int minX = max(0, (int)min(proj1.x, min(proj2.x, proj3.x)));
-    int maxX = min(screenWidth - 1, (int)ceil(max(proj1.x, max(proj2.x, proj3.x))));
-    int minY = max(0, (int)min(proj1.y, min(proj2.y, proj3.y)));
-    int maxY = min(screenHeight - 1, (int)ceil(max(proj1.y, max(proj2.y, proj3.y))));
+    // Precompute barycentric constants (match renderTriangles)
+    float2 e1 = sp2.xy - sp0.xy, e2 = sp1.xy - sp0.xy;
+    float d00 = dot(e1,e1), d01 = dot(e1,e2), d11 = dot(e2,e2);
+    float invDen = 1.0f / (d00*d11 - d01*d01);
 
-    // Rasterize triangle (only write depth)
-    for (int y = minY; y <= maxY; y++) {
-        for (int x = minX; x <= maxX; x++) {
-            float2 pixel = (float2)(x + 0.5f, y + 0.5f);
-            
-            // Barycentric coordinates (fast computation)
-            float3 bary = (float3)(0.0f);
-            float denom = (proj2.y - proj3.y) * (proj1.x - proj3.x) + (proj3.x - proj2.x) * (proj1.y - proj3.y);
-            if (fabs(denom) < 1e-6f) continue;
-            
-            bary.x = ((proj2.y - proj3.y) * (pixel.x - proj3.x) + (proj3.x - proj2.x) * (pixel.y - proj3.y)) / denom;
-            bary.y = ((proj3.y - proj1.y) * (pixel.x - proj3.x) + (proj1.x - proj3.x) * (pixel.y - proj3.y)) / denom;
-            bary.z = 1.0f - bary.x - bary.y;
-
-            // Check if inside triangle
-            if (bary.x >= -1e-6f && bary.y >= -1e-6f && bary.z >= -1e-6f) {
-                // Interpolate depth
-                float depth = bary.x * depth1 + bary.y * depth2 + bary.z * depth3;
-                int pixelIdx = y * screenWidth + x;
-
-                // Update only if closer (atomic operation for thread safety)
-                if (ScreenDistances[pixelIdx] == 0.0f || depth < ScreenDistances[pixelIdx]) {
+    // Rasterize triangle
+    for (int y = y0; y <= y1; ++y) {
+        float cy = (y + 0.5f) - sp0.y;
+        int row = y * screenWidth;
+        for (int x = x0; x <= x1; ++x) {
+            float cx = (x + 0.5f) - sp0.x;
+            float l0 = e1.x*cx + e1.y*cy;
+            float l1 = e2.x*cx + e2.y*cy;
+            float u = (d11*l0 - d01*l1) * invDen;
+            float v = (d00*l1 - d01*l0) * invDen;
+            if (u >= 0.0f && v >= 0.0f && u + v <= 1.0f) {
+                int pixelIdx = row + x;
+                float w = 1.0f - u - v;
+                float depth = w*sp0.z + u*sp1.z + v*sp2.z;
+                
+                float prev = ScreenDistances[pixelIdx];
+                if (prev == 0.0f || depth < prev) {
                     ScreenDistances[pixelIdx] = depth;
                 }
             }

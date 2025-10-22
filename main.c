@@ -387,6 +387,15 @@ int renderDepthBuffer(
 	cl_int err;
 	cl_event evt = NULL;
 
+	// clear output buffer
+	float zeroFloat = 0.0f;
+	err = clEnqueueFillBuffer(ocl->queue, output_buffer, &zeroFloat, sizeof(float), 0,
+							  screen_width * screen_height * sizeof(float), 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		fprintf(stderr, "Error clearing depth buffer: %s (%d)\n", clErrorString(err), err);
+		return 0;
+	}
+
 	// Prepare camera parameters
 	cl_float3 cl_cam_pos = {cam_pos[0], cam_pos[1], cam_pos[2]};
 	cl_float3 cl_cam_dir = {cam_dir[0], cam_dir[1], cam_dir[2]};
@@ -751,10 +760,6 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 		struct Missile *missile = missiles->missiles[i];
 		bool active = missiles->active[i];
 		float tempTimeTookMs = 0.0f;
-		float targetDir[3] = {0.0f, 0.0f, 0.0f};
-		float targetPos[3] = {0.0f, 0.0f, 0.0f};
-		float targetVel[3] = {0.0f, 0.0f, 0.0f};
-		bool foundTarget = false;
 		bool shouldFireThisMissile = false;
 
 		if (*fire && !active && !hasFired && canFire) {
@@ -768,9 +773,9 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 			missile->bodyOrientation[1] = camera->ray.direction[1];
 			missile->bodyOrientation[2] = camera->ray.direction[2];
 
-			missile->velocity[0] = camera->ray.direction[0] * 500.0f;
-			missile->velocity[1] = camera->ray.direction[1] * 500.0f;
-			missile->velocity[2] = camera->ray.direction[2] * 500.0f;
+			missile->velocity[0] = camera->ray.direction[0] * 50.0f;
+			missile->velocity[1] = camera->ray.direction[1] * 50.0f;
+			missile->velocity[2] = camera->ray.direction[2] * 50.0f;
 
 			missile->targetDirection[0] = camera->ray.direction[0];
 			missile->targetDirection[1] = camera->ray.direction[1];
@@ -804,11 +809,14 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 		float dz = missile->position[2] - camera->ray.origin[2];
 		float distanceToCamera = sqrtf(dx * dx + dy * dy + dz * dz);
 
-		if (active && distanceToCamera > 35.0f) {
-			float FOV = missile->seeker.seekerCamera.fov;
-			if (missile->seeker.lockState == Searching) {
-				FOV = FOV * missile->seeker.searchMultiplayer;
-			}
+		// if (active && distanceToCamera > 10.0f) {
+			// float FOV = missile->seeker.seekerCamera.fov;
+			// if (missile->seeker.lockState == Searching) {
+			// 	FOV = FOV * missile->seeker.searchMultiplayer;
+			// }
+
+			float FOV =  0.75f;
+
 			renderDepthBuffer(ocl,
 							  ocl->buffer_triangle_v1,
 							  ocl->buffer_triangle_v2,
@@ -823,15 +831,15 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 							  MISSILE_SEEKER_SIZE,
 							  missile->seeker.seekerDepthMap,
 							  &tempTimeTookMs);
-		}
+		// }
 
 		float tmp1 = 0.0f;
 		float tmp2 = 0.0f;
 		missileSeekStep(
 			missile,
 			missiles,
-			fire,
-			missiles->active,
+			shouldFireThisMissile,
+			&missiles->active[i],
 			deltaTime,
 			&tmp1,
 			&tmp2,
@@ -2443,21 +2451,9 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	ocl->missile_seeker_kernel = clCreateKernel(ocl->program, "findHotSpots", &err);
-	if (err != CL_SUCCESS) {
-		printf("Error creating missile seeker kernel: %d\n", err);
-		return 0;
-	}
-
 	ocl->calculateVertex_kernel = clCreateKernel(ocl->program, "calculateVertexCoordinate", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating calculateVertexCoordinate kernel: %d\n", err);
-		return 0;
-	}
-
-	ocl->applyRayTracedReflections_kernel = clCreateKernel(ocl->program, "applyRayTracedReflections", &err);
-	if (err != CL_SUCCESS) {
-		printf("Error creating rayTrace kernel: %d\n", err);
 		return 0;
 	}
 
@@ -2528,7 +2524,7 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	// Create all buffers (same as your existing initializeOpenCL function)
+	// Create all buffers
 	ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 										NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
 	if (err != CL_SUCCESS) {
@@ -3106,7 +3102,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	bool temp = false;
 	float tempVec[3] = {0.0f, 0.0f, 0.0f};
 
-	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime, &temp, &tempVec, 0);
+	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime);
 	renderFireParticles(ocl, fireParticles, camera, &gpuTimings->fireRenderingTime);
 
 	// Write data to GPU buffers
@@ -3282,26 +3278,10 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 			float speed = sqrtf(m->velocity[0] * m->velocity[0] + m->velocity[1] * m->velocity[1] + m->velocity[2] * m->velocity[2]);
 			float dist = sqrtf(m->targetPosition[0] * m->targetPosition[0] + m->targetPosition[1] * m->targetPosition[1] + m->targetPosition[2] * m->targetPosition[2]);
 
-			snprintf(text, sizeof(text), "M%d: %s Spd:%.0f/%.0fm/s Fuel:%.0fkg", i, stateName, speed, m->maxSpeed, m->fuelMass);
+			snprintf(text, sizeof(text), "M%d: %s Spd:%.0f/%.0fm/s Fuel:%.0fkg Target Idx:%d", i, stateName, speed, m->maxSpeed, m->fuelMass, m->targetIdx);
 			addTextOpenCL(ocl, font, text, 5, missileUIy, stateColor);
 
-			snprintf(text, sizeof(text), "    Conf:%.0f%% MinTh:%.0f%% Dist:%.0fm", m->seeker.lastDetectionConfidence * 100.0f, m->minTrackConfidence * 100.0f, dist);
-			addTextOpenCL(ocl, font, text, 5, missileUIy + 15, stateColor);
-
 			missileUIy += 35;
-		}
-	}
-
-	if (firedMissileTime > 0.0f && firedMissileIdx >= 0 && firedMissileIdx < missiles->count) {
-		uint8_t notifyColor[3] = {255, 100, 0};
-		snprintf(text, sizeof(text), ">>> MISSILE %d FIRED <<<", firedMissileIdx);
-		addTextOpenCL(ocl, font, text, ScreenWidth / 2 - 150, 50, notifyColor);
-
-		struct Missile *m = missiles->missiles[firedMissileIdx];
-		if (m->seeker.lockState == Tracking) {
-			uint8_t trackColor[3] = {0, 255, 100};
-			snprintf(text, sizeof(text), "SEEKER LOCKED ON TARGET!");
-			addTextOpenCL(ocl, font, text, ScreenWidth / 2 - 120, 70, trackColor);
 		}
 	}
 
@@ -3497,15 +3477,15 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	launchOverlayImageOpenCL(
 		ocl,
 		ocl->cl_ui_texture_buffer_temp,
-		ocl->buffer_seeker_view,
+		ocl->buffer_seeker_distances,
 		ScreenWidth,
 		ScreenHeight,
-		SEEKER_SIZE,
-		SEEKER_SIZE,
+		MISSILE_SEEKER_SIZE,
+		MISSILE_SEEKER_SIZE,
 		0,
 		2,
 		&tmp,
-		ScreenWidth - SEEKER_SIZE - 10,
+		ScreenWidth - MISSILE_SEEKER_SIZE - 10,
 		10);
 	// Acquire UI texture
 	err = clEnqueueAcquireGLObjects(ocl->queue, 1, &ocl->cl_ui_texture_buffer, 0, NULL, NULL);
@@ -4612,7 +4592,7 @@ int main() {
 		clock_t startGridTime = clock();
 		if (!paused) {
 			float tmp = 0.0f;
-			renderAllMissileFiresView(&ocl, &missiles, &tmp, &fireMissile, &camera, 1 / 60.0f);
+			missilesSimulation(&ocl, &missiles, &tmp, &fireMissile, &camera, 1 / 60.0f, triangles);
 			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime);
 			fireSimStep(fireParticles, 1 / TPS, &gpuTimings.fireSimulationTime);
 			firedMissileTime -= 1 / 60.0f;
