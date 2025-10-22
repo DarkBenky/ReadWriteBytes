@@ -749,6 +749,7 @@ float timeSinceLastFire = 0.0f;
 float firedMissileTime = 0.0f;
 int firedMissileIdx = -1;
 
+Why i dont see the cubes in overlay image
 void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime, struct Triangles *triangles) {
 	float totalTimeTookMs = 0.0f;
 	bool hasFired = false;
