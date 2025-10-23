@@ -38,6 +38,7 @@ struct OpenCLContext {
 	cl_kernel renderFireTemperature_kernel; // Fire temperature rendering kernel
 	cl_kernel overlayImage_kernel;        // Overlay image kernel
 	cl_kernel renderDepth;
+	cl_kernel composite_cones_kernel;
 	// buffers
 	cl_mem buffer_seeker_distances;
 	cl_mem buffer_distances_temp;
@@ -126,6 +127,15 @@ struct OpenCLContext {
 	cl_mem CompositedScreenColors;
 	cl_mem CompositedScreenNormals;
 	cl_mem CompositedScreenDistances;
+	// seeker position and direction buffers
+	cl_mem buffer_cone_originX;
+	cl_mem buffer_cone_originY;
+	cl_mem buffer_cone_originZ;
+	cl_mem buffer_cone_dirX;
+	cl_mem buffer_cone_dirY;
+	cl_mem buffer_cone_dirZ;
+	cl_mem buffer_cone_fov;
+	cl_mem buffer_cone_maxDist;
 
 	// Add pre-allocated host memory buffers
 	float *host_points_data;
@@ -135,7 +145,6 @@ struct OpenCLContext {
 	float *host_velocities_result;
 	float *host_normals_result;
 	float *host_screen_colors_result;
-	
 	float *mapped_seeker_distances;
 };
 
@@ -166,6 +175,7 @@ enum RenderMode {
 	renderCompositedColor,
 	renderCompositedDistance,
 	renderTemperatures,
+	renderDebugMode,
 	RENDER_MODE_COUNT // Total number of render modes
 };
 

@@ -2977,3 +2977,159 @@ __kernel void renderDepthBufferFast(
         }
     }
 }
+
+Improve this function
+__kernel void composite_cones(
+    __global float* imageBufferColor,      // RGB input/output, 3 floats per pixel
+    __global float* imageBufferDepth,      // Depth input/output, 1 float per pixel
+    int imageWidth,
+    int imageHeight,
+    float cameraPosX,
+    float cameraPosY,
+    float cameraPosZ,
+    float cameraDirX,
+    float cameraDirY,
+    float cameraDirZ,
+    float cameraFOV,
+    __global float* coneOriginX,
+    __global float* coneOriginY,
+    __global float* coneOriginZ,
+    __global float* coneDirX,
+    __global float* coneDirY,
+    __global float* coneDirZ,
+    __global float* coneFov,
+    int numberOfCones,
+    __global float* coneMaxDist
+)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    
+    if (x >= imageWidth || y >= imageHeight) return;
+    
+    int pixelIdx = y * imageWidth + x;
+    
+    // Desaturate background heavily (convert to grayscale, keep only 10% saturation)
+    float r = imageBufferColor[pixelIdx * 3 + 0];
+    float g = imageBufferColor[pixelIdx * 3 + 1];
+    float b = imageBufferColor[pixelIdx * 3 + 2];
+    float gray = 0.299f * r + 0.587f * g + 0.114f * b;
+    imageBufferColor[pixelIdx * 3 + 0] = gray * 0.9f + r * 0.1f;
+    imageBufferColor[pixelIdx * 3 + 1] = gray * 0.9f + g * 0.1f;
+    imageBufferColor[pixelIdx * 3 + 2] = gray * 0.9f + b * 0.1f;
+    
+    // Read existing depth
+    float existingDepth = imageBufferDepth[pixelIdx];
+    
+    // NDC coords
+    float ndcX = (2.0f * x / (float)imageWidth - 1.0f);
+    float ndcY = (1.0f - 2.0f * y / (float)imageHeight);
+    float aspectRatio = (float)imageWidth / (float)imageHeight;
+    
+    // Camera basis
+    float camLen = sqrt(cameraDirX * cameraDirX + cameraDirY * cameraDirY + cameraDirZ * cameraDirZ);
+    float cdx = cameraDirX / camLen;
+    float cdy = cameraDirY / camLen;
+    float cdz = cameraDirZ / camLen;
+    
+    float upx = 0.0f, upy = 1.0f, upz = 0.0f;
+    if (fabs(cdy) > 0.99f) { upx = 1.0f; upy = 0.0f; upz = 0.0f; }
+    
+    // Right = cross(camDir, up)
+    float rx = cdy * upz - cdz * upy;
+    float ry = cdz * upx - cdx * upz;
+    float rz = cdx * upy - cdy * upx;
+    float rlen = sqrt(rx * rx + ry * ry + rz * rz);
+    rx /= rlen; ry /= rlen; rz /= rlen;
+    
+    // Up = cross(right, camDir)
+    upx = ry * cdz - rz * cdy;
+    upy = rz * cdx - rx * cdz;
+    upz = rx * cdy - ry * cdx;
+    
+    // Ray direction (cameraFOV is already in tan(angle/2) format)
+    float rdx = cdx + rx * ndcX * aspectRatio * cameraFOV + upx * ndcY * cameraFOV;
+    float rdy = cdy + ry * ndcX * aspectRatio * cameraFOV + upy * ndcY * cameraFOV;
+    float rdz = cdz + rz * ndcX * aspectRatio * cameraFOV + upz * ndcY * cameraFOV;
+    float rdLen = sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
+    rdx /= rdLen; rdy /= rdLen; rdz /= rdLen;
+    
+    // Check if ray passes through any cone volume
+    int hitCone = -1;
+    float blendFactor = 0.0f;
+    
+    for (int i = 0; i < numberOfCones; i++) {
+        float cox = coneOriginX[i];
+        float coy = coneOriginY[i];
+        float coz = coneOriginZ[i];
+        float cvx = coneDirX[i];
+        float cvy = coneDirY[i];
+        float cvz = coneDirZ[i];
+        
+        float cvLen = sqrt(cvx * cvx + cvy * cvy + cvz * cvz);
+        cvx /= cvLen; cvy /= cvLen; cvz /= cvLen;
+        
+        float coneFovDegrees = coneFov[i];
+        float coneAngle = (coneFovDegrees / 2.0f) * M_PI_F / 180.0f;
+        float cosA = cos(coneAngle);
+        float coneHeight = coneMaxDist[i];
+        
+        // Check ray against cone at multiple depths to ensure we catch it
+        // Sample at cone's max depth and at existing geometry depth
+        float sampleDepths[2];
+        sampleDepths[0] = coneHeight;
+        sampleDepths[1] = (existingDepth > 0.0f && existingDepth < 1e6f) ? existingDepth : coneHeight;
+        
+        for (int d = 0; d < 2; d++) {
+            float checkDepth = sampleDepths[d];
+            
+            // Check if the point along the ray is inside the cone
+            float px = cameraPosX + rdx * checkDepth;
+            float py = cameraPosY + rdy * checkDepth;
+            float pz = cameraPosZ + rdz * checkDepth;
+            
+            // Vector from cone origin to point
+            float vx = px - cox;
+            float vy = py - coy;
+            float vz = pz - coz;
+            
+            // Distance along cone axis
+            float distAlongAxis = vx * cvx + vy * cvy + vz * cvz;
+            
+            // Check if within cone height
+            if (distAlongAxis >= 0.0f && distAlongAxis <= coneHeight) {
+                // Normalize vector to point
+                float vLen = sqrt(vx * vx + vy * vy + vz * vz);
+                if (vLen > 0.0001f) {
+                    vx /= vLen; vy /= vLen; vz /= vLen;
+                    
+                    // Dot product with cone axis
+                    float dotProduct = vx * cvx + vy * cvy + vz * cvz;
+                    
+                    // Check if inside cone angle
+                    if (dotProduct >= cosA) {
+                        hitCone = i;
+                        // Blend factor based on distance from center (stronger at center)
+                        blendFactor = (dotProduct - cosA) / (1.0f - cosA);
+                        blendFactor = 0.3f + blendFactor * 0.4f;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (hitCone >= 0) break;
+    }
+    
+    // Blend cone color with existing color if inside cone
+    if (hitCone >= 0) {
+        float hue = (float)hitCone / (float)numberOfCones;
+        float coneR = 0.2f + hue * 0.8f;
+        float coneG = 0.8f;
+        float coneB = 0.3f;
+        
+        imageBufferColor[pixelIdx * 3 + 0] = imageBufferColor[pixelIdx * 3 + 0] * (1.0f - blendFactor) + coneR * blendFactor;
+        imageBufferColor[pixelIdx * 3 + 1] = imageBufferColor[pixelIdx * 3 + 1] * (1.0f - blendFactor) + coneG * blendFactor;
+        imageBufferColor[pixelIdx * 3 + 2] = imageBufferColor[pixelIdx * 3 + 2] * (1.0f - blendFactor) + coneB * blendFactor;
+    }
+}

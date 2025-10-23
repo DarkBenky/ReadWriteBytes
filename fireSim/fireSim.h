@@ -136,13 +136,22 @@ struct Missile {
 struct Missiles {
     struct Missile *missiles[MAX_FIRE_SIMS];
     struct Triangles *missileModel;
+    float coneOriginsX[MAX_FIRE_SIMS];
+    float coneOriginsY[MAX_FIRE_SIMS];
+    float coneOriginsZ[MAX_FIRE_SIMS];
+    float coneDirsX[MAX_FIRE_SIMS];
+    float coneDirsY[MAX_FIRE_SIMS];
+    float coneDirsZ[MAX_FIRE_SIMS];
+    float coneFovs[MAX_FIRE_SIMS];
+    float coneMaxDistances[MAX_FIRE_SIMS];
     bool active[MAX_FIRE_SIMS];
+    int activeCount;
     int count;
 };
 
 void InitializeFireParticles(struct FireSOA *particles);
 void fireSimStep(struct FireSOA *particles, float deltaTime, float *timeTook);
-
+void updateSeekerPositions(struct Missiles *missiles);
 void InitializeMissile(struct Missile *missile);
 void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active, float *fireSimulationTime);
 void setMissileTarget(struct Missile *missile, float targetPos[3]);

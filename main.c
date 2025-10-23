@@ -63,6 +63,11 @@ pthread_t threads[NUM_THREADS];
 #include <GLFW/glfw3native.h>
 #include <CL/cl_gl.h>
 
+// Ensure M_PI is defined
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 const char *clErrorString(cl_int err) {
 	switch (err) {
 	case CL_SUCCESS:
@@ -126,6 +131,7 @@ char *renderModesName[] = {
 	"renderCompositedColor",
 	"renderCompositedDistance",
 	"renderTemperatures",
+	"renderDebugMode",
 };
 
 struct RawImage {
@@ -749,7 +755,7 @@ float timeSinceLastFire = 0.0f;
 float firedMissileTime = 0.0f;
 int firedMissileIdx = -1;
 
-Why i dont see the cubes in overlay image
+// Why i dont see the cubes in overlay image
 void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime, struct Triangles *triangles) {
 	float totalTimeTookMs = 0.0f;
 	bool hasFired = false;
@@ -774,9 +780,9 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 			missile->bodyOrientation[1] = camera->ray.direction[1];
 			missile->bodyOrientation[2] = camera->ray.direction[2];
 
-			missile->velocity[0] = camera->ray.direction[0] * 50.0f;
-			missile->velocity[1] = camera->ray.direction[1] * 50.0f;
-			missile->velocity[2] = camera->ray.direction[2] * 50.0f;
+			missile->velocity[0] = camera->ray.direction[0] * 250.0f;
+			missile->velocity[1] = camera->ray.direction[1] * 250.0f;
+			missile->velocity[2] = camera->ray.direction[2] * 250.0f;
 
 			missile->targetDirection[0] = camera->ray.direction[0];
 			missile->targetDirection[1] = camera->ray.direction[1];
@@ -810,13 +816,16 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 		float dz = missile->position[2] - camera->ray.origin[2];
 		float distanceToCamera = sqrtf(dx * dx + dy * dy + dz * dz);
 
-		// if (active && distanceToCamera > 10.0f) {
-			// float FOV = missile->seeker.seekerCamera.fov;
-			// if (missile->seeker.lockState == Searching) {
-			// 	FOV = FOV * missile->seeker.searchMultiplayer;
-			// }
+		if (active && distanceToCamera > 10.0f) {
+			float seekerFovDegrees = missile->seeker.seekerCamera.fov;
+			if (missile->seeker.lockState == Searching) {
+				seekerFovDegrees = seekerFovDegrees * missile->seeker.searchMultiplayer;
+			}
 
-			float FOV =  0.75f;
+			// Convert degrees to radians and calculate tan(fov/2)
+			// This matches the format used by the main camera (fov = tan(fov_angle/2))
+			float fovRadians = seekerFovDegrees * (M_PI / 180.0f);
+			float FOV = tanf(fovRadians / 2.0f);
 
 			renderDepthBuffer(ocl,
 							  ocl->buffer_triangle_v1,
@@ -832,7 +841,7 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 							  MISSILE_SEEKER_SIZE,
 							  missile->seeker.seekerDepthMap,
 							  &tempTimeTookMs);
-		// }
+		}
 
 		float tmp1 = 0.0f;
 		float tmp2 = 0.0f;
@@ -951,27 +960,6 @@ void renderFireParticles(struct OpenCLContext *ocl, struct FireSOA *fireParticle
 		return;
 	}
 
-	// float zeroFloat = 0.0f;
-	// err = clEnqueueFillBuffer(ocl->queue, ocl->FireScreenDistances, &zeroFloat, sizeof(float), 0,
-	// 						  ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-	// err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenNormals, &zeroFloat, sizeof(float), 0,
-	// 						   ScreenWidth * ScreenHeight * sizeof(float) * 3, 0, NULL, NULL);
-	// err |= clEnqueueFillBuffer(ocl->queue, ocl->FireScreenAlphas, &zeroFloat, sizeof(float), 0,
-	// 						   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
-
-	// cl_float3 backgroundColor = {0.0f, 0.0f, 0.0f};
-	// cl_int screenWidth = ScreenWidth;
-	// cl_int screenHeight = ScreenHeight;
-	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
-	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 1, sizeof(cl_float3), &backgroundColor);
-	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 2, sizeof(cl_int), &screenWidth);
-	// err |= clSetKernelArg(ocl->clearColorBuffer_kernel, 3, sizeof(cl_int), &screenHeight);
-
-	// size_t global_size[2] = {ScreenWidth, ScreenHeight};
-	// err = clEnqueueNDRangeKernel(ocl->queue, ocl->clearColorBuffer_kernel, 2, NULL,
-	// 							 global_size, NULL, 0, NULL, NULL);
-
-	// clFinish(ocl->queue);
 	cl_int screenWidth = ScreenWidth;
 	cl_int screenHeight = ScreenHeight;
 
@@ -2518,14 +2506,18 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	// Add the copyToTexture kernel
 	ocl->copyToTexture_kernel = clCreateKernel(ocl->program, "copyToGLTexture", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating copyToTexture kernel: %d\n", err);
 		return 0;
 	}
 
-	// Create all buffers
+	ocl->composite_cones_kernel = clCreateKernel(ocl->program, "composite_cones", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating composite_cones kernel: %d\n", err);
+		return 0;
+	}
+
 	ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 										NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
 	if (err != CL_SUCCESS) {
@@ -2542,6 +2534,48 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	ocl->mapped_seeker_distances = NULL;
+
+	size_t coneDataSize = MAX_FIRE_SIMS * sizeof(float);
+	ocl->buffer_cone_originX = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone originX buffer: %d\n", err);
+		return 0;
+	}
+	ocl->buffer_cone_originY = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone originY buffer: %d\n", err);
+		return 0;
+	}
+	ocl->buffer_cone_originZ = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone originZ buffer: %d\n", err);
+		return 0;
+	}
+	ocl->buffer_cone_dirX = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone dirX buffer: %d\n", err);
+		return 0;
+	}
+	ocl->buffer_cone_dirY = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone dirY buffer: %d\n", err);
+		return 0;
+	}
+	ocl->buffer_cone_dirZ = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone dirZ buffer: %d\n", err);
+		return 0;
+	}
+	ocl->buffer_cone_fov = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone FOV buffer: %d\n", err);
+		return 0;
+	}
+	ocl->buffer_cone_maxDist = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE, coneDataSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating cone maxDist buffer: %d\n", err);
+		return 0;
+	}
 
 	// missile triangles buffer
 	int maxMissileTriangles = missiles->missileModel->count;
@@ -2952,6 +2986,101 @@ void renderBoundingBox(struct OpenCLContext *ocl, struct Camera *camera, struct 
 	clReleaseEvent(kernel_event);
 }
 
+void renderConesOpenCL(
+	struct OpenCLContext *ocl,
+	struct Camera *camera,
+	cl_mem colorBuffer,
+	cl_mem depthBuffer,
+	float *coneOriginsX,
+	float *coneOriginsY,
+	float *coneOriginsZ,
+	float *coneDirsX,
+	float *coneDirsY,
+	float *coneDirsZ,
+	float *coneFovs,
+	int numCones,
+	float *maxDistances,
+	float *gpuTimeMs) {
+
+	if (!ocl || !ocl->composite_cones_kernel) {
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+
+	cl_int err;
+	cl_event evt = NULL;
+
+	size_t coneDataSize = numCones * sizeof(float);
+	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_originX, CL_TRUE, 0, coneDataSize, coneOriginsX, 0, NULL, NULL);
+	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_originY, CL_TRUE, 0, coneDataSize, coneOriginsY, 0, NULL, NULL);
+	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_originZ, CL_TRUE, 0, coneDataSize, coneOriginsZ, 0, NULL, NULL);
+	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_dirX, CL_TRUE, 0, coneDataSize, coneDirsX, 0, NULL, NULL);
+	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_dirY, CL_TRUE, 0, coneDataSize, coneDirsY, 0, NULL, NULL);
+	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_dirZ, CL_TRUE, 0, coneDataSize, coneDirsZ, 0, NULL, NULL);
+	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_fov, CL_TRUE, 0, coneDataSize, coneFovs, 0, NULL, NULL);
+	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_maxDist, CL_TRUE, 0, coneDataSize, maxDistances, 0, NULL, NULL);
+
+	if (err != CL_SUCCESS) {
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+	cl_int width = ScreenWidth;
+	cl_int height = ScreenHeight;
+	cl_float camPosX = camera->ray.origin[0];
+	cl_float camPosY = camera->ray.origin[1];
+	cl_float camPosZ = camera->ray.origin[2];
+	cl_float camDirX = camera->ray.direction[0];
+	cl_float camDirY = camera->ray.direction[1];
+	cl_float camDirZ = camera->ray.direction[2];
+	cl_float fov = camera->fov;
+	cl_int coneCount = numCones;
+
+	err = clSetKernelArg(ocl->composite_cones_kernel, 0, sizeof(cl_mem), &colorBuffer);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 1, sizeof(cl_mem), &depthBuffer);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 2, sizeof(cl_int), &width);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 3, sizeof(cl_int), &height);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 4, sizeof(cl_float), &camPosX);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 5, sizeof(cl_float), &camPosY);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 6, sizeof(cl_float), &camPosZ);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 7, sizeof(cl_float), &camDirX);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 8, sizeof(cl_float), &camDirY);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 9, sizeof(cl_float), &camDirZ);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 10, sizeof(cl_float), &fov);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 11, sizeof(cl_mem), &ocl->buffer_cone_originX);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 12, sizeof(cl_mem), &ocl->buffer_cone_originY);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 13, sizeof(cl_mem), &ocl->buffer_cone_originZ);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 14, sizeof(cl_mem), &ocl->buffer_cone_dirX);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 15, sizeof(cl_mem), &ocl->buffer_cone_dirY);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 16, sizeof(cl_mem), &ocl->buffer_cone_dirZ);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 17, sizeof(cl_mem), &ocl->buffer_cone_fov);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 18, sizeof(cl_int), &coneCount);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 19, sizeof(cl_mem), &ocl->buffer_cone_maxDist);
+
+	if (err != CL_SUCCESS) {
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+
+	size_t global[2] = {(size_t)ScreenWidth, (size_t)ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->composite_cones_kernel, 2, NULL, global, NULL, 0, NULL, &evt);
+
+	if (err != CL_SUCCESS) {
+		if (gpuTimeMs) *gpuTimeMs = 0.0f;
+		return;
+	}
+
+	clFinish(ocl->queue);
+
+	if (gpuTimeMs != NULL && evt) {
+		cl_ulong t0 = 0, t1 = 0;
+		clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(t0), &t0, NULL);
+		clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(t1), &t1, NULL);
+		*gpuTimeMs = (t1 - t0) * 1e-6f;
+	}
+
+	if (evt) clReleaseEvent(evt);
+}
+
 void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, struct Camera *camera) {
 	cl_int err;
 	cl_event kernel_event;
@@ -3015,6 +3144,10 @@ void antiAliasingOpenCL(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings
 	case renderTemperatures:
 		mode = 2;
 		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->FireTemperature);
+		break;
+	case renderDebugMode:
+		mode = 0;
+		err = clSetKernelArg(ocl->antiAliasKernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
 		break;
 	case RENDER_MODE_COUNT:
 	default:
@@ -3547,12 +3680,31 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		ocl->FireTemperature, // reuse buffer
 		2);
 
-	if (camera->renderMode == renderCompositedColor) {
+	if (camera->renderMode == renderCompositedColor || camera->renderMode == renderDebugMode) {
 		applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime, true);
 	}
 
 	if (camera->AntiAlias == true) {
 		antiAliasingOpenCL(ocl, gpuTimings, camera);
+	}
+
+	if (camera->renderMode == renderDebugMode) {
+		float temp = 0.0f;
+		renderConesOpenCL(
+			ocl,
+			camera,
+			ocl->CompositedScreenColors,
+			ocl->buffer_distances,
+			missiles->coneOriginsX,
+			missiles->coneOriginsY,
+			missiles->coneOriginsZ,
+			missiles->coneDirsX,
+			missiles->coneDirsY,
+			missiles->coneDirsZ,
+			missiles->coneFovs,
+			missiles->activeCount,
+			missiles->coneMaxDistances,
+			&temp);
 	}
 
 	// === COPY FINAL RESULT TO OPENGL TEXTURE ===
@@ -3626,6 +3778,10 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 		mode = 2;
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireTemperature);
 		break;
+	case renderDebugMode:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
+		break;
 	case RENDER_MODE_COUNT:
 		mode = 0;
 		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
@@ -3692,12 +3848,20 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
 	if (ocl->buffer_seeker_distances) clReleaseMemObject(ocl->buffer_seeker_distances);
 	ocl->mapped_seeker_distances = NULL;
 
+	if (ocl->buffer_cone_originX) clReleaseMemObject(ocl->buffer_cone_originX);
+	if (ocl->buffer_cone_originY) clReleaseMemObject(ocl->buffer_cone_originY);
+	if (ocl->buffer_cone_originZ) clReleaseMemObject(ocl->buffer_cone_originZ);
+	if (ocl->buffer_cone_dirX) clReleaseMemObject(ocl->buffer_cone_dirX);
+	if (ocl->buffer_cone_dirY) clReleaseMemObject(ocl->buffer_cone_dirY);
+	if (ocl->buffer_cone_dirZ) clReleaseMemObject(ocl->buffer_cone_dirZ);
+
 	if (ocl->kernel) clReleaseKernel(ocl->kernel);
 	if (ocl->skybox_kernel) clReleaseKernel(ocl->skybox_kernel);
 	if (ocl->triangle_kernel) clReleaseKernel(ocl->triangle_kernel);
 	if (ocl->blur_kernel) clReleaseKernel(ocl->blur_kernel);
 	if (ocl->normals_kernel) clReleaseKernel(ocl->normals_kernel);
 	if (ocl->applyReflections_kernel) clReleaseKernel(ocl->applyReflections_kernel);
+	if (ocl->composite_cones_kernel) clReleaseKernel(ocl->composite_cones_kernel);
 
 	if (ocl->program) clReleaseProgram(ocl->program);
 	if (ocl->queue) clReleaseCommandQueue(ocl->queue);

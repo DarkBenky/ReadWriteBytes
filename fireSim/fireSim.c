@@ -343,6 +343,34 @@ void setMissileTargetDirection(struct Missile *missile, float targetDir[3], floa
 		missile->prevLOS[2] = missile->targetDirection[2];
 	}
 }
+void updateSeekerPositions(struct Missiles *missiles) {
+	int count = 0;
+	for (int i = 0; i < missiles->count; i++) {
+		if (missiles->active[i]) {
+			struct Missile *missile = missiles->missiles[i];
+			if (missile == NULL) continue;
+			if (missiles->active[i] == true) {
+				missiles->coneOriginsX[count] = missile->seeker.seekerCamera.ray.origin[0];
+				missiles->coneOriginsY[count] = missile->seeker.seekerCamera.ray.origin[1];
+				missiles->coneOriginsZ[count] = missile->seeker.seekerCamera.ray.origin[2];
+
+				missiles->coneDirsX[count] = missile->seeker.seekerCamera.ray.direction[0];
+				missiles->coneDirsY[count] = missile->seeker.seekerCamera.ray.direction[1];
+				missiles->coneDirsZ[count] = missile->seeker.seekerCamera.ray.direction[2];
+
+				float fov = missile->seeker.seekerFov;
+				if (missile->seeker.lockState == Searching) {
+					fov *= missile->seeker.searchMultiplayer;
+				}
+
+				missiles->coneFovs[count] = fov;
+				missiles->coneMaxDistances[count] = 1000.0f;
+				count++;
+			}
+		}
+	}
+	missiles->activeCount = count;
+}
 
 void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool fire, bool *active, float deltaTime, float *timeTook, float *fireSimulationTime, float lunchDir[3], float lunchPos[3]) {
 	float *rayDir = missile->seeker.seekerCamera.ray.direction;
@@ -511,6 +539,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 	}
 
 	missileSimStep(missile, deltaTime, timeTook, active, fireSimulationTime);
+	updateSeekerPositions(allMissiles);
 }
 
 void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, bool *active, float *fireSimulationTime) {
