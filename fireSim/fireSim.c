@@ -178,7 +178,7 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerCamera.ray.direction[0] = 1.0f;
 	missile->seeker.seekerCamera.ray.direction[1] = 0.0f;
 	missile->seeker.seekerCamera.ray.direction[2] = 0.0f;
-	missile->seeker.seekerCamera.fov = 8.0f;
+	missile->seeker.seekerCamera.fov = randRange(0.8f, 8.0f);
 	missile->seeker.seekerFov = 45.0f;
 	missile->seeker.lockState = Lunching;
 	missile->seeker.searchMultiplayer = randRange(1.25f, 2.5f);

@@ -34,6 +34,9 @@ int posX[MAX_TEXT_LENGTH];
 int posY[MAX_TEXT_LENGTH];
 char textBuffer[MAX_TEXT_LENGTH];
 int textBufferLen = 0;
+
+#define FLT_MAX 3.402823466e+38F
+#define FLT_MIN 1.175494e-38F
 #define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
 #define ScreenWidth 800
 #define ScreenHeight 600
@@ -378,8 +381,8 @@ int renderDepthBuffer(
 	int screen_width,	   // Screen width
 	int screen_height,	   // Screen height
 	float *out_depth_cpu,  // CPU buffer to read back depth data (optional)
-	float *outGpuMs		   // Output GPU time in milliseconds (optional)
-) {
+	float *outGpuMs,	   // Output GPU time in milliseconds (optional)
+	int missileIdx) {
 	if (!ocl || !ocl->renderDepth) {
 		fprintf(stderr, "Depth kernel or context not initialized\n");
 		return 0;
@@ -409,6 +412,7 @@ int renderDepthBuffer(
 	cl_int cl_screen_height = screen_height;
 	cl_float cl_fov = fov;
 	cl_int cl_triangle_count = triangle_count;
+	cl_int cl_missile_idx = missileIdx;
 
 	// Set kernel arguments
 	err = clSetKernelArg(ocl->renderDepth, 0, sizeof(cl_mem), &v1_buffer);
@@ -422,6 +426,8 @@ int renderDepthBuffer(
 	err |= clSetKernelArg(ocl->renderDepth, 8, sizeof(cl_float), &cl_fov);
 	err |= clSetKernelArg(ocl->renderDepth, 9, sizeof(cl_int), &cl_screen_width);
 	err |= clSetKernelArg(ocl->renderDepth, 10, sizeof(cl_int), &cl_screen_height);
+	err |= clSetKernelArg(ocl->renderDepth, 11, sizeof(cl_int), &cl_missile_idx);
+	err |= clSetKernelArg(ocl->renderDepth, 12, sizeof(cl_mem), &ocl->buffer_seeker_distances_atlas);
 
 	if (err != CL_SUCCESS) {
 		fprintf(stderr, "Error setting renderDepthBufferFast kernel args: %s (%d)\n", clErrorString(err), err);
@@ -755,13 +761,14 @@ float timeSinceLastFire = 0.0f;
 float firedMissileTime = 0.0f;
 int firedMissileIdx = -1;
 
-// Why i dont see the cubes in overlay image
 void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime, struct Triangles *triangles) {
 	float totalTimeTookMs = 0.0f;
 	bool hasFired = false;
 
 	timeSinceLastFire += deltaTime;
 	bool canFire = (timeSinceLastFire >= delay);
+
+	int missileCount = 0;
 
 	for (int i = 0; i < missiles->count; i++) {
 		struct Missile *missile = missiles->missiles[i];
@@ -840,7 +847,10 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 							  MISSILE_SEEKER_SIZE,
 							  MISSILE_SEEKER_SIZE,
 							  missile->seeker.seekerDepthMap,
-							  &tempTimeTookMs);
+							  &tempTimeTookMs,
+							  missileCount);
+
+			missileCount++;
 		}
 
 		float tmp1 = 0.0f;
@@ -2533,6 +2543,14 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	ocl->buffer_seeker_distances_atlas = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+														MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE * MAX_FIRE_SIMS * sizeof(float), NULL, &err);
+
+	if (err != CL_SUCCESS) {
+		printf("Error creating seeker view buffer: %d\n", err);
+		return 0;
+	}
+
 	ocl->mapped_seeker_distances = NULL;
 
 	size_t coneDataSize = MAX_FIRE_SIMS * sizeof(float);
@@ -2999,7 +3017,7 @@ void renderConesOpenCL(
 	float *coneDirsZ,
 	float *coneFovs,
 	int numCones,
-	float *maxDistances,
+	int seekerResolution,
 	float *gpuTimeMs) {
 
 	if (!ocl || !ocl->composite_cones_kernel) {
@@ -3018,7 +3036,6 @@ void renderConesOpenCL(
 	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_dirY, CL_TRUE, 0, coneDataSize, coneDirsY, 0, NULL, NULL);
 	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_dirZ, CL_TRUE, 0, coneDataSize, coneDirsZ, 0, NULL, NULL);
 	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_fov, CL_TRUE, 0, coneDataSize, coneFovs, 0, NULL, NULL);
-	err |= clEnqueueWriteBuffer(ocl->queue, ocl->buffer_cone_maxDist, CL_TRUE, 0, coneDataSize, maxDistances, 0, NULL, NULL);
 
 	if (err != CL_SUCCESS) {
 		if (gpuTimeMs) *gpuTimeMs = 0.0f;
@@ -3034,6 +3051,7 @@ void renderConesOpenCL(
 	cl_float camDirZ = camera->ray.direction[2];
 	cl_float fov = camera->fov;
 	cl_int coneCount = numCones;
+	cl_int seekerRes = seekerResolution;
 
 	err = clSetKernelArg(ocl->composite_cones_kernel, 0, sizeof(cl_mem), &colorBuffer);
 	err |= clSetKernelArg(ocl->composite_cones_kernel, 1, sizeof(cl_mem), &depthBuffer);
@@ -3054,7 +3072,8 @@ void renderConesOpenCL(
 	err |= clSetKernelArg(ocl->composite_cones_kernel, 16, sizeof(cl_mem), &ocl->buffer_cone_dirZ);
 	err |= clSetKernelArg(ocl->composite_cones_kernel, 17, sizeof(cl_mem), &ocl->buffer_cone_fov);
 	err |= clSetKernelArg(ocl->composite_cones_kernel, 18, sizeof(cl_int), &coneCount);
-	err |= clSetKernelArg(ocl->composite_cones_kernel, 19, sizeof(cl_mem), &ocl->buffer_cone_maxDist);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 19, sizeof(cl_mem), &ocl->buffer_seeker_distances_atlas);
+	err |= clSetKernelArg(ocl->composite_cones_kernel, 20, sizeof(cl_int), &seekerRes);
 
 	if (err != CL_SUCCESS) {
 		if (gpuTimeMs) *gpuTimeMs = 0.0f;
@@ -3703,7 +3722,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 			missiles->coneDirsZ,
 			missiles->coneFovs,
 			missiles->activeCount,
-			missiles->coneMaxDistances,
+			MISSILE_SEEKER_SIZE,
 			&temp);
 	}
 
@@ -3950,6 +3969,16 @@ void writeFileTriangles(const char *filename, struct Triangles *triangles) {
 	printf("Triangle count: %d\n", triangles->count);
 }
 
+void updateBBox(float x, float y, float z, float minBB[3], float maxBB[3]) {
+	if (x < minBB[0]) minBB[0] = x;
+	if (y < minBB[1]) minBB[1] = y;
+	if (z < minBB[2]) minBB[2] = z;
+
+	if (x > maxBB[0]) maxBB[0] = x;
+	if (y > maxBB[1]) maxBB[1] = y;
+	if (z > maxBB[2]) maxBB[2] = z;
+}
+
 void readFileTriangles(const char *filename, struct Triangles *triangles, float scale) {
 	FILE *file = fopen(filename, "rb");
 	if (!file) {
@@ -3972,6 +4001,9 @@ void readFileTriangles(const char *filename, struct Triangles *triangles, float 
 	}
 
 	triangles->count += triangleCount;
+
+	float minBB[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+	float maxBB[3] = {FLT_MIN, FLT_MIN, FLT_MIN};
 
 	// Read triangle data and apply scaling
 	for (int i = 0; i < triangleCount; i++) {
@@ -3996,6 +4028,10 @@ void readFileTriangles(const char *filename, struct Triangles *triangles, float 
 		triangles->v3[idx + 1] = v3[1] * scale;
 		triangles->v3[idx + 2] = v3[2] * scale;
 
+		updateBBox(triangles->v1[i * 3], triangles->v1[i * 3 + 1], triangles->v1[i * 3 + 2], minBB, maxBB);
+		updateBBox(triangles->v2[i * 3], triangles->v2[i * 3 + 1], triangles->v2[i * 3 + 2], minBB, maxBB);
+		updateBBox(triangles->v3[i * 3], triangles->v3[i * 3 + 1], triangles->v3[i * 3 + 2], minBB, maxBB);
+
 		// Read normals (normals don't need scaling, they should remain unit vectors)
 		fread(&triangles->normals[idx], sizeof(float), 3, file);
 
@@ -4016,6 +4052,13 @@ void readFileTriangles(const char *filename, struct Triangles *triangles, float 
 	printf("Triangles read from %s successfully with scale factor %.2f\n", filename, scale);
 	printf("File size: %u bytes\n", fileSize);
 	printf("Triangle count: %d\n", triangles->count);
+
+	printf("Bounding Box Min: (%.2f, %.2f, %.2f)\n", minBB[0], minBB[1], minBB[2]);
+	printf("Bounding Box Max: (%.2f, %.2f, %.2f)\n", maxBB[0], maxBB[1], maxBB[2]);
+	printf("Bounding Box Size: (%.2f, %.2f, %.2f)\n",
+		   maxBB[0] - minBB[0],
+		   maxBB[1] - minBB[1],
+		   maxBB[2] - minBB[2]);
 }
 
 void loadFont(struct ImageFont *font, const char *filename) {
@@ -4252,10 +4295,10 @@ void key_callback(GLFWwindow *window, int key, int scancode, int action, int mod
 	if (action == GLFW_PRESS || action == GLFW_REPEAT) {
 		keyState.keys[key] = true;
 		if (action == GLFW_PRESS) keyState.justPressed[key] = true; // latch the press event
-		printf("Key %d pressed/repeat\n", key);
+																	// printf("Key %d pressed/repeat\n", key);
 	} else if (action == GLFW_RELEASE) {
 		keyState.keys[key] = false;
-		printf("Key %d released\n", key);
+		// printf("Key %d released\n", key);
 	}
 }
 
@@ -4273,8 +4316,8 @@ void mouse_callback(GLFWwindow *window, double xpos, double ypos) {
 	mouseState.deltaX = xpos - mouseState.prevX;
 	mouseState.deltaY = ypos - mouseState.prevY;
 
-	printf("Mouse moved to: (%.1f, %.1f), Delta: (%.1f, %.1f)\n",
-		   xpos, ypos, mouseState.deltaX, mouseState.deltaY);
+	// printf("Mouse moved to: (%.1f, %.1f), Delta: (%.1f, %.1f)\n",
+	// 	   xpos, ypos, mouseState.deltaX, mouseState.deltaY);
 }
 
 void mouse_button_callback(GLFWwindow *window, int button, int action, int mods) {

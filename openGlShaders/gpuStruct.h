@@ -40,6 +40,7 @@ struct OpenCLContext {
 	cl_kernel renderDepth;
 	cl_kernel composite_cones_kernel;
 	// buffers
+	cl_mem buffer_seeker_distances_atlas;
 	cl_mem buffer_seeker_distances;
 	cl_mem buffer_distances_temp;
 	cl_mem buffer_opacities_temp;

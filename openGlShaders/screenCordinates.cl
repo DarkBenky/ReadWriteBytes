@@ -2902,10 +2902,14 @@ __kernel void renderDepthBufferFast(
     const float3 camDir,               // Camera direction
     const float fov,                   // Field of view
     const int screenWidth,             // Screen width
-    const int screenHeight            // Screen height
+    const int screenHeight,           // Screen height
+    const int idxOffset,
+    __global float *ScreenDistancesAtlas
 ) {
     int triangleIdx = get_global_id(0);
     if (triangleIdx >= triangleCount) return;
+
+    int startId = idxOffset * screenWidth * screenHeight; // staring index for atlas to save all depth buffers
 
     // Get triangle vertices
     int idx = triangleIdx * 3;
@@ -2969,19 +2973,156 @@ __kernel void renderDepthBufferFast(
                 float w = 1.0f - u - v;
                 float depth = w*sp0.z + u*sp1.z + v*sp2.z;
                 
+                // Update ScreenDistances
                 float prev = ScreenDistances[pixelIdx];
                 if (prev == 0.0f || depth < prev) {
                     ScreenDistances[pixelIdx] = depth;
+                }
+                
+                // Update ScreenDistancesAtlas
+                int atlasIdx = startId + pixelIdx;
+                float prevAtlas = ScreenDistancesAtlas[atlasIdx];
+                if (prevAtlas == 0.0f || depth < prevAtlas) {
+                    ScreenDistancesAtlas[atlasIdx] = depth;
                 }
             }
         }
     }
 }
 
-Improve this function
+// Helper function: find ray-cone intersection
+// Returns the distance along the ray, or -1 if no intersection
+float findConeIntersection(
+    float rayOx, float rayOy, float rayOz,
+    float rayDx, float rayDy, float rayDz,
+    float coneOx, float coneOy, float coneOz,
+    float coneDx, float coneDy, float coneDz,
+    float cosAngle)
+{
+    // Vector from cone origin to ray origin
+    float cox = rayOx - coneOx;
+    float coy = rayOy - coneOy;
+    float coz = rayOz - coneOz;
+
+    float dv = rayDx * coneDx + rayDy * coneDy + rayDz * coneDz;
+    float cov = cox * coneDx + coy * coneDy + coz * coneDz;
+    
+    // Quadratic equation coefficients for ray-cone intersection
+    float a = dv * dv - cosAngle * cosAngle;
+    float b = 2.0f * (dv * cov - (rayDx * cox + rayDy * coy + rayDz * coz) * cosAngle * cosAngle);
+    float c = cov * cov - (cox * cox + coy * coy + coz * coz) * cosAngle * cosAngle;
+
+    float discriminant = b * b - 4.0f * a * c;
+    if (discriminant < 0.0f) return -1.0f;
+
+    float sqrtDisc = sqrt(discriminant);
+    float t1 = (-b - sqrtDisc) / (2.0f * a);
+    float t2 = (-b + sqrtDisc) / (2.0f * a);
+
+    // Check both intersections and pick the closest valid one
+    // We only need to check if intersection is in front of cone origin
+    for (int i = 0; i < 2; i++) {
+        float t = (i == 0) ? t1 : t2;
+        if (t <= 0.0f) continue;
+        
+        // Check if intersection point is in front of cone origin (positive along axis)
+        float px = rayOx + rayDx * t;
+        float py = rayOy + rayDy * t;
+        float pz = rayOz + rayDz * t;
+        
+        float toPx = px - coneOx;
+        float toPy = py - coneOy;
+        float toPz = pz - coneOz;
+        
+        float distAlongAxis = toPx * coneDx + toPy * coneDy + toPz * coneDz;
+        
+        // Only accept if in front of cone origin
+        if (distAlongAxis >= 0.0f) {
+            return t;
+        }
+    }
+
+    return -1.0f;
+}
+
+// Project world point into seeker's view and check occlusion
+int isPointVisibleToSeeker(
+    float px, float py, float pz,
+    float seekerX, float seekerY, float seekerZ,
+    float seekerDx, float seekerDy, float seekerDz,
+    float seekerFovDegrees,
+    int coneIndex,
+    int seekerResolution,
+    __global float* seekerDepthMaps)
+{
+    // Vector from seeker to point
+    float toPx = px - seekerX;
+    float toPy = py - seekerY;
+    float toPz = pz - seekerZ;
+    
+    float distToPoint = sqrt(toPx * toPx + toPy * toPy + toPz * toPz);
+    if (distToPoint < 0.001f) return 1;
+    
+    // Normalize
+    toPx /= distToPoint;
+    toPy /= distToPoint;
+    toPz /= distToPoint;
+    
+    // Check if point is within seeker's FOV cone
+    float dotWithSeeker = toPx * seekerDx + toPy * seekerDy + toPz * seekerDz;
+    float seekerConeAngle = (seekerFovDegrees / 2.0f) * M_PI_F / 180.0f;
+    float cosSeeker = cos(seekerConeAngle);
+    
+    if (dotWithSeeker < cosSeeker) return 0; // Outside seeker FOV
+    
+    // Build seeker camera basis (same method as main camera)
+    float supx = 0.0f, supy = 1.0f, supz = 0.0f;
+    if (fabs(seekerDy) > 0.99f) { supx = 1.0f; supy = 0.0f; supz = 0.0f; }
+    
+    // Right = cross(seekerDir, up)
+    float srx = seekerDy * supz - seekerDz * supy;
+    float sry = seekerDz * supx - seekerDx * supz;
+    float srz = seekerDx * supy - seekerDy * supx;
+    float srlen = sqrt(srx * srx + sry * sry + srz * srz);
+    srx /= srlen; sry /= srlen; srz /= srlen;
+    
+    // Up = cross(right, seekerDir)
+    supx = sry * seekerDz - srz * seekerDy;
+    supy = srz * seekerDx - srx * seekerDz;
+    supz = srx * seekerDy - sry * seekerDx;
+    
+    // Project point into seeker's view space
+    float seekerFovTan = tan(seekerConeAngle);
+    float ndcX = (toPx * srx + toPy * sry + toPz * srz) / (seekerFovTan * dotWithSeeker);
+    float ndcY = -(toPx * supx + toPy * supy + toPz * supz) / (seekerFovTan * dotWithSeeker);
+    
+    // Convert to texture coordinates (using seekerResolution)
+    float texU = ndcX * 0.5f + 0.5f;
+    float texV = ndcY * 0.5f + 0.5f;
+    
+    if (texU < 0.0f || texU >= 1.0f || texV < 0.0f || texV >= 1.0f) return 0;
+    
+    int texX = (int)(texU * (float)seekerResolution);
+    int texY = (int)(texV * (float)seekerResolution);
+    texX = max(0, min(seekerResolution - 1, texX));
+    texY = max(0, min(seekerResolution - 1, texY));
+    
+    // Check seeker's depth map
+    int seekerPixelIdx = coneIndex * seekerResolution * seekerResolution + texY * seekerResolution + texX;
+    float seekerDepth = seekerDepthMaps[seekerPixelIdx];
+    
+    // Point is visible if:
+    // 1. Seeker sees sky (depth = 0) at this direction, OR
+    // 2. Point is at approximately the same depth the seeker sees (within tolerance)
+    if (seekerDepth < 0.001f) return 1; // Seeker sees sky here
+    
+    // Allow some tolerance for depth comparison (5%)
+    return (distToPoint <= seekerDepth * 1.05f) ? 1 : 0;
+}
+
 __kernel void composite_cones(
-    __global float* imageBufferColor,      // RGB input/output, 3 floats per pixel
-    __global float* imageBufferDepth,      // Depth input/output, 1 float per pixel
+    __global float* imageBufferColor,
+    __global float* imageBufferDepth,
     int imageWidth,
     int imageHeight,
     float cameraPosX,
@@ -2999,17 +3140,18 @@ __kernel void composite_cones(
     __global float* coneDirZ,
     __global float* coneFov,
     int numberOfCones,
-    __global float* coneMaxDist
+    __global float* seekerDepthMaps,  // Depth map per seeker
+    int seekerResolution  // Resolution of seeker depth maps (e.g., 96)
 )
 {
     int x = get_global_id(0);
     int y = get_global_id(1);
-    
+
     if (x >= imageWidth || y >= imageHeight) return;
-    
+
     int pixelIdx = y * imageWidth + x;
-    
-    // Desaturate background heavily (convert to grayscale, keep only 10% saturation)
+
+    // Desaturate background
     float r = imageBufferColor[pixelIdx * 3 + 0];
     float g = imageBufferColor[pixelIdx * 3 + 1];
     float b = imageBufferColor[pixelIdx * 3 + 2];
@@ -3017,47 +3159,47 @@ __kernel void composite_cones(
     imageBufferColor[pixelIdx * 3 + 0] = gray * 0.9f + r * 0.1f;
     imageBufferColor[pixelIdx * 3 + 1] = gray * 0.9f + g * 0.1f;
     imageBufferColor[pixelIdx * 3 + 2] = gray * 0.9f + b * 0.1f;
-    
-    // Read existing depth
+
     float existingDepth = imageBufferDepth[pixelIdx];
-    
+
     // NDC coords
     float ndcX = (2.0f * x / (float)imageWidth - 1.0f);
     float ndcY = (1.0f - 2.0f * y / (float)imageHeight);
     float aspectRatio = (float)imageWidth / (float)imageHeight;
-    
+
     // Camera basis
     float camLen = sqrt(cameraDirX * cameraDirX + cameraDirY * cameraDirY + cameraDirZ * cameraDirZ);
     float cdx = cameraDirX / camLen;
     float cdy = cameraDirY / camLen;
     float cdz = cameraDirZ / camLen;
-    
+
     float upx = 0.0f, upy = 1.0f, upz = 0.0f;
     if (fabs(cdy) > 0.99f) { upx = 1.0f; upy = 0.0f; upz = 0.0f; }
-    
+
     // Right = cross(camDir, up)
     float rx = cdy * upz - cdz * upy;
     float ry = cdz * upx - cdx * upz;
     float rz = cdx * upy - cdy * upx;
     float rlen = sqrt(rx * rx + ry * ry + rz * rz);
     rx /= rlen; ry /= rlen; rz /= rlen;
-    
+
     // Up = cross(right, camDir)
     upx = ry * cdz - rz * cdy;
     upy = rz * cdx - rx * cdz;
     upz = rx * cdy - ry * cdx;
-    
-    // Ray direction (cameraFOV is already in tan(angle/2) format)
+
+    // Ray direction
     float rdx = cdx + rx * ndcX * aspectRatio * cameraFOV + upx * ndcY * cameraFOV;
     float rdy = cdy + ry * ndcX * aspectRatio * cameraFOV + upy * ndcY * cameraFOV;
     float rdz = cdz + rz * ndcX * aspectRatio * cameraFOV + upz * ndcY * cameraFOV;
     float rdLen = sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
     rdx /= rdLen; rdy /= rdLen; rdz /= rdLen;
-    
-    // Check if ray passes through any cone volume
+
+    // Find closest visible cone
     int hitCone = -1;
-    float blendFactor = 0.0f;
-    
+    float bestBlendFactor = 0.0f;
+    float closestT = 1e10f;
+
     for (int i = 0; i < numberOfCones; i++) {
         float cox = coneOriginX[i];
         float coy = coneOriginY[i];
@@ -3065,71 +3207,90 @@ __kernel void composite_cones(
         float cvx = coneDirX[i];
         float cvy = coneDirY[i];
         float cvz = coneDirZ[i];
-        
+
         float cvLen = sqrt(cvx * cvx + cvy * cvy + cvz * cvz);
         cvx /= cvLen; cvy /= cvLen; cvz /= cvLen;
-        
+
         float coneFovDegrees = coneFov[i];
         float coneAngle = (coneFovDegrees / 2.0f) * M_PI_F / 180.0f;
         float cosA = cos(coneAngle);
-        float coneHeight = coneMaxDist[i];
+
+        // Find where camera ray intersects this cone (infinite cone)
+        float t = findConeIntersection(
+            cameraPosX, cameraPosY, cameraPosZ, rdx, rdy, rdz,
+            cox, coy, coz, cvx, cvy, cvz, cosA);
+
+        if (t <= 0.0f) continue; // No intersection
+
+        // The cone is limited by geometry:
+        // - If there's existing geometry (depth > 0), cone stops there
+        // - If no geometry (depth = 0, sky), cone extends infinitely
+        float maxConeDepth = (existingDepth > 0.001f) ? existingDepth : 1e10f;
         
-        // Check ray against cone at multiple depths to ensure we catch it
-        // Sample at cone's max depth and at existing geometry depth
-        float sampleDepths[2];
-        sampleDepths[0] = coneHeight;
-        sampleDepths[1] = (existingDepth > 0.0f && existingDepth < 1e6f) ? existingDepth : coneHeight;
-        
-        for (int d = 0; d < 2; d++) {
-            float checkDepth = sampleDepths[d];
+        // Check if intersection is before the geometry
+        if (t >= maxConeDepth) continue;
+
+        // Get intersection point
+        float hitX = cameraPosX + rdx * t;
+        float hitY = cameraPosY + rdy * t;
+        float hitZ = cameraPosZ + rdz * t;
+
+        // Check if this point is visible to the seeker (not occluded in seeker's view)
+        if (!isPointVisibleToSeeker(
+            hitX, hitY, hitZ,
+            cox, coy, coz, cvx, cvy, cvz,
+            coneFovDegrees, i, seekerResolution, seekerDepthMaps)) {
+            continue; // Occluded from seeker's perspective
+        }
+
+        // This is a valid, visible cone intersection
+        if (t < closestT) {
+            closestT = t;
+            hitCone = i;
+
+            // Calculate blend factor based on distance from cone axis
+            float toHitX = hitX - cox;
+            float toHitY = hitY - coy;
+            float toHitZ = hitZ - coz;
             
-            // Check if the point along the ray is inside the cone
-            float px = cameraPosX + rdx * checkDepth;
-            float py = cameraPosY + rdy * checkDepth;
-            float pz = cameraPosZ + rdz * checkDepth;
+            float distAlongAxis = toHitX * cvx + toHitY * cvy + toHitZ * cvz;
             
-            // Vector from cone origin to point
-            float vx = px - cox;
-            float vy = py - coy;
-            float vz = pz - coz;
+            // Project onto axis to find perpendicular distance
+            float projX = cvx * distAlongAxis;
+            float projY = cvy * distAlongAxis;
+            float projZ = cvz * distAlongAxis;
             
-            // Distance along cone axis
-            float distAlongAxis = vx * cvx + vy * cvy + vz * cvz;
+            float perpX = toHitX - projX;
+            float perpY = toHitY - projY;
+            float perpZ = toHitZ - projZ;
             
-            // Check if within cone height
-            if (distAlongAxis >= 0.0f && distAlongAxis <= coneHeight) {
-                // Normalize vector to point
-                float vLen = sqrt(vx * vx + vy * vy + vz * vz);
-                if (vLen > 0.0001f) {
-                    vx /= vLen; vy /= vLen; vz /= vLen;
-                    
-                    // Dot product with cone axis
-                    float dotProduct = vx * cvx + vy * cvy + vz * cvz;
-                    
-                    // Check if inside cone angle
-                    if (dotProduct >= cosA) {
-                        hitCone = i;
-                        // Blend factor based on distance from center (stronger at center)
-                        blendFactor = (dotProduct - cosA) / (1.0f - cosA);
-                        blendFactor = 0.3f + blendFactor * 0.4f;
-                        break;
-                    }
-                }
+            float distFromAxis = sqrt(perpX * perpX + perpY * perpY + perpZ * perpZ);
+            float maxRadius = distAlongAxis * tan(coneAngle);
+            
+            if (maxRadius > 0.001f) {
+                float radialFactor = 1.0f - (distFromAxis / maxRadius);
+                radialFactor = max(0.0f, min(1.0f, radialFactor));
+                
+                // Stronger at center, weaker at edges
+                bestBlendFactor = 0.2f + radialFactor * 0.6f;
+            } else {
+                bestBlendFactor = 0.5f;
             }
         }
-        
-        if (hitCone >= 0) break;
     }
-    
-    // Blend cone color with existing color if inside cone
-    if (hitCone >= 0) {
-        float hue = (float)hitCone / (float)numberOfCones;
-        float coneR = 0.2f + hue * 0.8f;
-        float coneG = 0.8f;
-        float coneB = 0.3f;
+
+    // Apply cone visualization
+    if (hitCone >= 0 && bestBlendFactor > 0.001f) {
+        float hue = (float)hitCone / (float)max(numberOfCones, 1);
         
-        imageBufferColor[pixelIdx * 3 + 0] = imageBufferColor[pixelIdx * 3 + 0] * (1.0f - blendFactor) + coneR * blendFactor;
-        imageBufferColor[pixelIdx * 3 + 1] = imageBufferColor[pixelIdx * 3 + 1] * (1.0f - blendFactor) + coneG * blendFactor;
-        imageBufferColor[pixelIdx * 3 + 2] = imageBufferColor[pixelIdx * 3 + 2] * (1.0f - blendFactor) + coneB * blendFactor;
+        // Vibrant color based on cone index
+        float coneR = 0.1f + hue * 0.9f;
+        float coneG = 0.9f - hue * 0.4f;
+        float coneB = 0.2f + (1.0f - hue) * 0.6f;
+
+        imageBufferColor[pixelIdx * 3 + 0] = imageBufferColor[pixelIdx * 3 + 0] * (1.0f - bestBlendFactor) + coneR * bestBlendFactor;
+        imageBufferColor[pixelIdx * 3 + 1] = imageBufferColor[pixelIdx * 3 + 1] * (1.0f - bestBlendFactor) + coneG * bestBlendFactor;
+        imageBufferColor[pixelIdx * 3 + 2] = imageBufferColor[pixelIdx * 3 + 2] * (1.0f - bestBlendFactor) + coneB * bestBlendFactor;
     }
 }
+
