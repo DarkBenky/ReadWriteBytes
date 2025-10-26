@@ -179,8 +179,8 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerCamera.ray.direction[0] = 1.0f;
 	missile->seeker.seekerCamera.ray.direction[1] = 0.0f;
 	missile->seeker.seekerCamera.ray.direction[2] = 0.0f;
-	missile->seeker.seekerCamera.fov = randRange(0.8f, 8.0f);
-	missile->seeker.seekerFov = 45.0f;
+	missile->seeker.seekerCamera.fov = randRange(0.1f, 2.5f);
+	missile->seeker.seekerFov = randRange(10.0f, 75.0f);
 	missile->seeker.lockState = Lunching;
 	missile->seeker.searchMultiplayer = randRange(1.25f, 2.5f);
 	missile->seeker.tiltSpeed = randRange(2.0f, 5.0f);
@@ -285,6 +285,16 @@ void InitializeMissile(struct Missile *missile) {
 	missile->prevLOS[1] = 0.0f;
 	missile->prevLOS[2] = 0.0f;
 
+	missile->burningTemp = randRange(2000.0f, 3500.0f); // Kelvin
+	// Store initial fuel mass for later burned-mass calculations
+	missile->initialFuelMass = missile->fuelMass;
+	// heatAspect order: FRONT, BACK, LEFT, RIGHT, TOP, BOTTOM
+	missile->heatAspect[0] = randRange(0.6f, 0.9f); // front (lower IR)
+	missile->heatAspect[1] = randRange(1.2f, 1.6f); // back (hotter plume)
+	missile->heatAspect[2] = randRange(0.7f, 1.0f); // left
+	missile->heatAspect[3] = randRange(0.7f, 1.0f); // right
+	missile->heatAspect[4] = randRange(0.8f, 1.1f); // top
+	missile->heatAspect[5] = randRange(0.6f, 0.9f); // bottom
 	missile->targetIdx = -1;
 }
 
@@ -662,20 +672,79 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 		normalize3(rayDir);
 
 		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
+		float objTemp[MAX_FIRE_SIMS];
 		int count = 0;
 
 		for (int i = 0; i < allMissiles->count; i++) {
 			if (i != allMissiles->count - 1 && allMissiles->active[i]) {
-				objX[count] = allMissiles->missiles[i]->position[0];
-				objY[count] = allMissiles->missiles[i]->position[1];
-				objZ[count] = allMissiles->missiles[i]->position[2];
+				struct Missile *mobj = allMissiles->missiles[i];
+				if (mobj == NULL) continue;
+
+				objX[count] = mobj->position[0];
+				objY[count] = mobj->position[1];
+				objZ[count] = mobj->position[2];
+
+				// Aspect-aware thermal intensity
+				float toSeeker[3] = {rayOrigin[0] - mobj->position[0],
+									 rayOrigin[1] - mobj->position[1],
+									 rayOrigin[2] - mobj->position[2]};
+				float dist = sqrtf(toSeeker[0] * toSeeker[0] + toSeeker[1] * toSeeker[1] + toSeeker[2] * toSeeker[2]);
+				float vnorm[3] = {0.0f, 0.0f, 0.0f};
+				if (dist > 0.001f) {
+					vnorm[0] = toSeeker[0] / dist;
+					vnorm[1] = toSeeker[1] / dist;
+					vnorm[2] = toSeeker[2] / dist;
+				}
+
+				// Build local axes for the object missile
+				float fwd[3] = {mobj->bodyOrientation[0], mobj->bodyOrientation[1], mobj->bodyOrientation[2]};
+				float rgt[3];
+				if (fabsf(fwd[1]) < 0.99f) {
+					rgt[0] = fwd[2];
+					rgt[1] = 0.0f;
+					rgt[2] = -fwd[0];
+				} else {
+					rgt[0] = 1.0f;
+					rgt[1] = 0.0f;
+					rgt[2] = 0.0f;
+				}
+				normalize3(rgt);
+				float upv[3] = {rgt[1] * fwd[2] - rgt[2] * fwd[1], rgt[2] * fwd[0] - rgt[0] * fwd[2], rgt[0] * fwd[1] - rgt[1] * fwd[0]};
+				normalize3(upv);
+
+				float fDot = fwd[0] * vnorm[0] + fwd[1] * vnorm[1] + fwd[2] * vnorm[2];
+				float rDot = rgt[0] * vnorm[0] + rgt[1] * vnorm[1] + rgt[2] * vnorm[2];
+				float uDot = upv[0] * vnorm[0] + upv[1] * vnorm[1] + upv[2] * vnorm[2];
+
+				float frontW = fmaxf(0.0f, fDot);
+				float backW = fmaxf(0.0f, -fDot);
+				float rightW = fmaxf(0.0f, rDot);
+				float leftW = fmaxf(0.0f, -rDot);
+				float topW = fmaxf(0.0f, uDot);
+				float botW = fmaxf(0.0f, -uDot);
+
+				float weightSum = frontW + backW + rightW + leftW + topW + botW;
+				float aspectFactor = 1.0f;
+				if (weightSum > 0.0001f) {
+					aspectFactor = (frontW * mobj->heatAspect[0] + backW * mobj->heatAspect[1] + leftW * mobj->heatAspect[2] + rightW * mobj->heatAspect[3] + topW * mobj->heatAspect[4] + botW * mobj->heatAspect[5]) / weightSum;
+				} else {
+					aspectFactor = (mobj->heatAspect[0] + mobj->heatAspect[1] + mobj->heatAspect[2] + mobj->heatAspect[3] + mobj->heatAspect[4] + mobj->heatAspect[5]) / 6.0f;
+				}
+
+				float burnedMass = mobj->initialFuelMass - mobj->fuelMass;
+				if (burnedMass < 0.0f) burnedMass = 0.0f;
+				float baseline = mobj->dryMass * 0.01f;
+				// Thermal intensity scales with burned mass and orientation; non-burning missiles still have baseline
+				float thermal = mobj->burningTemp * (burnedMass * 0.5f + baseline) * aspectFactor;
+				objTemp[count] = thermal;
+
 				count++;
 			}
 		}
 
 		int bestIdx = findClosestObjectToViewCenter(
 			rayOrigin, rayDir, missile->seeker.seekerFov * missile->seeker.searchMultiplayer,
-			objX, objY, objZ, objX, missile->seeker.seekerDepthMap,
+			objX, objY, objZ, objTemp, missile->seeker.seekerDepthMap,
 			count, 0.4f, 0.3f, 0.3f);
 
 		if (bestIdx >= 0 && bestIdx < count) {
@@ -701,20 +770,76 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 
 	} else if (missile->seeker.lockState == Tracking) {
 		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
+		float objTemp[MAX_FIRE_SIMS];
 		int count = 0;
 
 		for (int i = 0; i < allMissiles->count; i++) {
 			if (i != allMissiles->count - 1 && allMissiles->active[i]) {
-				objX[count] = allMissiles->missiles[i]->position[0];
-				objY[count] = allMissiles->missiles[i]->position[1];
-				objZ[count] = allMissiles->missiles[i]->position[2];
+				struct Missile *mobj = allMissiles->missiles[i];
+				if (mobj == NULL) continue;
+
+				objX[count] = mobj->position[0];
+				objY[count] = mobj->position[1];
+				objZ[count] = mobj->position[2];
+
+				float toSeeker[3] = {rayOrigin[0] - mobj->position[0],
+									 rayOrigin[1] - mobj->position[1],
+									 rayOrigin[2] - mobj->position[2]};
+				float dist = sqrtf(toSeeker[0] * toSeeker[0] + toSeeker[1] * toSeeker[1] + toSeeker[2] * toSeeker[2]);
+				float vnorm[3] = {0.0f, 0.0f, 0.0f};
+				if (dist > 0.001f) {
+					vnorm[0] = toSeeker[0] / dist;
+					vnorm[1] = toSeeker[1] / dist;
+					vnorm[2] = toSeeker[2] / dist;
+				}
+
+				float fwd[3] = {mobj->bodyOrientation[0], mobj->bodyOrientation[1], mobj->bodyOrientation[2]};
+				float rgt[3];
+				if (fabsf(fwd[1]) < 0.99f) {
+					rgt[0] = fwd[2];
+					rgt[1] = 0.0f;
+					rgt[2] = -fwd[0];
+				} else {
+					rgt[0] = 1.0f;
+					rgt[1] = 0.0f;
+					rgt[2] = 0.0f;
+				}
+				normalize3(rgt);
+				float upv[3] = {rgt[1] * fwd[2] - rgt[2] * fwd[1], rgt[2] * fwd[0] - rgt[0] * fwd[2], rgt[0] * fwd[1] - rgt[1] * fwd[0]};
+				normalize3(upv);
+
+				float fDot = fwd[0] * vnorm[0] + fwd[1] * vnorm[1] + fwd[2] * vnorm[2];
+				float rDot = rgt[0] * vnorm[0] + rgt[1] * vnorm[1] + rgt[2] * vnorm[2];
+				float uDot = upv[0] * vnorm[0] + upv[1] * vnorm[1] + upv[2] * vnorm[2];
+
+				float frontW = fmaxf(0.0f, fDot);
+				float backW = fmaxf(0.0f, -fDot);
+				float rightW = fmaxf(0.0f, rDot);
+				float leftW = fmaxf(0.0f, -rDot);
+				float topW = fmaxf(0.0f, uDot);
+				float botW = fmaxf(0.0f, -uDot);
+
+				float weightSum = frontW + backW + rightW + leftW + topW + botW;
+				float aspectFactor = 1.0f;
+				if (weightSum > 0.0001f) {
+					aspectFactor = (frontW * mobj->heatAspect[0] + backW * mobj->heatAspect[1] + leftW * mobj->heatAspect[2] + rightW * mobj->heatAspect[3] + topW * mobj->heatAspect[4] + botW * mobj->heatAspect[5]) / weightSum;
+				} else {
+					aspectFactor = (mobj->heatAspect[0] + mobj->heatAspect[1] + mobj->heatAspect[2] + mobj->heatAspect[3] + mobj->heatAspect[4] + mobj->heatAspect[5]) / 6.0f;
+				}
+
+				float burnedMass = mobj->initialFuelMass - mobj->fuelMass;
+				if (burnedMass < 0.0f) burnedMass = 0.0f;
+				float baseline = mobj->dryMass * 0.01f;
+				float thermal = mobj->burningTemp * (burnedMass * 0.5f + baseline) * aspectFactor;
+				objTemp[count] = thermal;
+
 				count++;
 			}
 		}
 
 		int bestIdx = findClosestObjectToViewCenter(
 			rayOrigin, rayDir, missile->seeker.seekerFov,
-			objX, objY, objZ, objX, missile->seeker.seekerDepthMap,
+			objX, objY, objZ, objTemp, missile->seeker.seekerDepthMap,
 			count, 0.5f, 0.3f, 0.2f);
 
 		if (bestIdx >= 0 && bestIdx < count) {

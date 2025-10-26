@@ -50,7 +50,7 @@ int textBufferLen = 0;
 #define NUMBER_OF_CUBES 100
 pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
-#define MoveMultiplier 10.25f
+#define MoveMultiplier 100.25f
 #define MouseSensitivity 0.25f
 #define MAX_BLUR_PASSES 1
 #define numFireParticles 10000

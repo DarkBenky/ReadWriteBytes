@@ -79,6 +79,9 @@ struct Missile {
     float burnRate;                       // Fuel consumption rate (kg/s)
     float maxGimbalAngle;                 // Maximum nozzle deflection angle (radians)
     float gimbalAngle[2];                 // Current pitch/yaw gimbal angles (radians)
+    float burningTemp;                    // Temperature of burning propellant (Kelvin)
+    float heatAspect[6];                  // Heat radiation from each face of the missile
+    float initialFuelMass;                // Stored initial fuel mass for burned-mass calculations
     
     // Aerodynamic coefficients
     float zeroLiftDrag;                   // Base drag coefficient at zero lift (Cd0)

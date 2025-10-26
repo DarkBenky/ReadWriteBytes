@@ -3283,10 +3283,12 @@ __kernel void composite_cones(
     if (hitCone >= 0 && bestBlendFactor > 0.001f) {
         float hue = (float)hitCone / (float)max(numberOfCones, 1);
         
+        float multiplayer = 3.0f;
+
         // Vibrant color based on cone index
-        float coneR = 0.1f + hue * 0.9f;
-        float coneG = 0.9f - hue * 0.4f;
-        float coneB = 0.2f + (1.0f - hue) * 0.6f;
+        float coneR = 0.1f + hue * 0.9f * multiplayer;
+        float coneG = 0.9f - hue * 0.4f * multiplayer;
+        float coneB = 0.2f + (1.0f - hue) * 0.6f * multiplayer;
 
         imageBufferColor[pixelIdx * 3 + 0] = imageBufferColor[pixelIdx * 3 + 0] * (1.0f - bestBlendFactor) + coneR * bestBlendFactor;
         imageBufferColor[pixelIdx * 3 + 1] = imageBufferColor[pixelIdx * 3 + 1] * (1.0f - bestBlendFactor) + coneG * bestBlendFactor;
