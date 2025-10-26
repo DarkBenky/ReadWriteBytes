@@ -35,6 +35,7 @@ int posY[MAX_TEXT_LENGTH];
 char textBuffer[MAX_TEXT_LENGTH];
 int textBufferLen = 0;
 
+#define WATER_SIMULATION 0
 #define FLT_MAX 3.402823466e+38F
 #define FLT_MIN 1.175494e-38F
 #define RENDER_TRIAGES 1 // 1 = CALCULATE VERTEXES => PER PIXEL SHADING, 0 = RENDER PER TRIANGLE
@@ -49,7 +50,7 @@ int textBufferLen = 0;
 #define NUMBER_OF_CUBES 100
 pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
-#define MoveMultiplier 1.25f
+#define MoveMultiplier 10.25f
 #define MouseSensitivity 0.25f
 #define MAX_BLUR_PASSES 1
 #define numFireParticles 10000
@@ -787,9 +788,9 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 			missile->bodyOrientation[1] = camera->ray.direction[1];
 			missile->bodyOrientation[2] = camera->ray.direction[2];
 
-			missile->velocity[0] = camera->ray.direction[0] * 250.0f;
-			missile->velocity[1] = camera->ray.direction[1] * 250.0f;
-			missile->velocity[2] = camera->ray.direction[2] * 250.0f;
+			missile->velocity[0] = camera->ray.direction[0] * 2.5f;
+			missile->velocity[1] = camera->ray.direction[1] * 2.5f;
+			missile->velocity[2] = camera->ray.direction[2] * 2.5f;
 
 			missile->targetDirection[0] = camera->ray.direction[0];
 			missile->targetDirection[1] = camera->ray.direction[1];
@@ -1813,39 +1814,13 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, 
 
 // Function prototypes
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles);
+void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles);
 
 struct Light {
 	float x;
 	float y;
 	float z;
 };
-
-struct Cursor {
-	float x;
-	float y;
-	float z;
-	float force;
-	bool active;
-};
-void readCursorData(struct Cursor *cursor) {
-	FILE *file = fopen("cursor.bin", "rb");
-	if (!file) {
-		printf("Cursor file not found, using default cursor\n");
-		return;
-	}
-
-	if (fread(&cursor->x, sizeof(float), 1, file) != 1 ||
-		fread(&cursor->y, sizeof(float), 1, file) != 1 ||
-		fread(&cursor->z, sizeof(float), 1, file) != 1 ||
-		fread(&cursor->active, sizeof(bool), 1, file) != 1 ||
-		fread(&cursor->force, sizeof(float), 1, file) != 1) {
-
-		fclose(file);
-		return;
-	}
-
-	fclose(file);
-}
 
 int readCameraData(struct Camera *camera) {
 	// printf("Attempting to read camera data\n");
@@ -1905,9 +1880,13 @@ float fastInvSqrt(float x) {
 	return y * (1.5f - 0.5f * x * y * y);
 };
 
-void render(struct PointSOA *particles, struct Camera *camera, struct Cursor *cursor, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
+void render(struct PointSOA *particles, struct Camera *camera, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
 	if (USE_GPU == 1) {
+#if WATER_SIMULATION == 1
 		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font, fireParticles, missiles);
+#else
+		projectParticlesOpenCL_NoWater(openCLContext, camera, triangles, skyBox, gpuTimings, font, fireParticles, missiles);
+#endif
 	}
 }
 
@@ -2528,12 +2507,17 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+#if WATER_SIMULATION == 1
 	ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 										NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating points buffer: %d\n", err);
 		return 0;
 	}
+#else
+	// Set to NULL when water simulation is disabled
+	ocl->buffer_points = NULL;
+#endif
 
 	ocl->buffer_seeker_distances = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
 												  MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE * sizeof(float), NULL, &err);
@@ -2825,8 +2809,12 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 														  ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
 
 	// Continue with all other buffer creations from your existing code...
+#if WATER_SIMULATION == 1
 	ocl->buffer_velocities = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 											NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
+#else
+	ocl->buffer_velocities = NULL;
+#endif
 	ocl->buffer_distances = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
 										   ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
 	ocl->buffer_opacities = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
@@ -2917,8 +2905,13 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	// Pre-allocate host memory buffers
+#if WATER_SIMULATION == 1
 	ocl->host_points_data = (float *)malloc(NUM_PARTICLES * 3 * sizeof(float));
 	ocl->host_velocities_data = (float *)malloc(NUM_PARTICLES * 3 * sizeof(float));
+#else
+	ocl->host_points_data = NULL;
+	ocl->host_velocities_data = NULL;
+#endif
 	ocl->host_distances_result = (float *)malloc(ScreenWidth * ScreenHeight * sizeof(float));
 	ocl->host_opacities_result = (float *)malloc(ScreenWidth * ScreenHeight * sizeof(float));
 	ocl->host_velocities_result = (float *)malloc(ScreenWidth * ScreenHeight * sizeof(float));
@@ -2926,6 +2919,7 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	ocl->host_screen_colors_result = (float *)malloc(ScreenWidth * ScreenHeight * 3 * sizeof(float));
 
 	// Check for allocation failures
+#if WATER_SIMULATION == 1
 	if (!ocl->host_points_data || !ocl->host_velocities_data ||
 		!ocl->host_distances_result || !ocl->host_opacities_result ||
 		!ocl->host_velocities_result || !ocl->host_normals_result ||
@@ -2933,6 +2927,14 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		printf("Failed to allocate host memory for OpenCL\n");
 		return 0;
 	}
+#else
+	if (!ocl->host_distances_result || !ocl->host_opacities_result ||
+		!ocl->host_velocities_result || !ocl->host_normals_result ||
+		!ocl->host_screen_colors_result) {
+		printf("Failed to allocate host memory for OpenCL\n");
+		return 0;
+	}
+#endif
 
 	printf("OpenCL-GL interop initialized successfully\n");
 	return 1;
@@ -3289,6 +3291,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	}
 
 	// *** RENDER SKYBOX FIRST (fills background) ***
+
 	renderSkyboxOpenCL(ocl, camera, skyBox, &gpuTimings->renderSkyBoxTime);
 
 	// === ADD TEXT TO RENDER ===
@@ -3826,6 +3829,393 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clFinish(ocl->queue);
 }
 
+void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
+	cl_int err;
+	float zero = 0.0f;
+
+	// Clear screen buffers on GPU
+	err = clEnqueueFillBuffer(ocl->queue, ocl->buffer_normals, &zero, sizeof(float), 0,
+							  ScreenWidth * ScreenHeight * 3 * sizeof(float), 0, NULL, NULL);
+	err |= clEnqueueFillBuffer(ocl->queue, ocl->buffer_screen_colors, &zero, sizeof(float), 0,
+							   ScreenWidth * ScreenHeight * 3 * sizeof(float), 0, NULL, NULL);
+	err |= clEnqueueFillBuffer(ocl->queue, ocl->buffer_distances, &zero, sizeof(float), 0,
+							   ScreenWidth * ScreenHeight * sizeof(float), 0, NULL, NULL);
+
+	if (err != CL_SUCCESS) {
+		printf("Error clearing buffers: %d\n", err);
+	}
+
+	// Render missile fires
+	renderAllMissileFires(ocl, missiles, camera, &gpuTimings->missileRenderingTime);
+	renderFireParticles(ocl, fireParticles, camera, &gpuTimings->fireRenderingTime);
+
+	// Render skybox
+	renderSkyboxOpenCL(ocl, camera, skyBox, &gpuTimings->renderSkyBoxTime);
+
+	// Setup UI text
+	uint8_t white[3] = {255, 255, 255};
+	uint8_t yellow[3] = {255, 255, 0};
+	uint8_t red[3] = {255, 0, 0};
+	uint8_t green[3] = {0, 255, 0};
+
+	int chart_pos_Y = chartPosY;
+	float realFPS = totalTime(gpuTimings) > 0.001f ? (1000.0f / totalTime(gpuTimings)) : 0.0f;
+	snprintf(text, sizeof(text), "Real FPS %.0f", realFPS);
+	addTextOpenCL(ocl, font, text, 545, chart_pos_Y - 15, yellow);
+
+	float skyboxFPS = (gpuTimings->renderSkyBoxTime > 0.001f) ? (1000.0f / gpuTimings->renderSkyBoxTime) : 0.0f;
+	snprintf(text, sizeof(text), "Skybox %.0f FPS", skyboxFPS);
+	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+	chart_pos_Y += 15;
+
+	// Render triangles
+	if (RENDER_TRIAGES == 0) {
+		renderTrianglesOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+	} else {
+		if (camera->renderMode == 6) {
+			// Wireframe rendering
+			cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+			cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+			cl_float fov = camera->fov;
+			cl_int screen_width = ScreenWidth;
+			cl_int screen_height = ScreenHeight;
+			cl_int num_triangles = triangles->count;
+
+			err = clSetKernelArg(ocl->calculateVertex_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 3, sizeof(cl_mem), &ocl->buffer_triangle_normals);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 4, sizeof(cl_float3), &cam_pos);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 5, sizeof(cl_float3), &cam_dir);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 6, sizeof(cl_float), &fov);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 7, sizeof(cl_int), &screen_width);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 8, sizeof(cl_int), &screen_height);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 9, sizeof(cl_int), &num_triangles);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 10, sizeof(cl_mem), &ocl->buffer_projected_verts);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 11, sizeof(cl_mem), &ocl->buffer_triangle_bboxes);
+			err |= clSetKernelArg(ocl->calculateVertex_kernel, 12, sizeof(cl_mem), &ocl->buffer_valid_triangles);
+
+			size_t vertex_global_size = triangles->count;
+			err = clEnqueueNDRangeKernel(ocl->queue, ocl->calculateVertex_kernel, 1, NULL, &vertex_global_size, NULL, 0, NULL, NULL);
+			clFinish(ocl->queue);
+
+			renderWireframeOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+		} else {
+			renderTrianglesOpenCL_TwoPass(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+		}
+	}
+
+	float trianglesFPS = (gpuTimings->renderTrianglesTime > 0.001f) ? (1000.0f / gpuTimings->renderTrianglesTime) : 0.0f;
+	snprintf(text, sizeof(text), "Triangles %.0f FPS", trianglesFPS);
+	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+	chart_pos_Y += 15;
+
+	// Apply reflections
+	applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime, false);
+
+	float reflectionsFPS = (gpuTimings->applyReflectionsTime > 0.001f) ? (1000.0f / gpuTimings->applyReflectionsTime) : 0.0f;
+	snprintf(text, sizeof(text), "Reflections %.0f FPS", reflectionsFPS);
+	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+	chart_pos_Y += 15;
+
+	float blurFPS = (gpuTimings->applyBlurTime > 0.001f) ? (1000.0f / gpuTimings->applyBlurTime) : 0.0f;
+	snprintf(text, sizeof(text), "Blur %.0f FPS", blurFPS);
+	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+	chart_pos_Y += 15;
+
+	float readbackFPS = (gpuTimings->readBackTime > 0.001f) ? (1000.0f / gpuTimings->readBackTime) : 0.0f;
+	snprintf(text, sizeof(text), "Readback %.0f FPS", readbackFPS);
+	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+	chart_pos_Y += 15;
+
+	float textFPS = (gpuTimings->renderTextTime > 0.001f) ? (1000.0f / gpuTimings->renderTextTime) : 0.0f;
+	snprintf(text, sizeof(text), "Text %.0f FPS", textFPS);
+	addTextOpenCL(ocl, font, text, 545, chart_pos_Y, white);
+	chart_pos_Y += 15;
+
+	snprintf(text, sizeof(text), "Render Mode: %s", renderModesName[camera->renderMode]);
+	addTextOpenCL(ocl, font, text, 5, 5, white);
+
+	if (camera->AntiAlias) {
+		snprintf(text, sizeof(text), "AntiAlias Enabled (O)");
+		addTextOpenCL(ocl, font, text, 5, 80, white);
+		snprintf(text, sizeof(text), "Enabled");
+		addTextOpenCL(ocl, font, text, 5, 95, green);
+	} else {
+		snprintf(text, sizeof(text), "AntiAlias Disabled (O)");
+		addTextOpenCL(ocl, font, text, 5, 80, white);
+		snprintf(text, sizeof(text), "Disabled");
+		addTextOpenCL(ocl, font, text, 5, 95, red);
+	}
+
+	if (camera->advanceAntiAlias) {
+		snprintf(text, sizeof(text), "Advance AntiAlias Enabled (I)");
+		addTextOpenCL(ocl, font, text, 5, 110, white);
+		snprintf(text, sizeof(text), "Enabled");
+		addTextOpenCL(ocl, font, text, 5, 125, green);
+	} else {
+		snprintf(text, sizeof(text), "Advance AntiAlias Disabled (I)");
+		addTextOpenCL(ocl, font, text, 5, 110, white);
+		snprintf(text, sizeof(text), "Disabled");
+		addTextOpenCL(ocl, font, text, 5, 125, red);
+	}
+
+	// Missile UI
+	int missileUIy = 170;
+	for (int i = 0; i < missiles->count; i++) {
+		struct Missile *m = missiles->missiles[i];
+		uint8_t stateColor[3] = {128, 128, 128};
+		const char *stateName = "Idle";
+
+		if (missiles->active[i]) {
+			if (m->seeker.lockState == Tracking) {
+				stateColor[0] = 0;
+				stateColor[1] = 255;
+				stateColor[2] = 0;
+				stateName = "TRACKING";
+			} else if (m->seeker.lockState == Searching) {
+				stateColor[0] = 255;
+				stateColor[1] = 255;
+				stateColor[2] = 0;
+				stateName = "SEARCHING";
+			} else if (m->seeker.lockState == Lunching) {
+				stateColor[0] = 255;
+				stateColor[1] = 128;
+				stateColor[2] = 0;
+				stateName = "LAUNCHING";
+			}
+
+			float speed = sqrtf(m->velocity[0] * m->velocity[0] + m->velocity[1] * m->velocity[1] + m->velocity[2] * m->velocity[2]);
+
+			snprintf(text, sizeof(text), "M%d: %s Spd:%.0f/%.0fm/s Fuel:%.0fkg Target Idx:%d", i, stateName, speed, m->maxSpeed, m->fuelMass, m->targetIdx);
+			addTextOpenCL(ocl, font, text, 5, missileUIy, stateColor);
+
+			missileUIy += 35;
+		}
+	}
+
+#if renderUI_Separately == 1
+	err = clEnqueueFillBuffer(
+		ocl->queue,
+		ocl->cl_ui_texture_buffer_temp,
+		&zero,
+		sizeof(float),
+		0,
+		ScreenWidth * ScreenHeight * 3 * sizeof(float),
+		0, NULL, NULL);
+	CL_ERROR(err, "Filling UI temp buffer");
+	clFinish(ocl->queue);
+
+	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime, &ocl->cl_ui_texture_buffer_temp);
+	renderGPUTimings(ocl, gpuTimings, &ocl->cl_ui_texture_buffer_temp);
+#else
+	renderTextOpenCL(ocl, font, &gpuTimings->renderTextTime, NULL);
+	renderGPUTimings(ocl, gpuTimings, NULL);
+#endif
+
+	// Skip particle rendering entirely when WATER_SIMULATION is 0
+
+	// Composite fire buffers
+	compositeBuffersOpenCL(
+		ocl,
+		ocl->buffer_screen_colors,
+		ocl->buffer_distances,
+		ocl->buffer_normals,
+		ocl->FireScreenAlphas,
+		0,
+		ocl->FireScreenColors,
+		ocl->FireScreenDistances,
+		ocl->FireScreenNormals,
+		ocl->FireScreenAlphas,
+		1,
+		ocl->CompositedScreenColors,
+		ocl->CompositedScreenDistances,
+		ocl->CompositedScreenNormals,
+		&gpuTimings->compositingTime);
+
+	filterOverlapOpenCL(
+		ocl,
+		ocl->FireScreenAlphas,
+		ocl->FireScreenDistances,
+		ocl->buffer_distances,
+		ocl->FireTemperature,
+		2);
+
+	if (camera->renderMode == renderCompositedColor || camera->renderMode == renderDebugMode) {
+		applyReflectionsOpenCL(ocl, camera, skyBox, &gpuTimings->applyReflectionsTime, true);
+	}
+
+	if (camera->AntiAlias == true) {
+		antiAliasingOpenCL(ocl, gpuTimings, camera);
+	}
+
+	if (camera->renderMode == renderDebugMode) {
+		float temp = 0.0f;
+		renderConesOpenCL(
+			ocl,
+			camera,
+			ocl->CompositedScreenColors,
+			ocl->buffer_distances,
+			missiles->coneOriginsX,
+			missiles->coneOriginsY,
+			missiles->coneOriginsZ,
+			missiles->coneDirsX,
+			missiles->coneDirsY,
+			missiles->coneDirsZ,
+			missiles->coneFovs,
+			missiles->activeCount,
+			MISSILE_SEEKER_SIZE,
+			&temp);
+	}
+
+#if renderUI_Separately == 1
+	float tmp = 0.0f;
+	launchOverlayImageOpenCL(
+		ocl,
+		ocl->cl_ui_texture_buffer_temp,
+		ocl->buffer_seeker_distances,
+		ScreenWidth,
+		ScreenHeight,
+		MISSILE_SEEKER_SIZE,
+		MISSILE_SEEKER_SIZE,
+		0,
+		2,
+		&tmp,
+		ScreenWidth - MISSILE_SEEKER_SIZE - 10,
+		10);
+
+	err = clEnqueueAcquireGLObjects(ocl->queue, 1, &ocl->cl_ui_texture_buffer, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error acquiring UI GL texture: %d\n", err);
+		return;
+	}
+
+	cl_int screen_width = ScreenWidth;
+	cl_int screen_height = ScreenHeight;
+	err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->cl_ui_texture_buffer_temp);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 1, sizeof(cl_mem), &ocl->cl_ui_texture_buffer);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 2, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 3, sizeof(cl_int), &screen_height);
+	cl_int mode_ui = 0;
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 4, sizeof(cl_int), &mode_ui);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting copyToTexture kernel args for UI: %d\n", err);
+	}
+
+	size_t ui_global_size[2] = {ScreenWidth, ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->copyToTexture_kernel, 2, NULL,
+								 ui_global_size, NULL, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error executing copyToTexture kernel for UI: %d\n", err);
+	}
+
+	err = clEnqueueReleaseGLObjects(ocl->queue, 1, &ocl->cl_ui_texture_buffer, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error releasing UI GL texture: %d\n", err);
+		return;
+	}
+	clFinish(ocl->queue);
+#endif
+
+	// Copy final result to OpenGL texture
+	err = clEnqueueAcquireGLObjects(ocl->queue, 1, &ocl->cl_texture_buffer, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error acquiring GL texture: %d\n", err);
+		return;
+	}
+
+	cl_int screen_width_arg = ScreenWidth;
+	cl_int screen_height_arg = ScreenHeight;
+	cl_int mode = 0;
+
+	switch (camera->renderMode) {
+	case renderDistance:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_distances);
+		break;
+	case renderVelocity:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_velocities_screen);
+		break;
+	case renderOpacity:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_opacities);
+		break;
+	case renderNormal:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_normals);
+		break;
+	case renderFluid:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderWireframe:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	case renderFireColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenColors);
+		break;
+	case renderFireDepth:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenDistances);
+		break;
+	case renderFireNormal:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireScreenNormals);
+		break;
+	case renderCompositedColor:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
+		break;
+	case renderDebugMode:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenColors);
+		break;
+	case renderCompositedNormal:
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenNormals);
+		break;
+	case renderCompositedDistance:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->CompositedScreenDistances);
+		break;
+	case renderTemperatures:
+		mode = 2;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->FireTemperature);
+		break;
+	case RENDER_MODE_COUNT:
+		// Not a valid render mode, use default
+		mode = 0;
+		err = clSetKernelArg(ocl->copyToTexture_kernel, 0, sizeof(cl_mem), &ocl->buffer_screen_colors);
+		break;
+	}
+
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 1, sizeof(cl_mem), &ocl->cl_texture_buffer);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 2, sizeof(cl_int), &screen_width_arg);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 3, sizeof(cl_int), &screen_height_arg);
+	err |= clSetKernelArg(ocl->copyToTexture_kernel, 4, sizeof(cl_int), &mode);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting copyToTexture kernel args: %d\n", err);
+	}
+
+	size_t copy_global_size[2] = {ScreenWidth, ScreenHeight};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->copyToTexture_kernel, 2, NULL,
+								 copy_global_size, NULL, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error executing copyToTexture kernel: %d\n", err);
+	}
+	clEnqueueReleaseGLObjects(ocl->queue, 1, &ocl->cl_texture_buffer, 0, NULL, NULL);
+	clFinish(ocl->queue);
+}
+
 void cleanupOpenCL(struct OpenCLContext *ocl) {
 	// Free host memory (INCLUDING NORMALS)
 	if (ocl->host_points_data) free(ocl->host_points_data);
@@ -4053,6 +4443,155 @@ void readFileTriangles(const char *filename, struct Triangles *triangles, float 
 	printf("File size: %u bytes\n", fileSize);
 	printf("Triangle count: %d\n", triangles->count);
 
+	printf("Bounding Box Min: (%.2f, %.2f, %.2f)\n", minBB[0], minBB[1], minBB[2]);
+	printf("Bounding Box Max: (%.2f, %.2f, %.2f)\n", maxBB[0], maxBB[1], maxBB[2]);
+	printf("Bounding Box Size: (%.2f, %.2f, %.2f)\n",
+		   maxBB[0] - minBB[0],
+		   maxBB[1] - minBB[1],
+		   maxBB[2] - minBB[2]);
+}
+
+// Helper function to convert degrees to radians
+float degreesToRadians(float degrees) {
+	return degrees * M_PI / 180.0f;
+}
+
+// Add this helper function to create a rotation matrix from angles
+void createRotationMatrix(float angleX, float angleY, float angleZ, float matrix[3][3]) {
+	float cosX = cosf(angleX), sinX = sinf(angleX);
+	float cosY = cosf(angleY), sinY = sinf(angleY);
+	float cosZ = cosf(angleZ), sinZ = sinf(angleZ);
+
+	// Combined rotation matrix (Z * Y * X order)
+	matrix[0][0] = cosY * cosZ;
+	matrix[0][1] = sinX * sinY * cosZ - cosX * sinZ;
+	matrix[0][2] = cosX * sinY * cosZ + sinX * sinZ;
+
+	matrix[1][0] = cosY * sinZ;
+	matrix[1][1] = sinX * sinY * sinZ + cosX * cosZ;
+	matrix[1][2] = cosX * sinY * sinZ - sinX * cosZ;
+
+	matrix[2][0] = -sinY;
+	matrix[2][1] = sinX * cosY;
+	matrix[2][2] = cosX * cosY;
+}
+
+// Helper function to apply rotation matrix to a vector
+void rotateVector(float v[3], float matrix[3][3], float result[3]) {
+	result[0] = matrix[0][0] * v[0] + matrix[0][1] * v[1] + matrix[0][2] * v[2];
+	result[1] = matrix[1][0] * v[0] + matrix[1][1] * v[1] + matrix[1][2] * v[2];
+	result[2] = matrix[2][0] * v[0] + matrix[2][1] * v[1] + matrix[2][2] * v[2];
+}
+
+// New method: Load model with rotation in degrees
+void loadModelWithRotation(const char *filename, struct Triangles *triangles,
+						   float scale, float translate[3],
+						   float rotationXDeg, float rotationYDeg, float rotationZDeg) {
+	FILE *file = fopen(filename, "rb");
+	if (!file) {
+		printf("Error: Could not open file %s for reading\n", filename);
+		return;
+	}
+
+	uint32_t fileSize, triangleStructSize;
+	fread(&fileSize, sizeof(uint32_t), 1, file);
+	fread(&triangleStructSize, sizeof(uint32_t), 1, file);
+
+	int triangleCount = (fileSize - 8) / triangleStructSize;
+	printf("Loading %d triangles from %s\n", triangleCount, filename);
+	printf("Scale: %.2f\n", scale);
+	printf("Translation: (%.2f, %.2f, %.2f)\n", translate[0], translate[1], translate[2]);
+	printf("Rotation: X=%.2f°, Y=%.2f°, Z=%.2f°\n", rotationXDeg, rotationYDeg, rotationZDeg);
+
+	if (triangleCount > NUMBER_OF_TRIANGLES) {
+		printf("Warning: File contains %d triangles, but maximum is %d. Only loading first %d triangles.\n",
+			   triangleCount, NUMBER_OF_TRIANGLES, NUMBER_OF_TRIANGLES);
+		triangleCount = NUMBER_OF_TRIANGLES;
+	}
+
+	triangles->count += triangleCount;
+
+	float minBB[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+	float maxBB[3] = {FLT_MIN, FLT_MIN, FLT_MIN};
+
+	// Convert degrees to radians
+	float rotationXRad = degreesToRadians(rotationXDeg);
+	float rotationYRad = degreesToRadians(rotationYDeg);
+	float rotationZRad = degreesToRadians(rotationZDeg);
+
+	// Create rotation matrix
+	float rotMatrix[3][3];
+	createRotationMatrix(rotationXRad, rotationYRad, rotationZRad, rotMatrix);
+
+	for (int i = 0; i < triangleCount; i++) {
+		int idx = i * 3;
+
+		// Read vertices
+		float v1[3], v2[3], v3[3], normal[3];
+		fread(v1, sizeof(float), 3, file);
+		fread(v2, sizeof(float), 3, file);
+		fread(v3, sizeof(float), 3, file);
+
+		// Apply transformations: Scale -> Rotate -> Translate
+
+		// Vertex 1
+		v1[0] *= scale;
+		v1[1] *= scale;
+		v1[2] *= scale;
+		float v1_rotated[3];
+		rotateVector(v1, rotMatrix, v1_rotated);
+		triangles->v1[idx] = v1_rotated[0] + translate[0];
+		triangles->v1[idx + 1] = v1_rotated[1] + translate[1];
+		triangles->v1[idx + 2] = v1_rotated[2] + translate[2];
+
+		// Vertex 2
+		v2[0] *= scale;
+		v2[1] *= scale;
+		v2[2] *= scale;
+		float v2_rotated[3];
+		rotateVector(v2, rotMatrix, v2_rotated);
+		triangles->v2[idx] = v2_rotated[0] + translate[0];
+		triangles->v2[idx + 1] = v2_rotated[1] + translate[1];
+		triangles->v2[idx + 2] = v2_rotated[2] + translate[2];
+
+		// Vertex 3
+		v3[0] *= scale;
+		v3[1] *= scale;
+		v3[2] *= scale;
+		float v3_rotated[3];
+		rotateVector(v3, rotMatrix, v3_rotated);
+		triangles->v3[idx] = v3_rotated[0] + translate[0];
+		triangles->v3[idx + 1] = v3_rotated[1] + translate[1];
+		triangles->v3[idx + 2] = v3_rotated[2] + translate[2];
+
+		// Update bounding box with transformed vertices
+		updateBBox(triangles->v1[idx], triangles->v1[idx + 1], triangles->v1[idx + 2], minBB, maxBB);
+		updateBBox(triangles->v2[idx], triangles->v2[idx + 1], triangles->v2[idx + 2], minBB, maxBB);
+		updateBBox(triangles->v3[idx], triangles->v3[idx + 1], triangles->v3[idx + 2], minBB, maxBB);
+
+		// Read and rotate normals (normals should only be rotated, not scaled or translated)
+		fread(normal, sizeof(float), 3, file);
+		float normal_rotated[3];
+		rotateVector(normal, rotMatrix, normal_rotated);
+		triangles->normals[idx] = normal_rotated[0];
+		triangles->normals[idx + 1] = normal_rotated[1];
+		triangles->normals[idx + 2] = normal_rotated[2];
+
+		// Read material properties and colors (unchanged)
+		fread(&triangles->Roughness[i], sizeof(float), 1, file);
+		fread(&triangles->Metallic[i], sizeof(float), 1, file);
+		fread(&triangles->Emission[i], sizeof(float), 1, file);
+		fread(&triangles->colors[idx], sizeof(float), 3, file);
+
+		// Skip triangle index
+		uint32_t triangleIndex;
+		fread(&triangleIndex, sizeof(uint32_t), 1, file);
+	}
+
+	fclose(file);
+
+	printf("Model loaded successfully!\n");
+	printf("Triangle count: %d\n", triangles->count);
 	printf("Bounding Box Min: (%.2f, %.2f, %.2f)\n", minBB[0], minBB[1], minBB[2]);
 	printf("Bounding Box Max: (%.2f, %.2f, %.2f)\n", maxBB[0], maxBB[1], maxBB[2]);
 	printf("Bounding Box Size: (%.2f, %.2f, %.2f)\n",
@@ -4516,7 +5055,6 @@ void randomMissileMovement(struct Missiles *missiles, struct Camera *camera) {
 }
 
 int main() {
-
 	struct Triangles *missileModel = (struct Triangles *)malloc(sizeof(struct Triangles));
 	if (!missileModel) {
 		perror("Failed to allocate memory for triangles");
@@ -4592,47 +5130,35 @@ int main() {
 		return 1;
 	}
 
-	for (int i = 0; i < NUM_PARTICLES; i++) {
-		particles->x[i] = (float)(rand() % 50 + 30);
-		particles->y[i] = (float)(rand() % 50);
-		particles->z[i] = (float)(rand() % 50 + 30);
-		particles->xVelocity[i] = (float)(rand() % 10) / 100.0f;
-		particles->yVelocity[i] = (float)(rand() % 10) / 100.0f;
-		particles->zVelocity[i] = (float)(rand() % 10) / 100.0f;
+	if (WATER_SIMULATION == 1) {
+		for (int i = 0; i < NUM_PARTICLES; i++) {
+			particles->x[i] = (float)(rand() % 50 + 30);
+			particles->y[i] = (float)(rand() % 50);
+			particles->z[i] = (float)(rand() % 50 + 30);
+			particles->xVelocity[i] = (float)(rand() % 10) / 100.0f;
+			particles->yVelocity[i] = (float)(rand() % 10) / 100.0f;
+			particles->zVelocity[i] = (float)(rand() % 10) / 100.0f;
+		}
+
+		particles->bBoxMin[0] = 0.0f;
+		particles->bBoxMin[1] = 0.0f;
+		particles->bBoxMin[2] = 0.0f;
+		particles->bBoxMax[0] = 80.0f;
+		particles->bBoxMax[1] = 80.0f;
+		particles->bBoxMax[2] = 80.0f;
+
+		updateGridData(particles);
 	}
 
-	// initialize the cursor
-	struct Cursor *cursor = (struct Cursor *)malloc(sizeof(struct Cursor));
-	if (!cursor) {
-		perror("Failed to allocate memory for cursor");
-		free(particles);
-		return 1;
-	}
-	cursor->x = 0.0f;
-	cursor->y = 0.0f;
-	cursor->z = 0.0f;
-	cursor->active = false;
-
-	updateGridData(particles);
-
-	particles->bBoxMin[0] = 0.0f;
-	particles->bBoxMin[1] = 0.0f;
-	particles->bBoxMin[2] = 0.0f;
-	particles->bBoxMax[0] = 80.0f;
-	particles->bBoxMax[1] = 80.0f;
-	particles->bBoxMax[2] = 80.0f;
-
-	float averageFPS[FrameCount];
-	int averageUpdateTime = 0;
-	int averageRenderTime = 0;
 	int frameCount = 0;
 	bool paused = false;
 	bool fireMissile = false;
 
+	float averageFPS[FrameCount];
+
 	struct TimePartition *timePartition = (struct TimePartition *)malloc(sizeof(struct TimePartition));
 	if (!timePartition) {
 		perror("Failed to allocate memory for time partition");
-		free(particles);
 		return 1;
 	}
 
@@ -4640,22 +5166,26 @@ int main() {
 
 	printf("Triangles count after reading: %d\n", triangles->count);
 
-	for (int i = 0; i <= NUMBER_OF_CUBES; i++) {
-		float x = (float)(rand_01() * 500.0f);
-		float y = (float)(rand_01() * 500.0f);
-		float z = (float)(rand_01() * 500.0f);
-		float size = 25.0f;
-		float r = (float)rand_01();
-		float g = (float)rand_01();
-		float b = (float)rand_01();
-		float Roughness = (float)rand_01();
-		float Metallic = (float)rand_01();
-		// float Metallic = 0.0f; // Set Metallic to 1.0f for all cubes
-		float Emissive = (float)rand_01();
-		CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
-	}
+	// for (int i = 0; i <= NUMBER_OF_CUBES; i++) {
+	// 	float x = (float)(rand_01() * 500.0f);
+	// 	float y = (float)(rand_01() * 500.0f);
+	// 	float z = (float)(rand_01() * 500.0f);
+	// 	float size = 25.0f;
+	// 	float r = (float)rand_01();
+	// 	float g = (float)rand_01();
+	// 	float b = (float)rand_01();
+	// 	float Roughness = (float)rand_01();
+	// 	float Metallic = (float)rand_01();
+	// 	// float Metallic = 0.0f; // Set Metallic to 1.0f for all cubes
+	// 	float Emissive = (float)rand_01();
+	// 	CreateCube(x, y, z, size, triangles, r, g, b, Metallic, Roughness, Emissive);
+	// }
 
-	CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
+	float translate1[3] = {0.0f, 0.0f, 0.0f};
+	loadModelWithRotation("mapGeneration/terrain.bin", triangles, 1000.0f, translate1, 0.0f, 90.0f, 90.0f);
+	// readFileTriangles("mapGeneration/terrain.bin", triangles, 10.0f);
+
+	// CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
 	writeFileTriangles("parseObj/triangles.bin", triangles);
 
@@ -4801,7 +5331,9 @@ int main() {
 		if (!paused) {
 			float tmp = 0.0f;
 			missilesSimulation(&ocl, &missiles, &tmp, &fireMissile, &camera, 1 / 60.0f, triangles);
-			Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime);
+			if (WATER_SIMULATION == 1) {
+				Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime);
+			}
 			fireSimStep(fireParticles, 1 / TPS, &gpuTimings.fireSimulationTime);
 			firedMissileTime -= 1 / 60.0f;
 			if (firedMissileTime < 0.0f) {
@@ -4817,7 +5349,7 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(particles, &camera, cursor, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles, &missiles);
+		render(particles, &camera, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles, &missiles);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;

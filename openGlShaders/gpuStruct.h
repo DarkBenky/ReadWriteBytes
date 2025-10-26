@@ -1,6 +1,6 @@
 #ifndef OPEN_CL_STRUCT_H
 #define OPEN_CL_STRUCT_H
-#define NUMBER_OF_TRIANGLES 10000
+#define NUMBER_OF_TRIANGLES 250000
 
 #include <CL/cl.h>
 #include <GL/gl.h>

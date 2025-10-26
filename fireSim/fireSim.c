@@ -7,6 +7,7 @@
 #include <CL/cl.h>
 #define MAX_FLOAT 3.402823466e+38F
 #define G 9.81f
+#define SCALE 100.0f
 #define min(a, b) ((a) < (b) ? (a) : (b))
 
 // GPU: Render distance map (seeker POV)
@@ -380,6 +381,225 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 	rayOrigin[0] = missile->position[0] + missile->bodyOrientation[0] * seekerOffset;
 	rayOrigin[1] = missile->position[1] + missile->bodyOrientation[1] * seekerOffset;
 	rayOrigin[2] = missile->position[2] + missile->bodyOrientation[2] * seekerOffset;
+
+	if (*active) {
+		float minDistance = MAX_FLOAT;
+		int closePixels = 0;
+		const float avoidanceThreshold = 200.0f;
+		const float criticalThreshold = 40.0f;
+
+		int regions[9] = {0};
+		float regionMinDist[9];
+		for (int i = 0; i < 9; i++)
+			regionMinDist[i] = MAX_FLOAT;
+
+		int gridSize = MISSILE_SEEKER_SIZE / 3;
+
+		for (int y = 0; y < MISSILE_SEEKER_SIZE; y++) {
+			for (int x = 0; x < MISSILE_SEEKER_SIZE; x++) {
+				int i = y * MISSILE_SEEKER_SIZE + x;
+				float dist = missile->seeker.seekerDepthMap[i];
+
+				if (dist > 0.001f && dist < avoidanceThreshold) {
+					closePixels++;
+					if (dist < minDistance) minDistance = dist;
+
+					int regionX = x / gridSize;
+					int regionY = y / gridSize;
+					if (regionX > 2) regionX = 2;
+					if (regionY > 2) regionY = 2;
+					int regionIdx = regionY * 3 + regionX;
+
+					regions[regionIdx]++;
+					if (dist < regionMinDist[regionIdx]) {
+						regionMinDist[regionIdx] = dist;
+					}
+				}
+			}
+		}
+
+		float groundClearance = missile->position[1];
+		float minAltitude = 10.0f;
+		bool nearGround = groundClearance < 25.0f;
+
+		int leftThreat = regions[0] + regions[3] + regions[6];
+		int rightThreat = regions[2] + regions[5] + regions[8];
+		int topThreat = regions[0] + regions[1] + regions[2];
+		int bottomThreat = regions[6] + regions[7] + regions[8];
+		int centerThreat = regions[4];
+
+		if ((closePixels > 5 && minDistance < avoidanceThreshold) || nearGround) {
+			float avoidanceDir[3] = {0.0f, 0.0f, 0.0f};
+
+			float forward[3] = {rayDir[0], rayDir[1], rayDir[2]};
+			float right[3], up[3];
+
+			if (fabsf(forward[1]) < 0.99f) {
+				right[0] = forward[2];
+				right[1] = 0.0f;
+				right[2] = -forward[0];
+			} else {
+				right[0] = 1.0f;
+				right[1] = 0.0f;
+				right[2] = 0.0f;
+			}
+			normalize3(right);
+
+			up[0] = right[1] * forward[2] - right[2] * forward[1];
+			up[1] = right[2] * forward[0] - right[0] * forward[2];
+			up[2] = right[0] * forward[1] - right[1] * forward[0];
+			normalize3(up);
+
+			float leftMinDist = fminf(fminf(regionMinDist[0], regionMinDist[3]), regionMinDist[6]);
+			float rightMinDist = fminf(fminf(regionMinDist[2], regionMinDist[5]), regionMinDist[8]);
+			float topMinDist = fminf(fminf(regionMinDist[0], regionMinDist[1]), regionMinDist[2]);
+			float bottomMinDist = fminf(fminf(regionMinDist[6], regionMinDist[7]), regionMinDist[8]);
+
+			if (leftThreat > 0 || rightThreat > 0) {
+				float leftDanger = leftThreat * (1.0f - leftMinDist / avoidanceThreshold);
+				float rightDanger = rightThreat * (1.0f - rightMinDist / avoidanceThreshold);
+
+				if (leftDanger > rightDanger) {
+					float bias = fminf(1.0f, (leftDanger - rightDanger) / (float)(leftThreat + 1));
+					avoidanceDir[0] += right[0] * bias;
+					avoidanceDir[1] += right[1] * bias;
+					avoidanceDir[2] += right[2] * bias;
+				} else {
+					float bias = fminf(1.0f, (rightDanger - leftDanger) / (float)(rightThreat + 1));
+					avoidanceDir[0] -= right[0] * bias;
+					avoidanceDir[1] -= right[1] * bias;
+					avoidanceDir[2] -= right[2] * bias;
+				}
+			}
+
+			float upwardBias = 0.0f;
+
+			if (groundClearance < minAltitude) {
+				upwardBias = 2.0f * (1.0f - groundClearance / minAltitude);
+			} else if (nearGround) {
+				upwardBias = 0.5f * (1.0f - groundClearance / 100.0f);
+			}
+
+			if (bottomThreat > topThreat || minDistance < 80.0f) {
+				float bottomDanger = bottomThreat * (1.0f - bottomMinDist / avoidanceThreshold);
+				float topDanger = topThreat * (1.0f - topMinDist / avoidanceThreshold);
+				float bias = fmaxf(upwardBias, (bottomDanger - topDanger) / (float)(bottomThreat + 1));
+				avoidanceDir[0] += up[0] * bias * 2.0f;
+				avoidanceDir[1] += up[1] * bias * 2.0f;
+				avoidanceDir[2] += up[2] * bias * 2.0f;
+			} else if (topThreat > bottomThreat && groundClearance > 150.0f) {
+				float topDanger = topThreat * (1.0f - topMinDist / avoidanceThreshold);
+				float bottomDanger = bottomThreat * (1.0f - bottomMinDist / avoidanceThreshold);
+				float bias = fminf(0.3f, (topDanger - bottomDanger) / (float)(topThreat + 1));
+				avoidanceDir[0] -= up[0] * bias;
+				avoidanceDir[1] -= up[1] * bias;
+				avoidanceDir[2] -= up[2] * bias;
+			} else if (upwardBias > 0.0f) {
+				avoidanceDir[0] += up[0] * upwardBias * 1.5f;
+				avoidanceDir[1] += up[1] * upwardBias * 1.5f;
+				avoidanceDir[2] += up[2] * upwardBias * 1.5f;
+			}
+
+			if (centerThreat > 10 && minDistance < 100.0f) {
+				int bestEscape = -1;
+				float bestScore = -1.0f;
+
+				for (int i = 0; i < 9; i++) {
+					if (i == 4) continue;
+					float score = (avoidanceThreshold - regionMinDist[i]) / (float)(regions[i] + 1);
+					if (score > bestScore) {
+						bestScore = score;
+						bestEscape = i;
+					}
+				}
+
+				if (bestEscape >= 0) {
+					int escapeX = (bestEscape % 3) - 1;
+					int escapeY = (bestEscape / 3) - 1;
+
+					avoidanceDir[0] += right[0] * escapeX * 0.5f;
+					avoidanceDir[1] += right[1] * escapeX * 0.5f;
+					avoidanceDir[2] += right[2] * escapeX * 0.5f;
+
+					avoidanceDir[0] -= up[0] * escapeY * 0.5f;
+					avoidanceDir[1] -= up[1] * escapeY * 0.5f;
+					avoidanceDir[2] -= up[2] * escapeY * 0.5f;
+				}
+			}
+
+			float avoidMag = sqrtf(avoidanceDir[0] * avoidanceDir[0] +
+								   avoidanceDir[1] * avoidanceDir[1] +
+								   avoidanceDir[2] * avoidanceDir[2]);
+
+			if (avoidMag > 0.001f) {
+				avoidanceDir[0] /= avoidMag;
+				avoidanceDir[1] /= avoidMag;
+				avoidanceDir[2] /= avoidMag;
+
+				float urgency = 1.0f - (minDistance / avoidanceThreshold);
+				urgency = urgency * urgency * urgency;
+
+				if (nearGround) urgency = fmaxf(urgency, 0.6f);
+				if (groundClearance < minAltitude) urgency = 1.0f;
+
+				float avoidWeight = fminf(0.85f, urgency);
+				float targetWeight = 1.0f - avoidWeight;
+
+				missile->targetDirection[0] = missile->targetDirection[0] * targetWeight + avoidanceDir[0] * avoidWeight;
+				missile->targetDirection[1] = missile->targetDirection[1] * targetWeight + avoidanceDir[1] * avoidWeight;
+				missile->targetDirection[2] = missile->targetDirection[2] * targetWeight + avoidanceDir[2] * avoidWeight;
+
+				float newMag = sqrtf(missile->targetDirection[0] * missile->targetDirection[0] +
+									 missile->targetDirection[1] * missile->targetDirection[1] +
+									 missile->targetDirection[2] * missile->targetDirection[2]);
+				if (newMag > 0.001f) {
+					missile->targetDirection[0] /= newMag;
+					missile->targetDirection[1] /= newMag;
+					missile->targetDirection[2] /= newMag;
+				}
+
+				if (missile->targetDirection[1] < 0.0f && groundClearance < 80.0f) {
+					missile->targetDirection[1] = fmaxf(missile->targetDirection[1], 0.1f);
+					float mag = sqrtf(missile->targetDirection[0] * missile->targetDirection[0] +
+									  missile->targetDirection[1] * missile->targetDirection[1] +
+									  missile->targetDirection[2] * missile->targetDirection[2]);
+					missile->targetDirection[0] /= mag;
+					missile->targetDirection[1] /= mag;
+					missile->targetDirection[2] /= mag;
+				}
+
+				float avoidDistance = 600.0f;
+				missile->targetPosition[0] = missile->position[0] + missile->targetDirection[0] * avoidDistance;
+				missile->targetPosition[1] = missile->position[1] + missile->targetDirection[1] * avoidDistance;
+				missile->targetPosition[2] = missile->position[2] + missile->targetDirection[2] * avoidDistance;
+			}
+		}
+
+		if (centerThreat > 60 || minDistance < 15.0f) {
+			*active = false;
+			return;
+		}
+
+		// Check missile-to-missile proximity
+		const float missileProximityThreshold = 20.0f;
+		for (int i = 0; i < allMissiles->count; i++) {
+			if (!allMissiles->active[i] || allMissiles->missiles[i] == missile) {
+				continue;
+			}
+
+			struct Missile *otherMissile = allMissiles->missiles[i];
+			float dx = missile->position[0] - otherMissile->position[0];
+			float dy = missile->position[1] - otherMissile->position[1];
+			float dz = missile->position[2] - otherMissile->position[2];
+			float distSq = dx * dx + dy * dy + dz * dz;
+
+			if (distSq < missileProximityThreshold * missileProximityThreshold) {
+				*active = false;
+				allMissiles->active[i] = false;
+				return;
+			}
+		}
+	}
 
 	if (missile->seeker.lockState == Lunching) {
 		if (fire) {
@@ -900,9 +1120,9 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 		missile->velocity[2] *= speedRatio;
 	}
 
-	missile->position[0] += missile->velocity[0] * deltaTime;
-	missile->position[1] += missile->velocity[1] * deltaTime;
-	missile->position[2] += missile->velocity[2] * deltaTime;
+	missile->position[0] += missile->velocity[0] * SCALE * deltaTime;
+	missile->position[1] += missile->velocity[1] * SCALE * deltaTime;
+	missile->position[2] += missile->velocity[2] * SCALE * deltaTime;
 
 	// BODY ORIENTATION - SIMPLIFIED BUT PHYSICAL
 	// Missile tries to align with velocity + some lead for maneuvering
@@ -971,9 +1191,9 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 		missile->fireSim->basePosition[2] = missile->position[2];
 
 		if (speed > 0.1f) {
-			missile->fireSim->windDirection[0] = -missile->velocity[0] * 8.0f;
-			missile->fireSim->windDirection[1] = -missile->velocity[1] * 8.0f;
-			missile->fireSim->windDirection[2] = -missile->velocity[2] * 8.0f;
+			missile->fireSim->windDirection[0] = -missile->velocity[0] * 16.0f;
+			missile->fireSim->windDirection[1] = -missile->velocity[1] * 16.0f;
+			missile->fireSim->windDirection[2] = -missile->velocity[2] * 16.0f;
 		}
 
 		fireSimStep(missile->fireSim, deltaTime, fireSimulationTime);

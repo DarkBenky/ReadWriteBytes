@@ -3,9 +3,9 @@ import numpy as np
 import random
 from PIL import Image
 
-MAP_SIZE = 2_000 # 15 km
+MAP_SIZE = 125 # 15 km
 ITERATIONS = 3
-HEIGHT_MULTIPLIER = 0.45
+HEIGHT_RANGE = (-25, 10)  # Elevation range from -50m to 250m
 
 WATER_MERGE_THRESHOLD = 0.02
 FLAT_TERRAIN_MERGE_THRESHOLD = 0.0125
@@ -19,159 +19,155 @@ class MaterialProperties:
         self.emission = emission
 
 MATERIALS = {
-    'deep_water': MaterialProperties(roughness=0.05, metallic=0.85, emission=0.0),
-    'shallow_water': MaterialProperties(roughness=0.1, metallic=0.75, emission=0.0),
+    'deep_water': MaterialProperties(roughness=0.05, metallic=0.15, emission=0.0),
+    'shallow_water': MaterialProperties(roughness=0.1, metallic=0.10, emission=0.0),
     'beach': MaterialProperties(roughness=0.85, metallic=0.0, emission=0.0),
     'grass': MaterialProperties(roughness=0.9, metallic=0.0, emission=0.0),
-    'rock': MaterialProperties(roughness=0.7, metallic=0.1, emission=0.0),
-    'mountain': MaterialProperties(roughness=0.6, metallic=0.15, emission=0.0),
-    'snow': MaterialProperties(roughness=0.3, metallic=0.05, emission=0.1)
+    'rock': MaterialProperties(roughness=0.7, metallic=0.02, emission=0.0),
+    'mountain': MaterialProperties(roughness=0.6, metallic=0.02, emission=0.0),
+    'snow': MaterialProperties(roughness=0.3, metallic=0.01, emission=0.1)
 }
 
-def generate_enhanced_height_map(size=MAP_SIZE, seed=None):
+def generate_height_map(size=MAP_SIZE, seed=None):
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
     
+    # Create base terrain with multiple octaves of Perlin noise
     height_map = np.zeros((size, size))
-    center_x, center_y = size / 2, size / 2
-    max_distance = np.sqrt(2) * (size / 2)
     
-    print("Generating radial base with center landmass...")
-    for i in range(size):
-        for j in range(size):
-            dx = i - center_x
-            dy = j - center_y
-            distance = np.sqrt(dx*dx + dy*dy)
-            norm_distance = distance / max_distance
-            
-            radial_height = np.exp(-norm_distance * 3.0) * 1.8 - 0.3
-            height_map[i][j] = radial_height
+    # Multiple layers of Perlin noise for realistic terrain
+    octave_params = [
+        (0.5, 100.0, 1.0),    # Large scale features (continents/valleys)
+        (0.25, 50.0, 0.5),    # Medium scale features (hills)
+        (0.15, 25.0, 0.25),   # Small scale features (bumps)
+        (0.08, 12.0, 0.125),  # Fine detail
+        (0.04, 6.0, 0.0625),  # Very fine detail
+    ]
     
-    print("Adding continental noise patterns...")
-    frequency = 0.006
-    amplitude = 0.5
-    persistence = 0.5
-    lacunarity = 2.2
+    x = np.arange(size)
+    y = np.arange(size)
+    xx, yy = np.meshgrid(x, y)
     
-    for i in range(size):
-        for j in range(size):
-            noise_value = 0
-            freq = frequency
-            amp = amplitude
-            
-            for octave in range(6):
-                noise_value += pnoise2(i * freq + 500, j * freq + 500, octaves=1) * amp
-                freq *= lacunarity
-                amp *= persistence
-            
-            height_map[i][j] += noise_value * 0.8
-    
-    print("Creating islands in ocean areas...")
-    num_islands = random.randint(15, 25)
-    for _ in range(num_islands):
-        angle = random.uniform(0, 2 * np.pi)
-        island_distance = random.uniform(0.5, 0.95) * max_distance
-        island_x = int(center_x + np.cos(angle) * island_distance)
-        island_y = int(center_y + np.sin(angle) * island_distance)
-        island_size = random.uniform(20, 60)
-        island_height = random.uniform(0.4, 0.8)
+    for scale, frequency, amplitude_factor in octave_params:
+        amplitude = (HEIGHT_RANGE[1] - HEIGHT_RANGE[0]) * amplitude_factor
         
-        for i in range(size):
-            for j in range(size):
-                dx = i - island_x
-                dy = j - island_y
-                dist = np.sqrt(dx*dx + dy*dy)
-                
-                if dist < island_size:
-                    island_influence = np.exp(-(dist / island_size) ** 2) * island_height
-                    height_map[i][j] += island_influence
+        noise = np.vectorize(lambda i, j: pnoise2(
+            i / frequency, 
+            j / frequency, 
+            octaves=8, 
+            persistence=0.5,
+            lacunarity=2.0,
+            repeatx=size, 
+            repeaty=size, 
+            base=seed or 0
+        ))(xx, yy)
+        
+        height_map += noise * amplitude
     
-    print("Adding mountain ridges to central landmass...")
-    ridge_frequency = 0.003
-    for i in range(size):
-        for j in range(size):
-            if height_map[i][j] > 0.15:
-                ridge_noise = abs(pnoise2(i * ridge_frequency + 2000, j * ridge_frequency + 2000, octaves=1))
-                ridge_height = 1.0 - ridge_noise
-                ridge_height = ridge_height ** 2.5
-                height_map[i][j] += ridge_height * 0.35
+    # Apply hydraulic-style erosion for realistic valleys
+    from scipy.ndimage import gaussian_filter
+    height_map = gaussian_filter(height_map, sigma=1.5)
     
-    print("Carving river valleys...")
-    valley_frequency = 0.006
-    for i in range(size):
-        for j in range(size):
-            if height_map[i][j] > 0.1:  # Only carve valleys on land
-                valley_noise = abs(pnoise2(i * valley_frequency + 1000, j * valley_frequency + 1000, octaves=1))
-                valley_depth = (1.0 - valley_noise) ** 3
-                height_map[i][j] -= valley_depth * 0.2
+    # Apply thermal erosion to smooth steep slopes
+    height_map = apply_thermal_erosion(height_map, iterations=3, talus_angle=0.1)
     
-    print("Adding surface details...")
-    detail_frequency = 0.03
-    for i in range(size):
-        for j in range(size):
-            detail = pnoise2(i * detail_frequency, j * detail_frequency, octaves=2)
-            height_map[i][j] += detail * 0.05
+    # Add some ridges for mountain ranges
+    ridge_noise = np.vectorize(lambda i, j: abs(pnoise2(
+        i / 80.0, 
+        j / 80.0, 
+        octaves=4, 
+        base=(seed or 0) + 1000
+    )))(xx, yy)
     
-    print("Applying erosion effects...")
-    height_map = apply_thermal_erosion(height_map, iterations=ITERATIONS, talus_angle=0.12)
+    # Only add ridges to higher elevations
+    ridge_mask = height_map > (HEIGHT_RANGE[1] - HEIGHT_RANGE[0]) * 0.3
+    height_map[ridge_mask] += ridge_noise[ridge_mask] * 15.0
     
-    height_map = (height_map - np.min(height_map)) / (np.max(height_map) - np.min(height_map))
-    height_map = height_map * 1.4 - 0.4
+    # Normalize to HEIGHT_RANGE
+    min_val = np.min(height_map)
+    max_val = np.max(height_map)
+    if max_val > min_val:
+        height_map = (height_map - min_val) / (max_val - min_val)
+        height_map = height_map * (HEIGHT_RANGE[1] - HEIGHT_RANGE[0]) + HEIGHT_RANGE[0]
     
-    print("Flattening water areas...")
-    water_level = 0.4
-    for i in range(size):
-        for j in range(size):
-            if height_map[i][j] < water_level:
-                height_map[i][j] = water_level * 0.5
+    # Clip to minimum height (sea level can be below 0)
+    height_map = np.clip(height_map, HEIGHT_RANGE[0], HEIGHT_RANGE[1])
     
-    height_map = np.clip(height_map, 0.0, None)
+    # Flatten water surfaces - set all water areas to a consistent sea level
+    min_h, max_h = HEIGHT_RANGE
+    range_h = max_h - min_h
+    water_threshold = min_h + range_h * 0.30  # Shallow water threshold (beach starts here)
+    sea_level = min_h + range_h * 0.29  # Set sea level just below beach threshold
+    
+    # Set all water areas to a flat surface at sea level
+    water_mask = height_map < water_threshold
+    height_map[water_mask] = sea_level
     
     return height_map
+
 
 def apply_thermal_erosion(height_map, iterations=1, talus_angle=0.08):
-    height_map = height_map.copy()
-    
+    """Apply thermal erosion to smooth steep slopes"""
     for _ in range(iterations):
-        for i in range(1, height_map.shape[0] - 1):
-            for j in range(1, height_map.shape[1] - 1):
-                neighbors = [
-                    height_map[i-1, j], height_map[i+1, j],
-                    height_map[i, j-1], height_map[i, j+1],
-                    height_map[i-1, j-1], height_map[i-1, j+1],
-                    height_map[i+1, j-1], height_map[i+1, j+1]
-                ]
-                
-                max_diff = 0
-                for neighbor in neighbors:
-                    diff = height_map[i, j] - neighbor
-                    if diff > max_diff:
-                        max_diff = diff
-                
-                if max_diff > talus_angle:
-                    height_map[i, j] -= (max_diff - talus_angle) * 0.05
+        # Create shifted versions of the array for all 8 neighbors
+        neighbors = [
+            np.roll(height_map, 1, axis=0),   # up
+            np.roll(height_map, -1, axis=0),  # down
+            np.roll(height_map, 1, axis=1),   # left
+            np.roll(height_map, -1, axis=1),  # right
+            np.roll(np.roll(height_map, 1, axis=0), 1, axis=1),    # up-left
+            np.roll(np.roll(height_map, 1, axis=0), -1, axis=1),   # up-right
+            np.roll(np.roll(height_map, -1, axis=0), 1, axis=1),   # down-left
+            np.roll(np.roll(height_map, -1, axis=0), -1, axis=1),  # down-right
+        ]
+        
+        # Find maximum difference with any neighbor
+        max_diff = np.zeros_like(height_map)
+        for neighbor in neighbors:
+            diff = height_map - neighbor
+            max_diff = np.maximum(max_diff, diff)
+        
+        # Erode where slope exceeds talus angle
+        erosion_mask = max_diff > talus_angle
+        height_map[erosion_mask] -= (max_diff[erosion_mask] - talus_angle) * 0.5
+        
+        # Fix edges that were affected by roll
+        height_map[0, :] = height_map[1, :]
+        height_map[-1, :] = height_map[-2, :]
+        height_map[:, 0] = height_map[:, 1]
+        height_map[:, -1] = height_map[:, -2]
     
     return height_map
 
-def generate_height_map(size=MAP_SIZE):
-    return generate_enhanced_height_map(size)
-
 def get_color_from_height_rgb(height):
-    if height < 0.2:
-        return (0, 17, 51)
-    elif height < 0.4:
-        return (0, 51, 102)
-    elif height < 0.5:
-        return (240, 240, 64)
-    elif height < 0.7:
-        return (34, 139, 34)
-    elif height < 0.85:
-        return (139, 69, 19)
-    elif height < 0.95:
-        return (160, 82, 45)
+    """Dynamic color mapping based on actual HEIGHT_RANGE"""
+    min_h, max_h = HEIGHT_RANGE
+    range_h = max_h - min_h
+    
+    # Define thresholds as percentages of the actual height range
+    deep_water = min_h + range_h * 0.15      # Deep water
+    shallow_water = min_h + range_h * 0.30   # Shallow water
+    beach = min_h + range_h * 0.35           # Beach/shore
+    grass = min_h + range_h * 0.55           # Grass/lowlands
+    rock = min_h + range_h * 0.70            # Rocky terrain
+    mountain = min_h + range_h * 0.85        # Mountains
+    # Above mountain = snow
+    
+    if height < deep_water:
+        return (0, 17, 51)           # Deep water (dark blue)
+    elif height < shallow_water:
+        return (0, 51, 102)          # Shallow water (blue)
+    elif height < beach:
+        return (240, 240, 64)        # Beach (sandy yellow)
+    elif height < grass:
+        return (34, 139, 34)         # Grass (forest green)
+    elif height < rock:
+        return (139, 69, 19)         # Rock (saddle brown)
+    elif height < mountain:
+        return (160, 82, 45)         # Mountain (sienna)
     else:
-        return (255, 255, 255)
+        return (255, 255, 255)       # Snow (white)
 
 def save_height_map_image(height_map, save_path="terrain_map.png"):
     height_array = np.array(height_map)
@@ -281,64 +277,104 @@ def compute_normal(v1, v2, v3):
     return (nx / length, ny / length, nz / length)
 
 def get_color_from_height(height):
-    if height < 0.2:
-        return (0.0, 0.0, 0.5)  # Deep water (normalized to 0.0-1.0)
-    elif height < 0.4:
-        return (0.0, 0.0, 1.0)  # Shallow water
-    elif height < 0.5:
-        return (0.94, 0.94, 0.25)  # Beach (240/255, 240/255, 64/255)
-    elif height < 0.7:
-        return (0.13, 0.55, 0.13)  # Lowlands (34/255, 139/255, 34/255)
-    elif height < 0.85:
-        return (0.55, 0.27, 0.07)  # Mountains (139/255, 69/255, 19/255)
+    """Dynamic color mapping for mesh generation based on HEIGHT_RANGE"""
+    min_h, max_h = HEIGHT_RANGE
+    range_h = max_h - min_h
+    
+    # Define thresholds as percentages of the actual height range
+    deep_water = min_h + range_h * 0.15
+    shallow_water = min_h + range_h * 0.30
+    beach = min_h + range_h * 0.35
+    grass = min_h + range_h * 0.55
+    rock = min_h + range_h * 0.70
+    mountain = min_h + range_h * 0.85
+    
+    if height < deep_water:
+        return (0.0, 0.07, 0.2)      # Deep water (dark blue)
+    elif height < shallow_water:
+        return (0.0, 0.2, 0.4)       # Shallow water (blue)
+    elif height < beach:
+        return (0.94, 0.94, 0.25)    # Beach (sandy)
+    elif height < grass:
+        return (0.13, 0.55, 0.13)    # Grass (green)
+    elif height < rock:
+        return (0.55, 0.27, 0.07)    # Rock (brown)
+    elif height < mountain:
+        return (0.63, 0.32, 0.18)    # Mountain (lighter brown)
     else:
-        return (1.0, 1.0, 1.0)  # Snow caps
+        return (1.0, 1.0, 1.0)       # Snow (white)
 
 def get_material_from_height(height):
-    if height < 0.2:
+    """Dynamic material assignment based on HEIGHT_RANGE"""
+    min_h, max_h = HEIGHT_RANGE
+    range_h = max_h - min_h
+    
+    deep_water = min_h + range_h * 0.15
+    shallow_water = min_h + range_h * 0.30
+    beach = min_h + range_h * 0.35
+    grass = min_h + range_h * 0.55
+    rock = min_h + range_h * 0.70
+    mountain = min_h + range_h * 0.85
+    
+    if height < deep_water:
         return MATERIALS['deep_water']
-    elif height < 0.4:
+    elif height < shallow_water:
         return MATERIALS['shallow_water']
-    elif height < 0.5:
+    elif height < beach:
         return MATERIALS['beach']
-    elif height < 0.7:
+    elif height < grass:
         return MATERIALS['grass']
-    elif height < 0.85:
+    elif height < rock:
         return MATERIALS['rock']
-    elif height < 0.95:
+    elif height < mountain:
         return MATERIALS['mountain']
     else:
         return MATERIALS['snow']
 
 def is_water(height):
-    return height < 0.4
+    """Check if height is water based on HEIGHT_RANGE"""
+    min_h, max_h = HEIGHT_RANGE
+    range_h = max_h - min_h
+    shallow_water_threshold = min_h + range_h * 0.30
+    return height < shallow_water_threshold
 
 def get_terrain_type(height):
-    if height < 0.2:
+    """Get terrain type ID based on HEIGHT_RANGE"""
+    min_h, max_h = HEIGHT_RANGE
+    range_h = max_h - min_h
+    
+    deep_water = min_h + range_h * 0.15
+    shallow_water = min_h + range_h * 0.30
+    beach = min_h + range_h * 0.35
+    grass = min_h + range_h * 0.55
+    rock = min_h + range_h * 0.70
+    mountain = min_h + range_h * 0.85
+    
+    if height < deep_water:
         return 0
-    elif height < 0.4:
+    elif height < shallow_water:
         return 1
-    elif height < 0.5:
+    elif height < beach:
         return 2
-    elif height < 0.7:
+    elif height < grass:
         return 3
-    elif height < 0.85:
+    elif height < rock:
         return 4
-    elif height < 0.95:
+    elif height < mountain:
         return 5
     else:
         return 6
 
 def can_merge_quads(map, i1, j1, i2, j2, height_multiplier):
-    h1 = map[i1][j1] * height_multiplier
-    h2 = map[i1+1][j1] * height_multiplier
-    h3 = map[i1][j1+1] * height_multiplier
-    h4 = map[i1+1][j1+1] * height_multiplier
+    h1 = map[i1][j1]
+    h2 = map[i1+1][j1]
+    h3 = map[i1][j1+1]
+    h4 = map[i1+1][j1+1]
     
-    h5 = map[i2][j2] * height_multiplier
-    h6 = map[i2+1][j2] * height_multiplier
-    h7 = map[i2][j2+1] * height_multiplier
-    h8 = map[i2+1][j2+1] * height_multiplier
+    h5 = map[i2][j2]
+    h6 = map[i2+1][j2]
+    h7 = map[i2][j2+1]
+    h8 = map[i2+1][j2+1]
     
     type1 = get_terrain_type(h1)
     type5 = get_terrain_type(h5)
@@ -358,7 +394,6 @@ def can_merge_quads(map, i1, j1, i2, j2, height_multiplier):
 
 def generate_mash(map):
     triangles = []
-    height_multiplier = HEIGHT_MULTIPLIER
     size_x, size_y = map.shape
     
     processed = np.zeros((size_x, size_y), dtype=bool)
@@ -369,10 +404,10 @@ def generate_mash(map):
             if processed[i][j]:
                 continue
             
-            v1 = (i, j, map[i][j] * height_multiplier)
-            v2 = (i + 1, j, map[i + 1][j] * height_multiplier)
-            v3 = (i, j + 1, map[i][j + 1] * height_multiplier)
-            v4 = (i + 1, j + 1, map[i + 1][j + 1] * height_multiplier)
+            v1 = (i, j, map[i][j])
+            v2 = (i + 1, j, map[i + 1][j] )
+            v3 = (i, j + 1, map[i][j + 1])
+            v4 = (i + 1, j + 1, map[i + 1][j + 1])
             
             avg_height = (v1[2] + v2[2] + v3[2] + v4[2]) / 4
             terrain_type = get_terrain_type(avg_height)
@@ -386,7 +421,7 @@ def generate_mash(map):
                     if ii >= size_x - 1 or processed[ii][j + width]:
                         can_extend = False
                         break
-                    if not can_merge_quads(map, i, j, ii, j + width, height_multiplier):
+                    if not can_merge_quads(map, i, j, ii, j + width, 1):
                         can_extend = False
                         break
                 if can_extend:
@@ -400,7 +435,7 @@ def generate_mash(map):
                     if jj >= size_y - 1 or processed[i + height][jj]:
                         can_extend = False
                         break
-                    if not can_merge_quads(map, i, j, i + height, jj, height_multiplier):
+                    if not can_merge_quads(map, i, j, i + height, jj, 1):
                         can_extend = False
                         break
                 if can_extend:
@@ -412,13 +447,22 @@ def generate_mash(map):
                 for jj in range(j, min(j + width, size_y - 1)):
                     processed[ii][jj] = True
             
-            v1_merged = (i, j, map[i][j] * height_multiplier)
-            v2_merged = (i + height, j, map[min(i + height, size_x - 1)][j] * height_multiplier)
-            v3_merged = (i, j + width, map[i][min(j + width, size_y - 1)] * height_multiplier)
-            v4_merged = (i + height, j + width, map[min(i + height, size_x - 1)][min(j + width, size_y - 1)] * height_multiplier)
+            v1_merged = (i, j, map[i][j])
+            v2_merged = (i + height, j, map[min(i + height, size_x - 1)][j])
+            v3_merged = (i, j + width, map[i][min(j + width, size_y - 1)])
+            v4_merged = (i + height, j + width, map[min(i + height, size_x - 1)][min(j + width, size_y - 1)])
             
             normal = compute_normal(v1_merged, v2_merged, v3_merged)
-            color = get_color_from_height(avg_height)
+            base_color = get_color_from_height(avg_height)
+            
+            # Add color variation
+            color_variation = random.uniform(-0.08, 0.08)
+            color = (
+                np.clip(base_color[0] + color_variation, 0.0, 1.0),
+                np.clip(base_color[1] + color_variation, 0.0, 1.0),
+                np.clip(base_color[2] + color_variation, 0.0, 1.0)
+            )
+            
             material = get_material_from_height(avg_height)
             
             triangle1 = Triangle(v1_merged[0], v1_merged[1], v1_merged[2],
@@ -496,7 +540,7 @@ def generate_mash(map):
 
 
 if __name__ == "__main__":
-    test_map = generate_enhanced_height_map(MAP_SIZE, seed=42)
+    test_map = generate_height_map(MAP_SIZE, seed=42)
     print("Shape of generated map:", test_map.shape)
     
     print("\nGenerating binary mesh file...")
