@@ -19,6 +19,52 @@
 // - tileListCounts: numTilesX * numTilesY * sizeof(int)
 // ============================================================================
 
+┌─────────────────────────────────────────────────────────────┐
+│ Input Data                                                  │
+│ • Vertex positions (v1, v2, v3)                             │
+│ • Normals, colors, materials                                │
+│ • Camera parameters                                         │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ KERNEL 1: calculateVertexCoordinate                         │
+│ • Projects triangles to screen space                        │
+│ • Backface culling                                          │
+│ • Frustum culling                                           │
+│ • Outputs: projectedVerts, bboxes, validTriangles           │
+│                                                             │
+│ Global work size: [numTriangles]                            │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ KERNEL 2: TileCulling                                       │
+│ • Bins visible triangles into 16×16 pixel tiles             │
+│ • Outputs: tileLists, tileListCounts                        │
+│                                                             │
+│ Global work size: [numTilesX, numTilesY]                    │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ KERNEL 3: ShadePixels                                       │
+│ • Tests only triangles in pixel's tile                      │
+│ • Depth testing with early rejection                        │
+│ • Barycentric interpolation                                 │
+│ • Material and lighting                                     │
+│                                                             │
+│ Global work size: [screenWidth, screenHeight]               │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Output Buffers                                              │
+│ • ScreenColors (RGB per pixel)                              │
+│ • ScreenDistances (depth per pixel)                         │
+│ • ScreenNormals, materials                                  │
+└─────────────────────────────────────────────────────────────┘
+
 #define TILE_SIZE 16
 #define MAX_TRIS_PER_TILE 512
 
