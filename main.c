@@ -762,7 +762,7 @@ float timeSinceLastFire = 0.0f;
 float firedMissileTime = 0.0f;
 int firedMissileIdx = -1;
 
-void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime, struct Triangles *triangles) {
+void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, float *timeTookMs, bool *fire, struct Camera *camera, float deltaTime, struct Triangles *triangles, struct IRSearchAndTrack *irst) {
 	float totalTimeTookMs = 0.0f;
 	bool hasFired = false;
 
@@ -778,7 +778,7 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 		bool shouldFireThisMissile = false;
 
 		if (*fire && !active && !hasFired && canFire) {
-			float spawnOffset = 35.0f;
+			float spawnOffset = 25.0f;
 
 			missile->position[0] = camera->ray.origin[0] + camera->ray.direction[0] * spawnOffset;
 			missile->position[1] = camera->ray.origin[1] + camera->ray.direction[1] * spawnOffset;
@@ -788,18 +788,26 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 			missile->bodyOrientation[1] = camera->ray.direction[1];
 			missile->bodyOrientation[2] = camera->ray.direction[2];
 
-			missile->velocity[0] = camera->ray.direction[0] * 2.5f;
-			missile->velocity[1] = camera->ray.direction[1] * 2.5f;
-			missile->velocity[2] = camera->ray.direction[2] * 2.5f;
+			missile->velocity[0] = camera->ray.direction[0] * 17.5f;
+			missile->velocity[1] = camera->ray.direction[1] * 17.5f;
+			missile->velocity[2] = camera->ray.direction[2] * 17.5f;
 
 			missile->targetDirection[0] = camera->ray.direction[0];
 			missile->targetDirection[1] = camera->ray.direction[1];
 			missile->targetDirection[2] = camera->ray.direction[2];
 
-			float virtualTargetDist = 1000.0f;
-			missile->targetPosition[0] = camera->ray.origin[0] + camera->ray.direction[0] * virtualTargetDist;
-			missile->targetPosition[1] = camera->ray.origin[1] + camera->ray.direction[1] * virtualTargetDist;
-			missile->targetPosition[2] = camera->ray.origin[2] + camera->ray.direction[2] * virtualTargetDist;
+			float virtualTargetDist = 10.0f;
+			if (irst->selectedTargetId >= 0) {
+				missile->targetPosition[0] = irst->targetPositionX[irst->selectedTargetId];
+				missile->targetPosition[1] = irst->targetPositionY[irst->selectedTargetId];
+				missile->targetPosition[2] = irst->targetPositionZ[irst->selectedTargetId];
+				irst->selectedTargetId = -1;
+
+			} else {
+				missile->targetPosition[0] = camera->ray.origin[0] + camera->ray.direction[0] * virtualTargetDist;
+				missile->targetPosition[1] = camera->ray.origin[1] + camera->ray.direction[1] * virtualTargetDist;
+				missile->targetPosition[2] = camera->ray.origin[2] + camera->ray.direction[2] * virtualTargetDist;
+			}
 
 			missile->prevLOS[0] = missile->targetDirection[0];
 			missile->prevLOS[1] = missile->targetDirection[1];
@@ -807,9 +815,10 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 
 			missile->seeker.lockState = Lunching;
 			missile->remainingTime = randRange(45.0f, 120.0f);
-			missile->fuelMass = randRange(150.0f, 500.0f);
-			missile->totalMass = missile->dryMass + missile->fuelMass;
+
 			missile->burning = 1;
+			missile->fuelMass = missile->initialFuelMass;
+			missile->totalMass = missile->dryMass + missile->fuelMass;
 
 			shouldFireThisMissile = true;
 			hasFired = true;
@@ -1834,7 +1843,7 @@ void renderGPUTimings(struct OpenCLContext *ocl, struct GPUTimings *gpuTimings, 
 
 // Function prototypes
 void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particles, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles);
-void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles);
+void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles, struct IRSearchAndTrack *irst);
 
 struct Light {
 	float x;
@@ -1900,12 +1909,12 @@ float fastInvSqrt(float x) {
 	return y * (1.5f - 0.5f * x * y * y);
 };
 
-void render(struct PointSOA *particles, struct Camera *camera, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
+void render(struct PointSOA *particles, struct Camera *camera, struct TimePartition *timePartition, struct ParticleIndexes *particleIndexes, struct OpenCLContext *openCLContext, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles, struct IRSearchAndTrack *irst) {
 	if (USE_GPU == 1) {
 #if WATER_SIMULATION == 1
 		projectParticlesOpenCL(openCLContext, particles, camera, triangles, skyBox, gpuTimings, font, fireParticles, missiles);
 #else
-		projectParticlesOpenCL_NoWater(openCLContext, camera, triangles, skyBox, gpuTimings, font, fireParticles, missiles);
+		projectParticlesOpenCL_NoWater(openCLContext, camera, triangles, skyBox, gpuTimings, font, fireParticles, missiles, irst);
 #endif
 	}
 }
@@ -2317,9 +2326,9 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	// Create command queue with profiling
-	ocl->queue = clCreateCommandQueue(ocl->context, ocl->device,
-									  CL_QUEUE_PROFILING_ENABLE, &err);
+	// Create command queue with profiling (using modern API)
+	cl_queue_properties queue_props[] = {CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0};
+	ocl->queue = clCreateCommandQueueWithProperties(ocl->context, ocl->device, queue_props, &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating OpenCL command queue: %d\n", err);
 		return 0;
@@ -2607,6 +2616,10 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 
 	// missile triangles buffer
 	int maxMissileTriangles = missiles->missileModel->count;
+	if (maxMissileTriangles == 0) {
+		printf("Warning: No missile triangles loaded, skipping OpenCL buffer creation\n");
+		return 0;
+	}
 	ocl->buffer_missile_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 											maxMissileTriangles * 3 * sizeof(float), NULL, &err);
 	if (err != CL_SUCCESS) {
@@ -3872,7 +3885,7 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 	clFinish(ocl->queue);
 }
 
-void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles) {
+void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *camera, struct Triangles *triangles, struct SkyBox *skyBox, struct GPUTimings *gpuTimings, struct ImageFont *font, struct FireSOA *fireParticles, struct Missiles *missiles, struct IRSearchAndTrack *irst) {
 	cl_int err;
 	float zero = 0.0f;
 
@@ -3901,10 +3914,72 @@ void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *ca
 	uint8_t red[3] = {255, 0, 0};
 	uint8_t green[3] = {0, 255, 0};
 
+	// IRST Controls Help
+	uint8_t gray[3] = {180, 180, 180};
+	snprintf(text, sizeof(text), "IRST: TAB=Next | BACKSPACE=Clear | Targets: %d", irst->targetCount);
+	addTextOpenCL(ocl, font, text, 10, 10, gray);
+
 	int chart_pos_Y = chartPosY;
 	float realFPS = totalTime(gpuTimings) > 0.001f ? (1000.0f / totalTime(gpuTimings)) : 0.0f;
 	snprintf(text, sizeof(text), "Real FPS %.0f", realFPS);
 	addTextOpenCL(ocl, font, text, 545, chart_pos_Y - 15, yellow);
+
+	for (int i = 0; i < irst->targetCount; i++) {
+		// Calculate distance to target
+		float dx = irst->targetPositionX[i] - camera->ray.origin[0];
+		float dy = irst->targetPositionY[i] - camera->ray.origin[1];
+		float dz = irst->targetPositionZ[i] - camera->ray.origin[2];
+		float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+
+		// Color based on temperature (cool to hot)
+		int r = 255, g = 0, b = 0;
+		if (irst->targetTemperature[i] < 500.0f) {
+			r = 0;
+			g = 255;
+			b = 0; // Green - cold
+		} else if (irst->targetTemperature[i] < 1000.0f) {
+			r = 255;
+			g = 255;
+			b = 0; // Yellow - warm
+		} else {
+			r = 255;
+			g = 0;
+			b = 0; // Red - hot
+		}
+
+		uint8_t color[3] = {r, g, b};
+
+		// Selected target gets special treatment
+		if (irst->selectedTargetId >= 0 && i == irst->selectedTargetId) {
+			snprintf(text, sizeof(text), "[T%d]", i + 1);
+			color[0] = 0;
+			color[1] = 255;
+			color[2] = 255; // Cyan for selected
+		} else {
+			snprintf(text, sizeof(text), "x");
+		}
+		addTextOpenCL(ocl, font, text, irst->targetScreenX[i], irst->targetScreenY[i], color);
+	}
+
+	// Display detailed info for selected target
+	if (irst->selectedTargetId >= 0 && irst->selectedTargetId < irst->targetCount) {
+		int idx = irst->selectedTargetId;
+		float dx = irst->targetPositionX[idx] - camera->ray.origin[0];
+		float dy = irst->targetPositionY[idx] - camera->ray.origin[1];
+		float dz = irst->targetPositionZ[idx] - camera->ray.origin[2];
+		float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+
+		uint8_t cyan[3] = {0, 255, 255};
+		snprintf(text, sizeof(text), "TARGET %d SELECTED", idx + 1);
+		addTextOpenCL(ocl, font, text, 10, 100, cyan);
+		snprintf(text, sizeof(text), "Distance: %.0fm", distance);
+		addTextOpenCL(ocl, font, text, 10, 115, white);
+		snprintf(text, sizeof(text), "Temperature: %.0fK", irst->targetTemperature[idx]);
+		addTextOpenCL(ocl, font, text, 10, 130, white);
+		snprintf(text, sizeof(text), "Position: (%.0f, %.0f, %.0f)",
+				 irst->targetPositionX[idx], irst->targetPositionY[idx], irst->targetPositionZ[idx]);
+		addTextOpenCL(ocl, font, text, 10, 145, white);
+	}
 
 	float skyboxFPS = (gpuTimings->renderSkyBoxTime > 0.001f) ? (1000.0f / gpuTimings->renderSkyBoxTime) : 0.0f;
 	snprintf(text, sizeof(text), "Skybox %.0f FPS", skyboxFPS);
@@ -4361,7 +4436,7 @@ void my_file_reader(void *ctx, const char *filename, int is_mtl, const char *obj
 }
 
 float rand_01() {
-	return (float)rand() / RAND_MAX;
+	return (float)rand() / (float)RAND_MAX;
 }
 
 void writeFileTriangles(const char *filename, struct Triangles *triangles) {
@@ -4973,7 +5048,7 @@ void randomMissileMovement(struct Missiles *missiles, struct Camera *camera) {
 
 				// setMissileTargetDirection(missiles->missiles[i], camera->ray.direction, &dist);
 
-				setMissileTarget(missiles->missiles[i], cameraPos);
+				// setMissileTarget(missiles->missiles[i], cameraPos);  // DISABLED: Let seeker handle targeting
 				// float dx = missiles->missiles[i]->position[0] - camera->ray.origin[0];
 				// float dy = missiles->missiles[i]->position[1] - camera->ray.origin[1];
 				// float dz = missiles->missiles[i]->position[2] - camera->ray.origin[2];
@@ -5113,7 +5188,19 @@ int main() {
 	missileModel->count = 0;
 	readFileTriangles("missile/r27.bin", missileModel, 25.0f);
 	struct Missiles missiles;
-	InitializeMissiles(&missiles, 12, missileModel); // Create 8 missiles
+	InitializeMissiles(&missiles, MAX_FIRE_SIMS, missileModel); // Create 8 missiles
+
+	for (int i = 0; i < 4; i++) {
+		missiles.missiles[i]->position[0] = (i - 1.5f) * 300.0f;
+		missiles.missiles[i]->position[1] = 1500.0f + (i % 2) * 200.0f;
+		missiles.missiles[i]->position[2] = 2000.0f;
+		missiles.missiles[i]->velocity[0] = 0.0f;
+		missiles.missiles[i]->velocity[1] = 0.0f;
+		missiles.missiles[i]->velocity[2] = 0.0f;
+		missiles.missiles[i]->burning = 1;
+		missiles.missiles[i]->burningTemp = 2000.0f;
+		missiles.active[i] = true;
+	}
 
 	// load BVH
 	struct BVHLinear bvh;
@@ -5166,6 +5253,9 @@ int main() {
 	camera.fov = 1.0f;
 	camera.AntiAlias = false;
 	camera.advanceAntiAlias = false;
+
+	struct IRSearchAndTrack irst;
+	InitializeIRST(&camera, &irst, ScreenWidth, ScreenHeight);
 
 	// initialize the particles indexes
 	struct ParticleIndexes *particleIndexes = (struct ParticleIndexes *)malloc(sizeof(struct ParticleIndexes));
@@ -5332,6 +5422,18 @@ int main() {
 		if (isKeyPressed(GLFW_KEY_I)) {
 			camera.advanceAntiAlias = !camera.advanceAntiAlias;
 		}
+		if (isKeyPressed(GLFW_KEY_TAB)) {
+			IRSTSelectNextTarget(&irst);
+		}
+		if (isKeyPressed(GLFW_KEY_LEFT_SHIFT) && isKeyHeld(GLFW_KEY_TAB)) {
+			IRSTSelectPreviousTarget(&irst);
+		}
+		if (isKeyPressed(GLFW_KEY_BACKSPACE)) {
+			IRSTClearSelection(&irst);
+		}
+		if (isKeyPressed(GLFW_KEY_ESCAPE)) {
+			exit = true;
+		}
 
 		static float yaw = 0.0f;
 		static float pitch = 0.0f;
@@ -5380,7 +5482,7 @@ int main() {
 		clock_t startGridTime = clock();
 		if (!paused) {
 			float tmp = 0.0f;
-			missilesSimulation(&ocl, &missiles, &tmp, &fireMissile, &camera, 1 / 60.0f, triangles);
+			missilesSimulation(&ocl, &missiles, &tmp, &fireMissile, &camera, 1 / 60.0f, triangles, &irst);
 			if (WATER_SIMULATION == 1) {
 				Step(particles, 1.0f / 60.0f, &gpuTimings.fluidSimulationTime);
 			}
@@ -5399,7 +5501,8 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		render(particles, &camera, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles, &missiles);
+		IRSearchAndTrackStep(&missiles, &irst, dt);
+		render(particles, &camera, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles, &missiles, &irst);
 		clock_t endRenderTime = clock();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		dt1 = (float)(endRenderTime - startRenderTime) / (float)CLOCKS_PER_SEC;

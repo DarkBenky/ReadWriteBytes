@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <CL/cl.h>
 #define MAX_FLOAT 3.402823466e+38F
+#define missileProximityThreshold 150.0f
 #define G 9.81f
 #define SCALE 100.0f
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -171,6 +172,263 @@ int findClosestObjectToViewCenter(
 	return bestIdx;
 }
 
+void InitializeIRST(struct Camera *mainRenderingCamera, struct IRSearchAndTrack *irst, int screenWidth, int screenHeight) {
+	irst->mainRenderingCamera = mainRenderingCamera;
+	irst->seekerCamera.ray.origin[0] = mainRenderingCamera->ray.origin[0];
+	irst->seekerCamera.ray.origin[1] = mainRenderingCamera->ray.origin[1];
+	irst->seekerCamera.ray.origin[2] = mainRenderingCamera->ray.origin[2];
+	irst->seekerCamera.ray.direction[0] = mainRenderingCamera->ray.direction[0];
+	irst->seekerCamera.ray.direction[1] = mainRenderingCamera->ray.direction[1];
+	irst->seekerCamera.ray.direction[2] = mainRenderingCamera->ray.direction[2];
+	irst->seekerFov = mainRenderingCamera->fov * 180.0f / M_PI;
+	irst->seekerCamera.fov = mainRenderingCamera->fov * 180.0f / M_PI / 32.0f;
+	irst->tiltSpeed = 0.1f;
+	irst->searchYaw = randRange(-0.5f, 0.5f);
+	irst->searchPitch = randRange(-0.3f, 0.3f);
+	irst->targetCount = 0;
+	irst->mainScreenWidth = screenWidth;
+	irst->mainScreenHeight = screenHeight;
+	irst->lockedTarget = NULL;
+	irst->lockedTargetId = -1;
+	irst->selectedTargetId = -1;
+	irst->lockTime = 0.0f;
+}
+
+void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack *irst, float deltaTime) {
+	// Update seeker position to match the main camera (e.g., the aircraft)
+	irst->seekerCamera.ray.origin[0] = irst->mainRenderingCamera->ray.origin[0];
+	irst->seekerCamera.ray.origin[1] = irst->mainRenderingCamera->ray.origin[1];
+	irst->seekerCamera.ray.origin[2] = irst->mainRenderingCamera->ray.origin[2];
+
+	// --- Target Tracking Logic ---
+	if (irst->lockedTargetId != -1) {
+		bool targetStillExists = false;
+		for (int i = 0; i < allMissiles->count; i++) {
+			if (allMissiles->missiles[i] == irst->lockedTarget) {
+				targetStillExists = true;
+				break;
+			}
+		}
+
+		if (!targetStillExists || !allMissiles->active[irst->lockedTargetId]) {
+			// Target is gone, reset tracking
+			irst->lockedTarget = NULL;
+			irst->lockedTargetId = -1;
+			irst->lockTime = 0.0f;
+		} else {
+			// Predict target's next position (simple linear prediction)
+			float predictedPos[3] = {
+				irst->lockedTarget->position[0] + irst->lockedTarget->velocity[0] * deltaTime,
+				irst->lockedTarget->position[1] + irst->lockedTarget->velocity[1] * deltaTime,
+				irst->lockedTarget->position[2] + irst->lockedTarget->velocity[2] * deltaTime};
+
+			float toTarget[3] = {
+				predictedPos[0] - irst->seekerCamera.ray.origin[0],
+				predictedPos[1] - irst->seekerCamera.ray.origin[1],
+				predictedPos[2] - irst->seekerCamera.ray.origin[2]};
+			normalize3(toTarget);
+
+			// Smoothly slew seeker towards the predicted position
+			float dot = dot3(irst->seekerCamera.ray.direction, toTarget);
+			dot = fmaxf(-1.0f, fminf(1.0f, dot));
+			float angle = acosf(dot);
+
+			float slewRate = irst->tiltSpeed * 10.0f; // Faster when locked
+			float t = (angle > 0.001f) ? fminf(slewRate * deltaTime / angle, 1.0f) : 1.0f;
+
+			irst->seekerCamera.ray.direction[0] = irst->seekerCamera.ray.direction[0] * (1.0f - t) + toTarget[0] * t;
+			irst->seekerCamera.ray.direction[1] = irst->seekerCamera.ray.direction[1] * (1.0f - t) + toTarget[1] * t;
+			irst->seekerCamera.ray.direction[2] = irst->seekerCamera.ray.direction[2] * (1.0f - t) + toTarget[2] * t;
+			normalize3(irst->seekerCamera.ray.direction);
+
+			irst->lockTime += deltaTime;
+		}
+	}
+
+	// --- Search Pattern Logic (if not locked) ---
+	if (irst->lockedTargetId == -1) {
+		float fovHalfRad = (irst->seekerFov / 2.0f) * (M_PI / 180.0f);
+		float searchStep = irst->tiltSpeed * deltaTime * 5.0f;
+		irst->searchYaw += searchStep;
+
+		if (irst->searchYaw > fovHalfRad) {
+			irst->searchYaw = -fovHalfRad;
+			irst->searchPitch += fovHalfRad;
+			if (irst->searchPitch > fovHalfRad) {
+				irst->searchPitch = -fovHalfRad;
+			}
+		}
+
+		// Calculate seeker direction based on search pattern
+		float cosPitch = cosf(irst->searchPitch);
+		float localDir[3] = {sinf(irst->searchYaw) * cosPitch, sinf(irst->searchPitch), cosf(irst->searchYaw) * cosPitch};
+
+		// Transform local direction to world space based on main camera's orientation
+		float *forward = irst->mainRenderingCamera->ray.direction;
+		float right[3], up[3];
+		// Simplified cross product to get right and up vectors
+		if (fabsf(forward[1]) < 0.99f) {
+			right[0] = forward[2];
+			right[1] = 0.0f;
+			right[2] = -forward[0];
+		} else {
+			right[0] = 1.0f;
+			right[1] = 0.0f;
+			right[2] = 0.0f;
+		}
+		normalize3(right);
+		up[0] = right[1] * forward[2] - right[2] * forward[1];
+		up[1] = right[2] * forward[0] - right[0] * forward[2];
+		up[2] = right[0] * forward[1] - right[1] * forward[0];
+		normalize3(up);
+
+		irst->seekerCamera.ray.direction[0] = forward[0] * localDir[2] + right[0] * localDir[0] + up[0] * localDir[1];
+		irst->seekerCamera.ray.direction[1] = forward[1] * localDir[2] + right[1] * localDir[0] + up[1] * localDir[1];
+		irst->seekerCamera.ray.direction[2] = forward[2] * localDir[2] + right[2] * localDir[0] + up[2] * localDir[1];
+		normalize3(irst->seekerCamera.ray.direction);
+	}
+
+	// --- Collect and Evaluate Targets ---
+	float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
+	float objTemp[MAX_FIRE_SIMS];
+	struct Missile *potentialTargets[MAX_FIRE_SIMS];
+	int count = 0;
+
+	for (int i = 0; i < allMissiles->count; i++) {
+		if (allMissiles->active[i]) {
+			struct Missile *m = allMissiles->missiles[i];
+			objX[count] = m->position[0];
+			objY[count] = m->position[1];
+			objZ[count] = m->position[2];
+
+			// Calculate thermal signature
+			float burnedFuelRatio = 1.0f - (m->fuelMass / m->initialFuelMass);
+			float baseTemp = m->burningTemp * burnedFuelRatio;
+			float velocityMag = sqrtf(m->velocity[0] * m->velocity[0] + m->velocity[1] * m->velocity[1] + m->velocity[2] * m->velocity[2]);
+			float kineticHeat = velocityMag * 0.5f; // Simplified kinetic heating
+			objTemp[count] = baseTemp + kineticHeat;
+			potentialTargets[count] = m;
+			count++;
+		}
+	}
+
+	// Find the best target in the current seeker view (for auto-tracking)
+	int bestIdx = findClosestObjectToViewCenter(
+		irst->seekerCamera.ray.origin,
+		irst->seekerCamera.ray.direction,
+		irst->seekerFov,
+		objX, objY, objZ, objTemp, irst->seekerDepthMap,
+		count, 0.2f, 0.5f, 0.3f);
+
+	// --- Update Target Lock and Screen Projection ---
+	irst->targetCount = 0; // Clear previous screen targets
+
+	// Auto-lock logic (only if no manual selection is active)
+	if (irst->selectedTargetId == -1) {
+		if (bestIdx != -1) {
+			irst->lockedTarget = potentialTargets[bestIdx];
+			irst->lockedTargetId = -1;
+			for (int i = 0; i < allMissiles->count; i++) {
+				if (allMissiles->missiles[i] == irst->lockedTarget) {
+					irst->lockedTargetId = i;
+					break;
+				}
+			}
+			if (irst->lockTime < 0.1f) irst->lockTime = 0.1f;
+		} else {
+			if (irst->lockedTargetId != -1 && irst->lockTime > 0.5f) {
+				irst->lockedTarget = NULL;
+				irst->lockedTargetId = -1;
+				irst->lockTime = 0.0f;
+			}
+		}
+	}
+
+	// Project all visible targets to the screen
+	for (int i = 0; i < count; i++) {
+		float toObj[3] = {objX[i] - irst->mainRenderingCamera->ray.origin[0],
+						  objY[i] - irst->mainRenderingCamera->ray.origin[1],
+						  objZ[i] - irst->mainRenderingCamera->ray.origin[2]};
+
+		// Calculate depth (forward projection)
+		float *forward = irst->mainRenderingCamera->ray.direction;
+		float zProj = dot3(toObj, forward);
+
+		if (zProj <= 0.01f) continue; // Behind camera
+
+		// Check if target is within the main camera's view (basic frustum check)
+		float toObjDist = sqrtf(toObj[0] * toObj[0] + toObj[1] * toObj[1] + toObj[2] * toObj[2]);
+		if (toObjDist < 0.001f) continue;
+
+		float toObjNorm[3] = {toObj[0] / toObjDist, toObj[1] / toObjDist, toObj[2] / toObjDist};
+		if (dot3(toObjNorm, forward) < cosf(irst->mainRenderingCamera->fov / 2.0f)) continue;
+
+		// Build camera basis vectors EXACTLY like OpenCL kernel
+		float worldUp[3] = {0.0f, 1.0f, 0.0f};
+
+		// right = normalize(cross(forward, worldUp))
+		float rightVec[3];
+		rightVec[0] = forward[1] * worldUp[2] - forward[2] * worldUp[1];
+		rightVec[1] = forward[2] * worldUp[0] - forward[0] * worldUp[2];
+		rightVec[2] = forward[0] * worldUp[1] - forward[1] * worldUp[0];
+		normalize3(rightVec);
+
+		// up = cross(right, forward)
+		float upVec[3];
+		upVec[0] = rightVec[1] * forward[2] - rightVec[2] * forward[1];
+		upVec[1] = rightVec[2] * forward[0] - rightVec[0] * forward[2];
+		upVec[2] = rightVec[0] * forward[1] - rightVec[1] * forward[0];
+
+		// Match OpenCL projection exactly
+		float invFov = 1.0f / irst->mainRenderingCamera->fov;
+		float halfWidth = irst->mainScreenWidth * 0.5f;
+		float halfHeight = irst->mainScreenHeight * 0.5f;
+
+		float scale = invFov / zProj;
+		float xProj = dot3(toObj, rightVec);
+		float yProj = dot3(toObj, upVec);
+
+		float screenX = xProj * scale * halfWidth + halfWidth;
+		float screenY = -yProj * scale * halfHeight + halfHeight; // Note the negation!
+
+		if (irst->targetCount < IRST_TRECKKING_LIMIT) {
+			irst->targetScreenX[irst->targetCount] = screenX;
+			irst->targetScreenY[irst->targetCount] = screenY;
+			irst->targetTemperature[irst->targetCount] = objTemp[i];
+			irst->targetPositionX[irst->targetCount] = objX[i];
+			irst->targetPositionY[irst->targetCount] = objY[i];
+			irst->targetPositionZ[irst->targetCount] = objZ[i];
+			irst->targetCount++;
+		}
+	}
+}
+
+void IRSTSelectNextTarget(struct IRSearchAndTrack *irst) {
+	if (irst->targetCount == 0) {
+		irst->selectedTargetId = -1;
+		return;
+	}
+
+	irst->selectedTargetId = (irst->selectedTargetId + 1) % irst->targetCount;
+}
+
+void IRSTSelectPreviousTarget(struct IRSearchAndTrack *irst) {
+	if (irst->targetCount == 0) {
+		irst->selectedTargetId = -1;
+		return;
+	}
+
+	if (irst->selectedTargetId <= 0) {
+		irst->selectedTargetId = irst->targetCount - 1;
+	} else {
+		irst->selectedTargetId--;
+	}
+}
+
+void IRSTClearSelection(struct IRSearchAndTrack *irst) {
+	irst->selectedTargetId = -1;
+}
+
 void InitializeMissile(struct Missile *missile) {
 	// Seeker initialization
 	missile->seeker.seekerCamera.ray.origin[0] = 0.0f;
@@ -179,11 +437,13 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.seekerCamera.ray.direction[0] = 1.0f;
 	missile->seeker.seekerCamera.ray.direction[1] = 0.0f;
 	missile->seeker.seekerCamera.ray.direction[2] = 0.0f;
-	missile->seeker.seekerCamera.fov = randRange(0.1f, 2.5f);
+	missile->seeker.seekerCamera.fov = randRange(0.25f, 5.0f);
 	missile->seeker.seekerFov = randRange(10.0f, 75.0f);
 	missile->seeker.lockState = Lunching;
 	missile->seeker.searchMultiplayer = randRange(1.25f, 2.5f);
-	missile->seeker.tiltSpeed = randRange(2.0f, 5.0f);
+	missile->seeker.tiltSpeed = randRange(0.5f, 3.5f);
+	missile->seeker.searchYaw = randRange(-0.5f, 0.5f);	  // Random starting search position
+	missile->seeker.searchPitch = randRange(-0.3f, 0.3f); // Random starting search position
 
 	// Core simulation
 	missile->position[0] = randRange(-450.0f, 450.0f);
@@ -220,16 +480,16 @@ void InitializeMissile(struct Missile *missile) {
 
 	// Mass properties
 	missile->dryMass = randRange(10.0f, 70.0f);
-	missile->fuelMass = randRange(150.0f, 500.0f);
+	missile->fuelMass = randRange(150.0f, 1000.0f);
 	missile->totalMass = missile->dryMass + missile->fuelMass;
-	missile->momentOfInertia = randRange(1.8f, 12.5f);
+	missile->momentOfInertia = randRange(0.8f, 8.5f);
 
 	// Propulsion
 	missile->thrust = 0.0f;
-	missile->Isp = randRange(220.0f, 350.0f);
+	missile->Isp = randRange(220.0f, 550.0f);
 	missile->burning = 1;
-	missile->burnRate = randRange(1.0f, 25.0f);
-	missile->maxGimbalAngle = randRange(0.00f, 0.25f);
+	missile->burnRate = randRange(5.0f, 120.0f);
+	missile->maxGimbalAngle = randRange(0.00f, 0.75f);
 	missile->gimbalAngle[0] = 0.0f;
 	missile->gimbalAngle[1] = 0.0f;
 
@@ -251,14 +511,14 @@ void InitializeMissile(struct Missile *missile) {
 	missile->rollDamping = randRange(0.05f, 0.45f);
 
 	// Performance limits
-	missile->maxGPull = randRange(5.0f, 20.0f);
+	missile->maxGPull = randRange(5.0f, 40.0f);
 	missile->maxDynamicPressure = randRange(80000.0f, 250000.0f);
 	missile->maxAoA = randRange(0.25f, 0.95f);
 	missile->maxLoadFactor = randRange(30.0f, 90.0f);
 	missile->maxSpeed = randRange(600.0f, 1200.0f);
 
 	// Guidance & control
-	missile->guidanceGain = randRange(1.5f, 2.5f);
+	missile->guidanceGain = randRange(3.0f, 5.5f);
 	missile->controlAuthority = randRange(0.85f, 0.98f);
 	missile->energyManagementFactor = randRange(0.45f, 0.95f);
 	missile->optimalSpeed = randRange(300.0f, 600.0f);
@@ -416,8 +676,8 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 
 					int regionX = x / gridSize;
 					int regionY = y / gridSize;
-					if (regionX > 2) regionX = 2;
-					if (regionY > 2) regionY = 2;
+					if (regionX >= 3) regionX = 2;
+					if (regionY >= 3) regionY = 2;
 					int regionIdx = regionY * 3 + regionX;
 
 					regions[regionIdx]++;
@@ -562,7 +822,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 				float newMag = sqrtf(missile->targetDirection[0] * missile->targetDirection[0] +
 									 missile->targetDirection[1] * missile->targetDirection[1] +
 									 missile->targetDirection[2] * missile->targetDirection[2]);
-				if (newMag > 0.001f) {
+				if (newMag > 0.0001f) {
 					missile->targetDirection[0] /= newMag;
 					missile->targetDirection[1] /= newMag;
 					missile->targetDirection[2] /= newMag;
@@ -573,9 +833,11 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 					float mag = sqrtf(missile->targetDirection[0] * missile->targetDirection[0] +
 									  missile->targetDirection[1] * missile->targetDirection[1] +
 									  missile->targetDirection[2] * missile->targetDirection[2]);
-					missile->targetDirection[0] /= mag;
-					missile->targetDirection[1] /= mag;
-					missile->targetDirection[2] /= mag;
+					if (mag > 0.0001f) {
+						missile->targetDirection[0] /= mag;
+						missile->targetDirection[1] /= mag;
+						missile->targetDirection[2] /= mag;
+					}
 				}
 
 				float avoidDistance = 600.0f;
@@ -590,8 +852,6 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			return;
 		}
 
-		// Check missile-to-missile proximity
-		const float missileProximityThreshold = 20.0f;
 		for (int i = 0; i < allMissiles->count; i++) {
 			if (!allMissiles->active[i] || allMissiles->missiles[i] == missile) {
 				continue;
@@ -623,25 +883,22 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 	} else if (missile->seeker.lockState == Searching) {
 		float fovHalfRad = (missile->seeker.seekerFov / 2.0f) * (M_PI / 180.0f);
 
-		static float searchYaw = 0.0f;
-		static float searchPitch = 0.0f;
-
 		float searchStep = fovHalfRad * 0.25f;
-		searchYaw += searchStep;
+		missile->seeker.searchYaw += searchStep;
 
-		if (searchYaw > fovHalfRad) {
-			searchYaw = -fovHalfRad;
-			searchPitch += searchStep;
-			if (searchPitch > fovHalfRad) {
-				searchPitch = -fovHalfRad;
+		if (missile->seeker.searchYaw > fovHalfRad) {
+			missile->seeker.searchYaw = -fovHalfRad;
+			missile->seeker.searchPitch += searchStep;
+			if (missile->seeker.searchPitch > fovHalfRad) {
+				missile->seeker.searchPitch = -fovHalfRad;
 			}
 		}
 
-		float cosPitch = cosf(searchPitch);
+		float cosPitch = cosf(missile->seeker.searchPitch);
 		float localDir[3];
-		localDir[0] = sinf(searchYaw) * cosPitch;
-		localDir[1] = sinf(searchPitch);
-		localDir[2] = cosf(searchYaw) * cosPitch;
+		localDir[0] = sinf(missile->seeker.searchYaw) * cosPitch;
+		localDir[1] = sinf(missile->seeker.searchPitch);
+		localDir[2] = cosf(missile->seeker.searchYaw) * cosPitch;
 
 		// Transform local search direction to world space using body orientation
 		float forward[3] = {missile->bodyOrientation[0], missile->bodyOrientation[1], missile->bodyOrientation[2]};
@@ -671,18 +928,23 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 		rayDir[2] = forward[2] * localDir[2] + right[2] * localDir[0] + up[2] * localDir[1];
 		normalize3(rayDir);
 
-		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
+		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS], objVelX[MAX_FIRE_SIMS], objVelY[MAX_FIRE_SIMS], objVelZ[MAX_FIRE_SIMS];
 		float objTemp[MAX_FIRE_SIMS];
 		int count = 0;
 
 		for (int i = 0; i < allMissiles->count; i++) {
-			if (i != allMissiles->count - 1 && allMissiles->active[i]) {
+			if (allMissiles->active[i] && allMissiles->missiles[i] != missile) {
 				struct Missile *mobj = allMissiles->missiles[i];
 				if (mobj == NULL) continue;
 
 				objX[count] = mobj->position[0];
 				objY[count] = mobj->position[1];
 				objZ[count] = mobj->position[2];
+
+				// FIX: velocity is already in m/s, don't apply SCALE here
+				objVelX[count] = mobj->velocity[0];
+				objVelY[count] = mobj->velocity[1];
+				objVelZ[count] = mobj->velocity[2];
 
 				// Aspect-aware thermal intensity
 				float toSeeker[3] = {rayOrigin[0] - mobj->position[0],
@@ -749,6 +1011,8 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 
 		if (bestIdx >= 0 && bestIdx < count) {
 			missile->targetIdx = bestIdx;
+
+			// Calculate basic distance and intercept time
 			float toTarget[3] = {
 				objX[bestIdx] - rayOrigin[0],
 				objY[bestIdx] - rayOrigin[1],
@@ -756,31 +1020,64 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			float dist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
 
 			if (dist > 0.1f) {
-				rayDir[0] = toTarget[0] / dist;
-				rayDir[1] = toTarget[1] / dist;
-				rayDir[2] = toTarget[2] / dist;
+				// Simple lead calculation: estimate intercept time and predict target position
+				float missileSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
+										   missile->velocity[1] * missile->velocity[1] +
+										   missile->velocity[2] * missile->velocity[2]);
+				if (missileSpeed < 50.0f) missileSpeed = 200.0f; // Use estimated speed for newly launched missiles
 
-				missile->targetPosition[0] = objX[bestIdx];
-				missile->targetPosition[1] = objY[bestIdx];
-				missile->targetPosition[2] = objZ[bestIdx];
+				// FIX: Remove incorrect SCALE multiplication - velocity already in m/s
+				float interceptTime = dist / (missileSpeed + 0.001f);
+				interceptTime = fminf(interceptTime, 5.0f); // Clamp prediction to 5 seconds
+
+				// Predict target position with lead
+				float leadPos[3] = {
+					objX[bestIdx] + objVelX[bestIdx] * interceptTime,
+					objY[bestIdx] + objVelY[bestIdx] * interceptTime,
+					objZ[bestIdx] + objVelZ[bestIdx] * interceptTime};
+
+				// Calculate direction to lead position
+				float toLeadTarget[3] = {
+					leadPos[0] - rayOrigin[0],
+					leadPos[1] - rayOrigin[1],
+					leadPos[2] - rayOrigin[2]};
+				float leadDist = sqrtf(toLeadTarget[0] * toLeadTarget[0] +
+									   toLeadTarget[1] * toLeadTarget[1] +
+									   toLeadTarget[2] * toLeadTarget[2]);
+
+				if (leadDist > 0.1f) {
+					rayDir[0] = toLeadTarget[0] / leadDist;
+					rayDir[1] = toLeadTarget[1] / leadDist;
+					rayDir[2] = toLeadTarget[2] / leadDist;
+				}
+
+				// FIX: Store LEAD position for consistent PN guidance
+				missile->targetPosition[0] = leadPos[0];
+				missile->targetPosition[1] = leadPos[1];
+				missile->targetPosition[2] = leadPos[2];
 
 				missile->seeker.lockState = Tracking;
 			}
 		}
 
 	} else if (missile->seeker.lockState == Tracking) {
-		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
+		float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS], objVelX[MAX_FIRE_SIMS], objVelY[MAX_FIRE_SIMS], objVelZ[MAX_FIRE_SIMS];
 		float objTemp[MAX_FIRE_SIMS];
 		int count = 0;
 
 		for (int i = 0; i < allMissiles->count; i++) {
-			if (i != allMissiles->count - 1 && allMissiles->active[i]) {
+			if (allMissiles->active[i] && allMissiles->missiles[i] != missile) {
 				struct Missile *mobj = allMissiles->missiles[i];
 				if (mobj == NULL) continue;
 
 				objX[count] = mobj->position[0];
 				objY[count] = mobj->position[1];
 				objZ[count] = mobj->position[2];
+
+				// FIX: velocity is already in m/s, don't apply SCALE here
+				objVelX[count] = mobj->velocity[0];
+				objVelY[count] = mobj->velocity[1];
+				objVelZ[count] = mobj->velocity[2];
 
 				float toSeeker[3] = {rayOrigin[0] - mobj->position[0],
 									 rayOrigin[1] - mobj->position[1],
@@ -844,6 +1141,8 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 
 		if (bestIdx >= 0 && bestIdx < count) {
 			missile->targetIdx = bestIdx;
+
+			// Calculate basic distance and intercept time
 			float toTarget[3] = {
 				objX[bestIdx] - rayOrigin[0],
 				objY[bestIdx] - rayOrigin[1],
@@ -853,23 +1152,55 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			if (dist > 0.1f) {
 				float maxTilt = missile->seeker.tiltSpeed * deltaTime;
 
-				float targetDir[3] = {toTarget[0] / dist, toTarget[1] / dist, toTarget[2] / dist};
+				// Calculate missile speed for lead prediction
+				float missileSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
+										   missile->velocity[1] * missile->velocity[1] +
+										   missile->velocity[2] * missile->velocity[2]);
+				if (missileSpeed < 50.0f) missileSpeed = 200.0f;
 
-				float dot = rayDir[0] * targetDir[0] + rayDir[1] * targetDir[1] + rayDir[2] * targetDir[2];
-				dot = fmaxf(-1.0f, fminf(1.0f, dot));
+				// FIX: Remove incorrect SCALE multiplication
+				float interceptTime = dist / (missileSpeed + 0.001f);
+				interceptTime = fminf(interceptTime, 5.0f);
 
-				float angle = acosf(dot);
-				float t = (angle > 0.001f) ? fminf(maxTilt / angle, 1.0f) : 1.0f;
+				// Predict target position with lead
+				float leadPos[3] = {
+					objX[bestIdx] + objVelX[bestIdx] * interceptTime,
+					objY[bestIdx] + objVelY[bestIdx] * interceptTime,
+					objZ[bestIdx] + objVelZ[bestIdx] * interceptTime};
 
-				rayDir[0] = rayDir[0] * (1.0f - t) + targetDir[0] * t;
-				rayDir[1] = rayDir[1] * (1.0f - t) + targetDir[1] * t;
-				rayDir[2] = rayDir[2] * (1.0f - t) + targetDir[2] * t;
-				normalize3(rayDir);
+				// Calculate direction to lead position
+				float toLeadTarget[3] = {
+					leadPos[0] - rayOrigin[0],
+					leadPos[1] - rayOrigin[1],
+					leadPos[2] - rayOrigin[2]};
+				float leadDist = sqrtf(toLeadTarget[0] * toLeadTarget[0] +
+									   toLeadTarget[1] * toLeadTarget[1] +
+									   toLeadTarget[2] * toLeadTarget[2]);
 
-				missile->targetPosition[0] = objX[bestIdx];
-				missile->targetPosition[1] = objY[bestIdx];
-				missile->targetPosition[2] = objZ[bestIdx];
+				if (leadDist > 0.1f) {
+					float targetDir[3] = {toLeadTarget[0] / leadDist,
+										  toLeadTarget[1] / leadDist,
+										  toLeadTarget[2] / leadDist};
 
+					// Smoothly slew seeker toward lead target
+					float dot = rayDir[0] * targetDir[0] + rayDir[1] * targetDir[1] + rayDir[2] * targetDir[2];
+					dot = fmaxf(-1.0f, fminf(1.0f, dot));
+
+					float angle = acosf(dot);
+					float t = (angle > 0.001f) ? fminf(maxTilt / angle, 1.0f) : 1.0f;
+
+					rayDir[0] = rayDir[0] * (1.0f - t) + targetDir[0] * t;
+					rayDir[1] = rayDir[1] * (1.0f - t) + targetDir[1] * t;
+					rayDir[2] = rayDir[2] * (1.0f - t) + targetDir[2] * t;
+					normalize3(rayDir);
+				}
+
+				// FIX: Store LEAD position for consistent PN guidance
+				missile->targetPosition[0] = leadPos[0];
+				missile->targetPosition[1] = leadPos[1];
+				missile->targetPosition[2] = leadPos[2];
+
+				// Update target direction for missile guidance
 				missile->targetDirection[0] = rayDir[0];
 				missile->targetDirection[1] = rayDir[1];
 				missile->targetDirection[2] = rayDir[2];
@@ -955,75 +1286,40 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 					   missile->bodyOrientation[2] * currentDir[2];
 	missile->angleOfAttack = acosf(fmaxf(-1.0f, fminf(1.0f, bodyDotVel)));
 
-	// PROPER PROPORTIONAL NAVIGATION - CORRECT IMPLEMENTATION
-	float los[3] = {
+	// PURE LEAD-PURSUIT GUIDANCE
+	float toTarget[3] = {
 		missile->targetPosition[0] - missile->position[0],
 		missile->targetPosition[1] - missile->position[1],
 		missile->targetPosition[2] - missile->position[2]};
 
-	float losDistance = sqrtf(los[0] * los[0] + los[1] * los[1] + los[2] * los[2]);
-	float losRate[3] = {0.0f, 0.0f, 0.0f};
+	float targetDist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
 
-	if (losDistance > 0.1f) {
-		los[0] /= losDistance;
-		los[1] /= losDistance;
-		los[2] /= losDistance;
+	float commandedAccel[3] = {0.0f, 0.0f, 0.0f};
 
-		if (deltaTime > 0.001f) {
-			losRate[0] = (los[0] - missile->prevLOS[0]) / deltaTime;
-			losRate[1] = (los[1] - missile->prevLOS[1]) / deltaTime;
-			losRate[2] = (los[2] - missile->prevLOS[2]) / deltaTime;
-		}
+	if (targetDist > 0.1f) {
+		toTarget[0] /= targetDist;
+		toTarget[1] /= targetDist;
+		toTarget[2] /= targetDist;
 
-		missile->prevLOS[0] = los[0];
-		missile->prevLOS[1] = los[1];
-		missile->prevLOS[2] = los[2];
+		missile->targetDirection[0] = toTarget[0];
+		missile->targetDirection[1] = toTarget[1];
+		missile->targetDirection[2] = toTarget[2];
 
-		missile->targetDirection[0] = los[0];
-		missile->targetDirection[1] = los[1];
-		missile->targetDirection[2] = los[2];
+		float errorDir[3] = {
+			toTarget[0] - currentDir[0],
+			toTarget[1] - currentDir[1],
+			toTarget[2] - currentDir[2]};
+
+		float parallel = errorDir[0] * currentDir[0] + errorDir[1] * currentDir[1] + errorDir[2] * currentDir[2];
+		errorDir[0] -= parallel * currentDir[0];
+		errorDir[1] -= parallel * currentDir[1];
+		errorDir[2] -= parallel * currentDir[2];
+
+		float gainFactor = missile->guidanceGain * speed;
+		commandedAccel[0] = errorDir[0] * gainFactor;
+		commandedAccel[1] = errorDir[1] * gainFactor;
+		commandedAccel[2] = errorDir[2] * gainFactor;
 	}
-
-	float velDotVel = currentDir[0] * currentDir[0] + currentDir[1] * currentDir[1] + currentDir[2] * currentDir[2];
-	float losDotVel = los[0] * currentDir[0] + los[1] * currentDir[1] + los[2] * currentDir[2];
-
-	float velPerpComponent[3] = {
-		los[0] - losDotVel * currentDir[0],
-		los[1] - losDotVel * currentDir[1],
-		los[2] - losDotVel * currentDir[2]};
-
-	float velPerpMag = sqrtf(velPerpComponent[0] * velPerpComponent[0] +
-							 velPerpComponent[1] * velPerpComponent[1] +
-							 velPerpComponent[2] * velPerpComponent[2]);
-
-	float crossProduct[3];
-	if (velPerpMag > 0.001f) {
-		float velPerp[3] = {
-			velPerpComponent[0] / velPerpMag,
-			velPerpComponent[1] / velPerpMag,
-			velPerpComponent[2] / velPerpMag};
-
-		crossProduct[0] = velPerp[1] * losRate[2] - velPerp[2] * losRate[1];
-		crossProduct[1] = velPerp[2] * losRate[0] - velPerp[0] * losRate[2];
-		crossProduct[2] = velPerp[0] * losRate[1] - velPerp[1] * losRate[0];
-	} else {
-		crossProduct[0] = 0.0f;
-		crossProduct[1] = 0.0f;
-		crossProduct[2] = 0.0f;
-	}
-
-	float closingSpeed = fmaxf(speed, 50.0f);
-	float navGain = missile->guidanceGain;
-
-	float commandedAccel[3] = {
-		navGain * closingSpeed * crossProduct[0],
-		navGain * closingSpeed * crossProduct[1],
-		navGain * closingSpeed * crossProduct[2]};
-
-	float parallelComp = commandedAccel[0] * currentDir[0] + commandedAccel[1] * currentDir[1] + commandedAccel[2] * currentDir[2];
-	commandedAccel[0] -= parallelComp * currentDir[0];
-	commandedAccel[1] -= parallelComp * currentDir[1];
-	commandedAccel[2] -= parallelComp * currentDir[2];
 
 	// AERODYNAMIC PERFORMANCE LIMITS - CORRECT
 	float maxAvailableG = missile->maxGPull * G;
@@ -1058,9 +1354,8 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 		commandedAccelMag = maxAvailableG;
 	}
 
-	// Additional safety: scale down when already at high speed
 	if (speed > missile->optimalSpeed) {
-		float speedFactor = 1.0f - fminf(0.7f, (speed - missile->optimalSpeed) / (missile->maxSpeed - missile->optimalSpeed + 0.001f));
+		float speedFactor = 1.0f - fminf(0.3f, (speed - missile->optimalSpeed) / (missile->maxSpeed - missile->optimalSpeed + 0.001f));
 		commandedAccel[0] *= speedFactor;
 		commandedAccel[1] *= speedFactor;
 		commandedAccel[2] *= speedFactor;
@@ -1113,10 +1408,10 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 
 	float dragMagnitude = totalDragCoeff * missile->dynamicPressure * missile->crossSectionArea;
 
-	// CORRECT lift direction (perpendicular to velocity)
+	// FIX: Improved lift direction calculation with better numerical stability
 	float liftDir[3];
 	if (commandedAccelMag > 0.1f && speed > 1.0f) {
-		// For simplicity, lift in the direction of commanded acceleration
+		// Lift in the direction of commanded acceleration
 		// This assumes the missile can instantly orient lift properly
 		liftDir[0] = commandedAccel[0] / commandedAccelMag;
 		liftDir[1] = commandedAccel[1] / commandedAccelMag;
@@ -1128,9 +1423,9 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 		liftDir[1] -= parallel * currentDir[1];
 		liftDir[2] -= parallel * currentDir[2];
 
-		// Renormalize
+		// Renormalize with proper epsilon
 		float liftDirMag = sqrtf(liftDir[0] * liftDir[0] + liftDir[1] * liftDir[1] + liftDir[2] * liftDir[2]);
-		if (liftDirMag > 0.001f) {
+		if (liftDirMag > 0.0001f) {
 			liftDir[0] /= liftDirMag;
 			liftDir[1] /= liftDirMag;
 			liftDir[2] /= liftDirMag;
@@ -1139,12 +1434,22 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 			liftDir[0] = -currentDir[1];
 			liftDir[1] = currentDir[0];
 			liftDir[2] = 0.0f;
+			float fallbackMag = sqrtf(liftDir[0] * liftDir[0] + liftDir[1] * liftDir[1]);
+			if (fallbackMag > 0.0001f) {
+				liftDir[0] /= fallbackMag;
+				liftDir[1] /= fallbackMag;
+			}
 		}
 	} else {
-		// Default lift direction
+		// Default lift direction perpendicular to velocity
 		liftDir[0] = -currentDir[1];
 		liftDir[1] = currentDir[0];
 		liftDir[2] = 0.0f;
+		float defaultMag = sqrtf(liftDir[0] * liftDir[0] + liftDir[1] * liftDir[1]);
+		if (defaultMag > 0.0001f) {
+			liftDir[0] /= defaultMag;
+			liftDir[1] /= defaultMag;
+		}
 	}
 
 	float liftForce[3] = {
@@ -1192,22 +1497,12 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 	// GRAVITY FORCE
 	float gravityForce[3] = {0.0f, -missile->totalMass * G, 0.0f};
 
-	// CORRECT: Total forces from physics only
+	// FIX: Remove double-counting - lift forces already account for commanded acceleration
+	// Total forces from aerodynamics, thrust, and gravity only
 	float totalForce[3] = {
 		thrustForce[0] + dragForce[0] + liftForce[0] + gravityForce[0],
 		thrustForce[1] + dragForce[1] + liftForce[1] + gravityForce[1],
 		thrustForce[2] + dragForce[2] + liftForce[2] + gravityForce[2]};
-
-	// CORRECT: Add guidance acceleration as a PHYSICAL force (not magical)
-	// This represents the actual lateral force from control surfaces
-	float guidanceForce[3] = {
-		commandedAccel[0] * missile->totalMass,
-		commandedAccel[1] * missile->totalMass,
-		commandedAccel[2] * missile->totalMass};
-
-	totalForce[0] += guidanceForce[0];
-	totalForce[1] += guidanceForce[1];
-	totalForce[2] += guidanceForce[2];
 
 	float totalAccel[3] = {
 		totalForce[0] / missile->totalMass,
@@ -1276,7 +1571,7 @@ void missileSimStep(struct Missile *missile, float deltaTime, float *timeTook, b
 	}
 
 	// Smooth rotation toward desired orientation
-	float rotationSpeed = 2.0f; // rad/s
+	float rotationSpeed = 10.0f;
 	float maxRotation = rotationSpeed * deltaTime;
 
 	float currentToDesired[3] = {

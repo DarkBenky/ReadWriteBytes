@@ -2,7 +2,8 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 250
-#define MISSILE_SEEKER_SIZE 96
+#define MISSILE_SEEKER_SIZE 64
+#define IRST_TRECKKING_LIMIT 16
 #define MAX_FIRE_SIMS 16
 #define G 9.81f
 #define MAX_FLOAT 3.402823466e+38F
@@ -48,8 +49,32 @@ struct Seeker {
     float searchMultiplayer;
     float tiltSpeed;
     enum  MissileLock lockState;
+    float searchYaw;        // Individual search yaw angle for this missile
+    float searchPitch;      // Individual search pitch angle for this missile
 };
 
+struct IRSearchAndTrack {
+    struct Camera *mainRenderingCamera; // Reference to main scene camera
+    struct Camera seekerCamera;
+    float seekerFov;
+    float seekerDepthMap[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE];
+    float tiltSpeed;
+    float searchYaw;        // Individual search yaw angle for this missile
+    float searchPitch;      // Individual search pitch angle for this missile
+    float targetScreenX[IRST_TRECKKING_LIMIT];
+    float targetScreenY[IRST_TRECKKING_LIMIT];
+    float targetTemperature[IRST_TRECKKING_LIMIT];
+    float targetPositionX[IRST_TRECKKING_LIMIT];
+    float targetPositionY[IRST_TRECKKING_LIMIT];
+    float targetPositionZ[IRST_TRECKKING_LIMIT];
+    int selectedTargetId;
+    int targetCount;
+    int mainScreenWidth;
+    int mainScreenHeight;
+    struct Missile *lockedTarget;
+    int lockedTargetId;
+    float lockTime;
+};
 
 struct Missile {
     // Core simulation
@@ -168,5 +193,11 @@ float randRange(float min, float max);
 
 void scanConeForTargets(struct Missile *missile, struct Missiles *allMissiles, float coneAngle, float coneDepth);
 void fuseSensorData(struct Missile *missile, float *fusedTargetPos, float *fusedConfidence);
+
+void InitializeIRST(struct Camera *mainRenderingCamera, struct IRSearchAndTrack *irst, int screenWidth, int screenHeight);
+void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack *irst, float deltaTime);
+void IRSTSelectNextTarget(struct IRSearchAndTrack *irst);
+void IRSTSelectPreviousTarget(struct IRSearchAndTrack *irst);
+void IRSTClearSelection(struct IRSearchAndTrack *irst);
 
 #endif
