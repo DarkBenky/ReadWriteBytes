@@ -25,6 +25,7 @@ struct OpenCLContext {
 	cl_kernel gpuTimings_kernel;				// kernel for GPU timings
 	cl_kernel renderText_kernel;				// kernel for rendering text
 	cl_kernel calculateVertex_kernel;			// Vertex calculation kernel
+	cl_kernel tileCulling_kernel;				// Tile culling kernel
 	cl_kernel shadePixels_kernel;				// Pixel shading kernel
 	cl_kernel wireframe_kernel;					// Wireframe rendering kernel
 	cl_kernel copyToTexture_kernel;				// Copy buffer data to OpenGL texture kernel
@@ -48,6 +49,8 @@ struct OpenCLContext {
 	cl_mem buffer_projected_verts; // Pre-calculated vertex coordinates
 	cl_mem buffer_triangle_bboxes; // Pre-calculated bounding boxes
 	cl_mem buffer_valid_triangles; // Pre-calculated validity flags
+	cl_mem buffer_tileLists;       // Tile triangle lists
+	cl_mem buffer_tileListCounts;  // Triangle count per tile
 
 	// Add OpenGL interop members
 	GLuint gl_texture;		  // OpenGL texture ID

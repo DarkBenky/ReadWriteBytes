@@ -1,4 +1,6 @@
 #define FMAX 3.402823466e+38F
+#define TILE_SIZE 16
+#define MAX_TRIS_PER_TILE 512
 
 float fract(float x) {
     return x - floor(x);
@@ -1070,7 +1072,6 @@ int scaledValue(float x) {
 }
 
 __kernel void calculateVertexCoordinate(
-    // input buffers
     __global const float* v1,
     __global const float* v2,
     __global const float* v3,
@@ -1081,112 +1082,152 @@ __kernel void calculateVertexCoordinate(
     const int screenWidth,
     const int screenHeight,
     const int numTriangles,
-    // output buffers
-    __global float* projectedVerts,      // 9 floats per triangle (x,y,z for each of v1, v2, v3)
-    __global float* bboxes,              // 4 floats per triangle: minX, maxX, minY, maxY
-    __global int* validTriangles         // 1 = valid, 0 = culled
+    __global float* projectedVerts,
+    __global float* bboxes,
+    __global int* validTriangles
 ) { 
     int triangleId = get_global_id(0);
     if (triangleId >= numTriangles) return;
 
-    // === Initialize outputs to invalid state ===
     validTriangles[triangleId] = 0;
 
-    // === 1. Get triangle vertices and normal ===
-    float3 vertex1 = (float3)(v1[triangleId * 3], v1[triangleId * 3 + 1], v1[triangleId * 3 + 2]);
-    float3 vertex2 = (float3)(v2[triangleId * 3], v2[triangleId * 3 + 1], v2[triangleId * 3 + 2]);
-    float3 vertex3 = (float3)(v3[triangleId * 3], v3[triangleId * 3 + 1], v3[triangleId * 3 + 2]);
-    float3 faceNormal = normalize((float3)(normals[triangleId * 3], normals[triangleId * 3 + 1], normals[triangleId * 3 + 2]));
+    float3 vertex1 = vload3(triangleId, v1);
+    float3 vertex2 = vload3(triangleId, v2);
+    float3 vertex3 = vload3(triangleId, v3);
+    float3 faceNormal = normalize(vload3(triangleId, normals));
 
-    // === 2. Camera basis ===
     float3 forward = normalize(camDir);
     float3 up = (float3)(0.0f, 1.0f, 0.0f);
     float3 right = normalize(cross(forward, up));
     up = cross(right, forward);
 
-    // === 3. Backface culling ===
-    float3 center = (vertex1 + vertex2 + vertex3) / 3.0f;
-    float3 toCamera = normalize(camPos - center);
-    if (dot(faceNormal, toCamera) <= 0.0f) {
-        return;
-    }
+    float3 center = (vertex1 + vertex2 + vertex3) * 0.33333f;
+    float3 toCamera = camPos - center;
+    if (dot(faceNormal, toCamera) <= 0.0f) return;
 
-    // === 4. Project to screen space ===
-    float3 vertices[3] = {vertex1, vertex2, vertex3};
-    float3 projected[3];
-    float minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    float3 rel1 = vertex1 - camPos;
+    float3 rel2 = vertex2 - camPos;
+    float3 rel3 = vertex3 - camPos;
+    
+    float depth1 = dot(rel1, forward);
+    float depth2 = dot(rel2, forward);
+    float depth3 = dot(rel3, forward);
+    
+    if (depth1 <= 0.01f || depth2 <= 0.01f || depth3 <= 0.01f) return;
 
-    for (int i = 0; i < 3; i++) {
-        float3 rel = vertices[i] - camPos;
-        float depth = dot(rel, forward);
+    float invFov = 1.0f / fov;
+    float halfWidth = screenWidth * 0.5f;
+    float halfHeight = screenHeight * 0.5f;
+    
+    float scale1 = invFov / depth1;
+    float x1 = dot(rel1, right) * scale1 * halfWidth + halfWidth;
+    float y1 = -dot(rel1, up) * scale1 * halfHeight + halfHeight;
+    
+    float scale2 = invFov / depth2;
+    float x2 = dot(rel2, right) * scale2 * halfWidth + halfWidth;
+    float y2 = -dot(rel2, up) * scale2 * halfHeight + halfHeight;
+    
+    float scale3 = invFov / depth3;
+    float x3 = dot(rel3, right) * scale3 * halfWidth + halfWidth;
+    float y3 = -dot(rel3, up) * scale3 * halfHeight + halfHeight;
 
-        // Cull triangles behind camera
-        if (depth <= 0.01f) {
-            return;
-        }
+    float area = fabs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1));
+    if (area < 1.0f) return;
 
-        float scale = 1.0f / (depth * fov);
-        float x = dot(rel, right) * scale;
-        float y = dot(rel, up) * scale;
+    float minX = min(min(x1, x2), x3);
+    float maxX = max(max(x1, x2), x3);
+    float minY = min(min(y1, y2), y3);
+    float maxY = max(max(y1, y2), y3);
 
-        // Convert to pixel coordinates
-        float sx = x * screenWidth * 0.5f + screenWidth * 0.5f;
-        float sy = -y * screenHeight * 0.5f + screenHeight * 0.5f;
+    int base = triangleId * 9;
+    projectedVerts[base + 0] = x1;
+    projectedVerts[base + 1] = y1;
+    projectedVerts[base + 2] = depth1;
+    projectedVerts[base + 3] = x2;
+    projectedVerts[base + 4] = y2;
+    projectedVerts[base + 5] = depth2;
+    projectedVerts[base + 6] = x3;
+    projectedVerts[base + 7] = y3;
+    projectedVerts[base + 8] = depth3;
 
-        projected[i] = (float3)(sx, sy, depth);
-
-        // Track bounding box
-        minX = fmin(minX, sx);
-        maxX = fmax(maxX, sx);
-        minY = fmin(minY, sy);
-        maxY = fmax(maxY, sy);
-    }
-
-    // === 4.5. Check for degenerate triangles ===
-    float triangleArea = fabs((projected[1].x - projected[0].x) * (projected[2].y - projected[0].y) - 
-                             (projected[2].x - projected[0].x) * (projected[1].y - projected[0].y)) * 0.5f;
-    if (triangleArea < 0.5f) {
-        return;
-    }
-
-    // === 5. Store projected vertices ===
-    for (int i = 0; i < 3; i++) {
-        int base = triangleId * 9 + i * 3;
-        projectedVerts[base + 0] = projected[i].x;
-        projectedVerts[base + 1] = projected[i].y;
-        projectedVerts[base + 2] = projected[i].z;
-    }
-
-    // === 6. Store bounding box ===
-    bboxes[triangleId * 4 + 0] = fmax(0.0f, fmin((float)screenWidth, minX));
-    bboxes[triangleId * 4 + 1] = fmax(0.0f, fmin((float)screenWidth, maxX));
-    bboxes[triangleId * 4 + 2] = fmax(0.0f, fmin((float)screenHeight, minY));
-    bboxes[triangleId * 4 + 3] = fmax(0.0f, fmin((float)screenHeight, maxY));
+    bboxes[triangleId * 4 + 0] = clamp(minX, 0.0f, (float)screenWidth);
+    bboxes[triangleId * 4 + 1] = clamp(maxX, 0.0f, (float)screenWidth);
+    bboxes[triangleId * 4 + 2] = clamp(minY, 0.0f, (float)screenHeight);
+    bboxes[triangleId * 4 + 3] = clamp(maxY, 0.0f, (float)screenHeight);
 
     validTriangles[triangleId] = 1;
+}
+
+__kernel void TileCulling(
+    __global const float* bboxes,
+    __global const int* validTriangles,
+    __global int* tileLists,
+    __global int* tileListCounts,
+    const int screenWidth,
+    const int screenHeight,
+    const int numTriangles,
+    const int numTilesX
+) {
+    int tileX = get_global_id(0);
+    int tileY = get_global_id(1);
+    int numTilesY = get_global_size(1);
+    
+    if (tileX >= numTilesX || tileY >= numTilesY) return;
+    
+    int tileIdx = tileY * numTilesX + tileX;
+    
+    float tileMinX = tileX * TILE_SIZE;
+    float tileMaxX = min((tileX + 1) * TILE_SIZE, screenWidth);
+    float tileMinY = tileY * TILE_SIZE;
+    float tileMaxY = min((tileY + 1) * TILE_SIZE, screenHeight);
+    
+    int count = 0;
+    int baseOffset = tileIdx * MAX_TRIS_PER_TILE;
+    
+    for (int t = 0; t < numTriangles; t++) {
+        if (validTriangles[t] == 0) continue;
+        
+        int bi = t * 4;
+        float triMinX = bboxes[bi];
+        float triMaxX = bboxes[bi + 1];
+        float triMinY = bboxes[bi + 2];
+        float triMaxY = bboxes[bi + 3];
+        
+        if (triMaxX >= tileMinX && triMinX <= tileMaxX &&
+            triMaxY >= tileMinY && triMinY <= tileMaxY) {
+            
+            if (count < MAX_TRIS_PER_TILE) {
+                tileLists[baseOffset + count] = t;
+                count++;
+            }
+        }
+    }
+    
+    tileListCounts[tileIdx] = count;
 }
 
 __kernel void ShadePixels(
     __global const float* projectedVerts,
     __global const float* bboxes,
     __global const int* validTriangles,
+    __global const int* tileLists,
+    __global const int* tileListCounts,
+    
     __global float* ScreenColors,
     __global float* ScreenDistances,
     __global float* ScreenNormals,
+    __global float* ScreenMaterialRoughness,
+    __global float* ScreenMaterialMetallic,
+    __global float* ScreenMaterialEmission,
 
     const int screenWidth,
     const int screenHeight,
-    const int numTriangles,
+    const int numTilesX,
 
     __global const float* TriangleColors,
     __global const float* roughness,
     __global const float* metallic,
     __global const float* emission,
-
-    __global float* ScreenMaterialRoughness,
-    __global float* ScreenMaterialMetallic,
-    __global float* ScreenMaterialEmission,
-    
     __global const float* normals
 ) {
     int px = get_global_id(0);
@@ -1197,72 +1238,77 @@ __kernel void ShadePixels(
     const float cy = (float)py + 0.5f;
     const int idx = py * screenWidth + px;
 
-    // start with existing depth (or FMAX if zero)
-    float bestDepth = ScreenDistances[idx] > 0.0f
-        ? ScreenDistances[idx] : FMAX;
-    int   bestTri   = -1;
+    int tileX = px / TILE_SIZE;
+    int tileY = py / TILE_SIZE;
+    int tileIdx = tileY * numTilesX + tileX;
+    
+    int numTrisInTile = tileListCounts[tileIdx];
+    int tileListBase = tileIdx * MAX_TRIS_PER_TILE;
 
-    const int CHUNK = 64;
-    for (int s = 0; s < numTriangles; s += CHUNK) {
-        int e = min(s + CHUNK, numTriangles);
-        for (int t = s; t < e; ++t) {
-            if (validTriangles[t] == 0) continue;
+    float bestDepth = ScreenDistances[idx] > 0.0f 
+        ? ScreenDistances[idx] : INFINITY;
+    int bestTri = -1;
 
-            // bbox test
-            int bi = t * 4;
-            float minX = bboxes[bi  ], maxX = bboxes[bi+1];
-            float minY = bboxes[bi+2], maxY = bboxes[bi+3];
-            if (cx < minX || cx > maxX || cy < minY || cy > maxY)
-                continue;
+    for (int i = 0; i < numTrisInTile; i++) {
+        int t = tileLists[tileListBase + i];
+        
+        int ov = t * 9;
+        float minZ = min(min(projectedVerts[ov + 2], 
+                            projectedVerts[ov + 5]), 
+                            projectedVerts[ov + 8]);
+        if (minZ >= bestDepth) continue;
 
-            // load projected verts
-            int ov = t * 9;
-            float2 p0 = (float2)(projectedVerts[ov], projectedVerts[ov+1]);
-            float2 p1 = (float2)(projectedVerts[ov+3], projectedVerts[ov+4]);
-            float2 p2 = (float2)(projectedVerts[ov+6], projectedVerts[ov+7]);
-            float   z0 = projectedVerts[ov+2];
-            float   z1 = projectedVerts[ov+5];
-            float   z2 = projectedVerts[ov+8];
+        int bi = t * 4;
+        float minX = bboxes[bi];
+        float maxX = bboxes[bi + 1];
+        float minY = bboxes[bi + 2];
+        float maxY = bboxes[bi + 3];
+        if (cx < minX || cx > maxX || cy < minY || cy > maxY) continue;
 
-            // edge‐function / barycentric
-            float2 v0 = p1 - p0;
-            float2 v1 = p2 - p0;
-            float2 v2 = (float2)(cx, cy) - p0;
-            float  denom = v0.x * v1.y - v1.x * v0.y;
-            if (fabs(denom) < 1e-6f) continue;
-            float invDen = 1.0f / denom;
-            float u = (v2.x * v1.y - v1.x * v2.y) * invDen;
-            float v = (v0.x * v2.y - v2.x * v0.y) * invDen;
-            if (u < 0.0f || v < 0.0f || u + v > 1.0f) continue;
+        float2 p0 = (float2)(projectedVerts[ov], projectedVerts[ov + 1]);
+        float2 p1 = (float2)(projectedVerts[ov + 3], projectedVerts[ov + 4]);
+        float2 p2 = (float2)(projectedVerts[ov + 6], projectedVerts[ov + 7]);
+        float z0 = projectedVerts[ov + 2];
+        float z1 = projectedVerts[ov + 5];
+        float z2 = projectedVerts[ov + 8];
 
-            // interpolate depth
-            float w = 1.0f - u - v;
-            float d = w*z0 + u*z1 + v*z2;
-            if (d < bestDepth) {
-                bestDepth = d;
-                bestTri   = t;
-            }
+        float2 v0 = p1 - p0;
+        float2 v1 = p2 - p0;
+        float2 vp = (float2)(cx, cy) - p0;
+        
+        float denom = v0.x * v1.y - v1.x * v0.y;
+        if (fabs(denom) < 1e-6f) continue;
+        
+        float invDenom = 1.0f / denom;
+        float u = (vp.x * v1.y - v1.x * vp.y) * invDenom;
+        float v = (v0.x * vp.y - vp.x * v0.y) * invDenom;
+        
+        if (u < 0.0f || v < 0.0f || u + v > 1.0f) continue;
+
+        float w = 1.0f - u - v;
+        float depth = w * z0 + u * z1 + v * z2;
+        
+        if (depth < bestDepth) {
+            bestDepth = depth;
+            bestTri = t;
         }
-        if (bestDepth < 0.1f) break;
     }
 
-    // commit result
     if (bestTri >= 0 && (ScreenDistances[idx] == 0.0f || bestDepth < ScreenDistances[idx])) {
         ScreenDistances[idx] = bestDepth;
 
-        // normal + color load
-        int mb = bestTri * 3;
-        float3 N = normalize(vload3(0, normals + mb));
+        float3 N = normalize(vload3(bestTri, normals));
         vstore3(N, idx, ScreenNormals);
 
-        float3 C = vload3(0, TriangleColors + mb);
-        float  L = max(0.65f, dot(N, (float3)(0.3f,0.7f,0.5f)));
-        float3 col = clamp(C * L + C * emission[bestTri], 0.0f, 1.0f);
-        vstore3(col, idx, ScreenColors);
+        float3 C = vload3(bestTri, TriangleColors);
+        float3 lightDir = normalize((float3)(0.3f, 0.7f, 0.5f));
+        float lighting = max(0.65f, dot(N, lightDir));
+        float3 finalColor = clamp(C * lighting + C * emission[bestTri], 0.0f, 1.0f);
+        vstore3(finalColor, idx, ScreenColors);
 
         ScreenMaterialRoughness[idx] = roughness[bestTri];
-        ScreenMaterialMetallic [idx] = metallic [bestTri];
-        ScreenMaterialEmission [idx] = emission[bestTri];
+        ScreenMaterialMetallic[idx] = metallic[bestTri];
+        ScreenMaterialEmission[idx] = emission[bestTri];
     }
 }
 

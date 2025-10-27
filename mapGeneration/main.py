@@ -3,9 +3,9 @@ import numpy as np
 import random
 from PIL import Image
 
-MAP_SIZE = 125 # 15 km
+MAP_SIZE = 450 # 15 km
 ITERATIONS = 3
-HEIGHT_RANGE = (-25, 10)  # Elevation range from -50m to 250m
+HEIGHT_RANGE = (-45, 22.5)  # Elevation range with more dramatic variation
 
 WATER_MERGE_THRESHOLD = 0.02
 FLAT_TERRAIN_MERGE_THRESHOLD = 0.0125
@@ -36,13 +36,14 @@ def generate_height_map(size=MAP_SIZE, seed=None):
     # Create base terrain with multiple octaves of Perlin noise
     height_map = np.zeros((size, size))
     
-    # Multiple layers of Perlin noise for realistic terrain
+    # More dramatic octave parameters for interesting terrain
     octave_params = [
-        (0.5, 100.0, 1.0),    # Large scale features (continents/valleys)
-        (0.25, 50.0, 0.5),    # Medium scale features (hills)
-        (0.15, 25.0, 0.25),   # Small scale features (bumps)
-        (0.08, 12.0, 0.125),  # Fine detail
-        (0.04, 6.0, 0.0625),  # Very fine detail
+        (0.5, 120.0, 1.2),    # Large scale features (continents/valleys) - bigger amplitude
+        (0.3, 60.0, 0.7),     # Medium scale features (hills) - more pronounced
+        (0.18, 30.0, 0.4),    # Small scale features (bumps)
+        (0.1, 15.0, 0.2),     # Fine detail
+        (0.06, 8.0, 0.1),     # Very fine detail
+        (0.03, 4.0, 0.05),    # Ultra fine detail for texture
     ]
     
     x = np.arange(size)
@@ -55,9 +56,9 @@ def generate_height_map(size=MAP_SIZE, seed=None):
         noise = np.vectorize(lambda i, j: pnoise2(
             i / frequency, 
             j / frequency, 
-            octaves=8, 
-            persistence=0.5,
-            lacunarity=2.0,
+            octaves=6, 
+            persistence=0.55,
+            lacunarity=2.3,
             repeatx=size, 
             repeaty=size, 
             base=seed or 0
@@ -65,24 +66,64 @@ def generate_height_map(size=MAP_SIZE, seed=None):
         
         height_map += noise * amplitude
     
+    # Add dramatic plateaus
+    plateau_noise = np.vectorize(lambda i, j: pnoise2(
+        i / 90.0, 
+        j / 90.0, 
+        octaves=3, 
+        base=(seed or 0) + 5000
+    ))(xx, yy)
+    plateau_mask = plateau_noise > 0.3
+    height_map[plateau_mask] += 25.0
+    
+    # Add deep valleys with more variation
+    valley_noise = np.vectorize(lambda i, j: pnoise2(
+        i / 70.0, 
+        j / 70.0, 
+        octaves=4, 
+        base=(seed or 0) + 3000
+    ))(xx, yy)
+    valley_mask = valley_noise < -0.35
+    height_map[valley_mask] -= 20.0
+    
     # Apply hydraulic-style erosion for realistic valleys
     from scipy.ndimage import gaussian_filter
-    height_map = gaussian_filter(height_map, sigma=1.5)
+    height_map = gaussian_filter(height_map, sigma=1.2)
     
     # Apply thermal erosion to smooth steep slopes
-    height_map = apply_thermal_erosion(height_map, iterations=3, talus_angle=0.1)
+    height_map = apply_thermal_erosion(height_map, iterations=2, talus_angle=0.12)
     
-    # Add some ridges for mountain ranges
+    # Add dramatic ridges for mountain ranges
     ridge_noise = np.vectorize(lambda i, j: abs(pnoise2(
-        i / 80.0, 
-        j / 80.0, 
-        octaves=4, 
+        i / 65.0, 
+        j / 65.0, 
+        octaves=5, 
         base=(seed or 0) + 1000
     )))(xx, yy)
     
+    # Create mountain peaks with exponential scaling
+    peak_noise = np.vectorize(lambda i, j: pnoise2(
+        i / 50.0, 
+        j / 50.0, 
+        octaves=4, 
+        base=(seed or 0) + 2000
+    ))(xx, yy)
+    
     # Only add ridges to higher elevations
-    ridge_mask = height_map > (HEIGHT_RANGE[1] - HEIGHT_RANGE[0]) * 0.3
-    height_map[ridge_mask] += ridge_noise[ridge_mask] * 15.0
+    ridge_mask = height_map > (HEIGHT_RANGE[1] - HEIGHT_RANGE[0]) * 0.25
+    height_map[ridge_mask] += ridge_noise[ridge_mask] * 22.0
+    
+    # Add sharp peaks
+    peak_mask = (height_map > (HEIGHT_RANGE[1] - HEIGHT_RANGE[0]) * 0.5) & (peak_noise > 0.4)
+    height_map[peak_mask] += 18.0
+    
+    # Create interesting coastal features with islands
+    coastal_noise = np.vectorize(lambda i, j: pnoise2(
+        i / 40.0, 
+        j / 40.0, 
+        octaves=5, 
+        base=(seed or 0) + 4000
+    ))(xx, yy)
     
     # Normalize to HEIGHT_RANGE
     min_val = np.min(height_map)
@@ -94,13 +135,17 @@ def generate_height_map(size=MAP_SIZE, seed=None):
     # Clip to minimum height (sea level can be below 0)
     height_map = np.clip(height_map, HEIGHT_RANGE[0], HEIGHT_RANGE[1])
     
-    # Flatten water surfaces - set all water areas to a consistent sea level
+    # Create more interesting water features - islands and varied coastlines
     min_h, max_h = HEIGHT_RANGE
     range_h = max_h - min_h
-    water_threshold = min_h + range_h * 0.30  # Shallow water threshold (beach starts here)
-    sea_level = min_h + range_h * 0.29  # Set sea level just below beach threshold
+    water_threshold = min_h + range_h * 0.28  # Shallow water threshold
+    sea_level = min_h + range_h * 0.27  # Set sea level just below beach threshold
     
-    # Set all water areas to a flat surface at sea level
+    # Add small islands by raising some water areas
+    island_mask = (height_map < water_threshold) & (coastal_noise > 0.6)
+    height_map[island_mask] = min_h + range_h * 0.40  # Raise to beach/grass level
+    
+    # Set remaining water areas to flat surface at sea level
     water_mask = height_map < water_threshold
     height_map[water_mask] = sea_level
     
@@ -540,7 +585,7 @@ def generate_mash(map):
 
 
 if __name__ == "__main__":
-    test_map = generate_height_map(MAP_SIZE, seed=42)
+    test_map = generate_height_map(MAP_SIZE, seed=421)
     print("Shape of generated map:", test_map.shape)
     
     print("\nGenerating binary mesh file...")

@@ -1601,9 +1601,8 @@ void renderTrianglesOpenCL_TwoPass(struct OpenCLContext *ocl, struct Triangles *
 	if (triangles->count == 0) return;
 
 	cl_int err;
-	cl_event vertex_event, pixel_event;
+	cl_event vertex_event, tile_event, pixel_event;
 
-	// === PASS 1: Calculate vertex coordinates ===
 	cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
 	cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
 	cl_float fov = camera->fov;
@@ -1611,7 +1610,6 @@ void renderTrianglesOpenCL_TwoPass(struct OpenCLContext *ocl, struct Triangles *
 	cl_int screen_height = ScreenHeight;
 	cl_int num_triangles = triangles->count;
 
-	// Set arguments for vertex calculation kernel
 	err = clSetKernelArg(ocl->calculateVertex_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_v1);
 	err |= clSetKernelArg(ocl->calculateVertex_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_v2);
 	err |= clSetKernelArg(ocl->calculateVertex_kernel, 2, sizeof(cl_mem), &ocl->buffer_triangle_v3);
@@ -1631,7 +1629,6 @@ void renderTrianglesOpenCL_TwoPass(struct OpenCLContext *ocl, struct Triangles *
 		return;
 	}
 
-	// Execute vertex calculation kernel
 	size_t vertex_global_size = triangles->count;
 	err = clEnqueueNDRangeKernel(ocl->queue, ocl->calculateVertex_kernel, 1, NULL, &vertex_global_size, NULL, 0, NULL, &vertex_event);
 	if (err != CL_SUCCESS) {
@@ -1639,34 +1636,58 @@ void renderTrianglesOpenCL_TwoPass(struct OpenCLContext *ocl, struct Triangles *
 		return;
 	}
 
-	// === PASS 2: Shade pixels ===
-	// Set arguments for pixel shading kernel
+	int numTilesX = (ScreenWidth + 15) / 16;
+	int numTilesY = (ScreenHeight + 15) / 16;
+	cl_int num_tiles_x = numTilesX;
+
+	err = clSetKernelArg(ocl->tileCulling_kernel, 0, sizeof(cl_mem), &ocl->buffer_triangle_bboxes);
+	err |= clSetKernelArg(ocl->tileCulling_kernel, 1, sizeof(cl_mem), &ocl->buffer_valid_triangles);
+	err |= clSetKernelArg(ocl->tileCulling_kernel, 2, sizeof(cl_mem), &ocl->buffer_tileLists);
+	err |= clSetKernelArg(ocl->tileCulling_kernel, 3, sizeof(cl_mem), &ocl->buffer_tileListCounts);
+	err |= clSetKernelArg(ocl->tileCulling_kernel, 4, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->tileCulling_kernel, 5, sizeof(cl_int), &screen_height);
+	err |= clSetKernelArg(ocl->tileCulling_kernel, 6, sizeof(cl_int), &num_triangles);
+	err |= clSetKernelArg(ocl->tileCulling_kernel, 7, sizeof(cl_int), &num_tiles_x);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting tile culling arguments: %d\n", err);
+		return;
+	}
+
+	size_t tile_global_size[2] = {numTilesX, numTilesY};
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->tileCulling_kernel, 2, NULL, tile_global_size, NULL, 1, &vertex_event, &tile_event);
+	if (err != CL_SUCCESS) {
+		printf("Error executing tile culling kernel: %d\n", err);
+		return;
+	}
+
 	err = clSetKernelArg(ocl->shadePixels_kernel, 0, sizeof(cl_mem), &ocl->buffer_projected_verts);
 	err |= clSetKernelArg(ocl->shadePixels_kernel, 1, sizeof(cl_mem), &ocl->buffer_triangle_bboxes);
 	err |= clSetKernelArg(ocl->shadePixels_kernel, 2, sizeof(cl_mem), &ocl->buffer_valid_triangles);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 3, sizeof(cl_mem), &ocl->buffer_screen_colors);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 4, sizeof(cl_mem), &ocl->buffer_distances);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 5, sizeof(cl_mem), &ocl->buffer_normals);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 6, sizeof(cl_int), &screen_width);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 7, sizeof(cl_int), &screen_height);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 8, sizeof(cl_int), &num_triangles);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 9, sizeof(cl_mem), &ocl->buffer_triangle_colors);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 10, sizeof(cl_mem), &ocl->buffer_triangle_roughness);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 11, sizeof(cl_mem), &ocl->buffer_triangle_metallic);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 12, sizeof(cl_mem), &ocl->buffer_triangle_emission);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 13, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 14, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 15, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
-	err |= clSetKernelArg(ocl->shadePixels_kernel, 16, sizeof(cl_mem), &ocl->buffer_triangle_normals);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 3, sizeof(cl_mem), &ocl->buffer_tileLists);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 4, sizeof(cl_mem), &ocl->buffer_tileListCounts);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 5, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 6, sizeof(cl_mem), &ocl->buffer_distances);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 7, sizeof(cl_mem), &ocl->buffer_normals);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 8, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 9, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 10, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 11, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 12, sizeof(cl_int), &screen_height);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 13, sizeof(cl_int), &num_tiles_x);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 14, sizeof(cl_mem), &ocl->buffer_triangle_colors);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 15, sizeof(cl_mem), &ocl->buffer_triangle_roughness);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 16, sizeof(cl_mem), &ocl->buffer_triangle_metallic);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 17, sizeof(cl_mem), &ocl->buffer_triangle_emission);
+	err |= clSetKernelArg(ocl->shadePixels_kernel, 18, sizeof(cl_mem), &ocl->buffer_triangle_normals);
 
 	if (err != CL_SUCCESS) {
 		printf("Error setting pixel shader arguments: %d\n", err);
 		return;
 	}
 
-	// Execute pixel shading kernel (waits for vertex kernel completion)
 	size_t pixel_global_size[2] = {ScreenWidth, ScreenHeight};
-	err = clEnqueueNDRangeKernel(ocl->queue, ocl->shadePixels_kernel, 2, NULL, pixel_global_size, NULL, 1, &vertex_event, &pixel_event);
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->shadePixels_kernel, 2, NULL, pixel_global_size, NULL, 1, &tile_event, &pixel_event);
 	if (err != CL_SUCCESS) {
 		printf("Error executing pixel shader kernel: %d\n", err);
 		return;
@@ -1674,16 +1695,15 @@ void renderTrianglesOpenCL_TwoPass(struct OpenCLContext *ocl, struct Triangles *
 
 	clFinish(ocl->queue);
 
-	// Calculate total GPU time if requested
 	if (gpuTimeMs != NULL) {
 		cl_ulong vertex_start, pixel_end;
 		clGetEventProfilingInfo(vertex_event, CL_PROFILING_COMMAND_START, sizeof(vertex_start), &vertex_start, NULL);
 		clGetEventProfilingInfo(pixel_event, CL_PROFILING_COMMAND_END, sizeof(pixel_end), &pixel_end, NULL);
-		*gpuTimeMs = (pixel_end - vertex_start) * 1e-6f; // convert ns to ms
+		*gpuTimeMs = (pixel_end - vertex_start) * 1e-6f;
 	}
 
-	// Cleanup
 	clReleaseEvent(vertex_event);
+	clReleaseEvent(tile_event);
 	clReleaseEvent(pixel_event);
 }
 
@@ -2435,6 +2455,12 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	ocl->tileCulling_kernel = clCreateKernel(ocl->program, "TileCulling", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating TileCulling kernel: %d\n", err);
+		return 0;
+	}
+
 	ocl->drawBoundingBox_kernel = clCreateKernel(ocl->program, "drawBoundingBox", &err);
 	if (err != CL_SUCCESS) {
 		printf("Error creating rayTrace kernel: %d\n", err);
@@ -2766,7 +2792,24 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
-	// compositing buffers
+	int numTilesX = (ScreenWidth + 15) / 16;
+	int numTilesY = (ScreenHeight + 15) / 16;
+	int numTiles = numTilesX * numTilesY;
+
+	ocl->buffer_tileLists = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+										   numTiles * 512 * sizeof(int), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating tile lists buffer: %d\n", err);
+		return 0;
+	}
+
+	ocl->buffer_tileListCounts = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+												numTiles * sizeof(int), NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating tile list counts buffer: %d\n", err);
+		return 0;
+	}
+
 	ocl->CompositedScreenColors = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
 												 ScreenWidth * ScreenHeight * sizeof(float) * 3, NULL, &err);
 	ocl->CompositedScreenDistances = clCreateBuffer(ocl->context, CL_MEM_WRITE_ONLY,
@@ -4245,8 +4288,12 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
 	if (ocl->buffer_triangle_roughness) clReleaseMemObject(ocl->buffer_triangle_roughness);
 	if (ocl->buffer_triangle_metallic) clReleaseMemObject(ocl->buffer_triangle_metallic);
 	if (ocl->buffer_triangle_emission) clReleaseMemObject(ocl->buffer_triangle_emission);
+	if (ocl->buffer_projected_verts) clReleaseMemObject(ocl->buffer_projected_verts);
+	if (ocl->buffer_triangle_bboxes) clReleaseMemObject(ocl->buffer_triangle_bboxes);
+	if (ocl->buffer_valid_triangles) clReleaseMemObject(ocl->buffer_valid_triangles);
+	if (ocl->buffer_tileLists) clReleaseMemObject(ocl->buffer_tileLists);
+	if (ocl->buffer_tileListCounts) clReleaseMemObject(ocl->buffer_tileListCounts);
 
-	// Add skybox buffer cleanup
 	if (ocl->buffer_skybox_top) clReleaseMemObject(ocl->buffer_skybox_top);
 	if (ocl->buffer_skybox_bottom) clReleaseMemObject(ocl->buffer_skybox_bottom);
 	if (ocl->buffer_skybox_left) clReleaseMemObject(ocl->buffer_skybox_left);
@@ -4271,6 +4318,9 @@ void cleanupOpenCL(struct OpenCLContext *ocl) {
 	if (ocl->normals_kernel) clReleaseKernel(ocl->normals_kernel);
 	if (ocl->applyReflections_kernel) clReleaseKernel(ocl->applyReflections_kernel);
 	if (ocl->composite_cones_kernel) clReleaseKernel(ocl->composite_cones_kernel);
+	if (ocl->calculateVertex_kernel) clReleaseKernel(ocl->calculateVertex_kernel);
+	if (ocl->tileCulling_kernel) clReleaseKernel(ocl->tileCulling_kernel);
+	if (ocl->shadePixels_kernel) clReleaseKernel(ocl->shadePixels_kernel);
 
 	if (ocl->program) clReleaseProgram(ocl->program);
 	if (ocl->queue) clReleaseCommandQueue(ocl->queue);
