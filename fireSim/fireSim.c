@@ -143,7 +143,7 @@ int findClosestObjectToViewCenter(
 			float geometryDist = seekerImageDistances[pixelIdx];
 
 			// Object is occluded if geometry is closer (with small tolerance)
-			if (geometryDist > 0.0f && geometryDist < dist - 0.1f) {
+			if (geometryDist > 0.0f && geometryDist < dist - 10.1f) {
 				continue;
 			}
 		}
@@ -192,15 +192,22 @@ void InitializeIRST(struct Camera *mainRenderingCamera, struct IRSearchAndTrack 
 	irst->lockedTargetId = -1;
 	irst->selectedTargetId = -1;
 	irst->lockTime = 0.0f;
+	irst->requiredScans = 5; // Require 5 consecutive successful scans before displaying
+
+	// Initialize tracking state
+	for (int i = 0; i < IRST_TRACKING_LIMIT; i++) {
+		irst->trackedTargets[i] = NULL;
+		irst->scanCount[i] = 0;
+	}
 }
 
 void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack *irst, float deltaTime) {
-	// Update seeker position to match the main camera (e.g., the aircraft)
+
 	irst->seekerCamera.ray.origin[0] = irst->mainRenderingCamera->ray.origin[0];
 	irst->seekerCamera.ray.origin[1] = irst->mainRenderingCamera->ray.origin[1];
 	irst->seekerCamera.ray.origin[2] = irst->mainRenderingCamera->ray.origin[2];
 
-	// --- Target Tracking Logic ---
+	// Target Tracking Logic
 	if (irst->lockedTargetId != -1) {
 		bool targetStillExists = false;
 		for (int i = 0; i < allMissiles->count; i++) {
@@ -245,7 +252,6 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		}
 	}
 
-	// --- Search Pattern Logic (if not locked) ---
 	if (irst->lockedTargetId == -1) {
 		float fovHalfRad = (irst->seekerFov / 2.0f) * (M_PI / 180.0f);
 		float searchStep = irst->tiltSpeed * deltaTime * 5.0f;
@@ -288,7 +294,6 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		normalize3(irst->seekerCamera.ray.direction);
 	}
 
-	// --- Collect and Evaluate Targets ---
 	float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
 	float objTemp[MAX_FIRE_SIMS];
 	struct Missile *potentialTargets[MAX_FIRE_SIMS];
@@ -312,7 +317,6 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		}
 	}
 
-	// Find the best target in the current seeker view (for auto-tracking)
 	int bestIdx = findClosestObjectToViewCenter(
 		irst->seekerCamera.ray.origin,
 		irst->seekerCamera.ray.direction,
@@ -320,10 +324,8 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		objX, objY, objZ, objTemp, irst->seekerDepthMap,
 		count, 0.2f, 0.5f, 0.3f);
 
-	// --- Update Target Lock and Screen Projection ---
-	irst->targetCount = 0; // Clear previous screen targets
+	irst->targetCount = 0;
 
-	// Auto-lock logic (only if no manual selection is active)
 	if (irst->selectedTargetId == -1) {
 		if (bestIdx != -1) {
 			irst->lockedTarget = potentialTargets[bestIdx];
@@ -344,42 +346,39 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		}
 	}
 
-	// Project all visible targets to the screen
+	// Track which missiles were successfully scanned this frame
+	bool scannedThisFrame[MAX_FIRE_SIMS] = {false};
+
+	// Project all potential targets to main screen space for display
 	for (int i = 0; i < count; i++) {
 		float toObj[3] = {objX[i] - irst->mainRenderingCamera->ray.origin[0],
 						  objY[i] - irst->mainRenderingCamera->ray.origin[1],
 						  objZ[i] - irst->mainRenderingCamera->ray.origin[2]};
 
-		// Calculate depth (forward projection)
 		float *forward = irst->mainRenderingCamera->ray.direction;
 		float zProj = dot3(toObj, forward);
 
-		if (zProj <= 0.01f) continue; // Behind camera
+		if (zProj <= 0.01f) continue;
 
-		// Check if target is within the main camera's view (basic frustum check)
 		float toObjDist = sqrtf(toObj[0] * toObj[0] + toObj[1] * toObj[1] + toObj[2] * toObj[2]);
 		if (toObjDist < 0.001f) continue;
 
 		float toObjNorm[3] = {toObj[0] / toObjDist, toObj[1] / toObjDist, toObj[2] / toObjDist};
 		if (dot3(toObjNorm, forward) < cosf(irst->mainRenderingCamera->fov / 2.0f)) continue;
 
-		// Build camera basis vectors EXACTLY like OpenCL kernel
 		float worldUp[3] = {0.0f, 1.0f, 0.0f};
 
-		// right = normalize(cross(forward, worldUp))
 		float rightVec[3];
 		rightVec[0] = forward[1] * worldUp[2] - forward[2] * worldUp[1];
 		rightVec[1] = forward[2] * worldUp[0] - forward[0] * worldUp[2];
 		rightVec[2] = forward[0] * worldUp[1] - forward[1] * worldUp[0];
 		normalize3(rightVec);
 
-		// up = cross(right, forward)
 		float upVec[3];
 		upVec[0] = rightVec[1] * forward[2] - rightVec[2] * forward[1];
 		upVec[1] = rightVec[2] * forward[0] - rightVec[0] * forward[2];
 		upVec[2] = rightVec[0] * forward[1] - rightVec[1] * forward[0];
 
-		// Match OpenCL projection exactly
 		float invFov = 1.0f / irst->mainRenderingCamera->fov;
 		float halfWidth = irst->mainScreenWidth * 0.5f;
 		float halfHeight = irst->mainScreenHeight * 0.5f;
@@ -391,14 +390,139 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		float screenX = xProj * scale * halfWidth + halfWidth;
 		float screenY = -yProj * scale * halfHeight + halfHeight; // Note the negation!
 
-		if (irst->targetCount < IRST_TRECKKING_LIMIT) {
-			irst->targetScreenX[irst->targetCount] = screenX;
-			irst->targetScreenY[irst->targetCount] = screenY;
-			irst->targetTemperature[irst->targetCount] = objTemp[i];
-			irst->targetPositionX[irst->targetCount] = objX[i];
-			irst->targetPositionY[irst->targetCount] = objY[i];
-			irst->targetPositionZ[irst->targetCount] = objZ[i];
-			irst->targetCount++;
+		// Check if target is occluded by geometry in the IRST seeker depth map
+		// Calculate position in seeker image space to check depth buffer
+		float seekerToObj[3] = {objX[i] - irst->seekerCamera.ray.origin[0],
+								objY[i] - irst->seekerCamera.ray.origin[1],
+								objZ[i] - irst->seekerCamera.ray.origin[2]};
+		float seekerDist = sqrtf(seekerToObj[0] * seekerToObj[0] +
+								 seekerToObj[1] * seekerToObj[1] +
+								 seekerToObj[2] * seekerToObj[2]);
+
+		bool targetVisible = true;
+
+		if (seekerDist > 0.001f) {
+			float seekerToObjNorm[3] = {seekerToObj[0] / seekerDist,
+										seekerToObj[1] / seekerDist,
+										seekerToObj[2] / seekerDist};
+
+			float *seekerDir = irst->seekerCamera.ray.direction;
+			float seekerCosAngle = dot3(seekerDir, seekerToObjNorm);
+			float seekerFovHalfRad = (irst->seekerFov / 2.0f) * (M_PI / 180.0f);
+
+			// Only check occlusion if target is in seeker FOV
+			if (seekerCosAngle >= cosf(seekerFovHalfRad)) {
+				// Map to seeker image coordinates
+				float seekerRight[3], seekerUp[3];
+				if (fabsf(seekerDir[1]) < 0.99f) {
+					seekerRight[0] = seekerDir[2];
+					seekerRight[1] = 0.0f;
+					seekerRight[2] = -seekerDir[0];
+				} else {
+					seekerRight[0] = 1.0f;
+					seekerRight[1] = 0.0f;
+					seekerRight[2] = 0.0f;
+				}
+				normalize3(seekerRight);
+				seekerUp[0] = seekerRight[1] * seekerDir[2] - seekerRight[2] * seekerDir[1];
+				seekerUp[1] = seekerRight[2] * seekerDir[0] - seekerRight[0] * seekerDir[2];
+				seekerUp[2] = seekerRight[0] * seekerDir[1] - seekerRight[1] * seekerDir[0];
+
+				float seekerXProj = dot3(seekerToObjNorm, seekerRight);
+				float seekerYProj = dot3(seekerToObjNorm, seekerUp);
+
+				float pixelX = (seekerXProj / tanf(seekerFovHalfRad)) * 0.5f + 0.5f;
+				float pixelY = (seekerYProj / tanf(seekerFovHalfRad)) * 0.5f + 0.5f;
+
+				int px = (int)(pixelX * MISSILE_SEEKER_SIZE);
+				int py = (int)(pixelY * MISSILE_SEEKER_SIZE);
+
+				// Check occlusion in seeker depth buffer
+				if (px >= 0 && px < MISSILE_SEEKER_SIZE && py >= 0 && py < MISSILE_SEEKER_SIZE) {
+					int pixelIdx = py * MISSILE_SEEKER_SIZE + px;
+					float geometryDist = irst->seekerDepthMap[pixelIdx];
+
+					// Target is occluded if geometry is significantly closer
+					if (geometryDist > 0.0f && geometryDist < seekerDist - 10.0f) {
+						targetVisible = false;
+					}
+				}
+			} else {
+				targetVisible = false; // Not in seeker FOV
+			}
+		}
+
+		// Multi-scan tracking logic
+		struct Missile *currentMissile = potentialTargets[i];
+		int trackSlot = -1;
+
+		// Find existing tracking slot for this missile
+		for (int j = 0; j < IRST_TRACKING_LIMIT; j++) {
+			if (irst->trackedTargets[j] == currentMissile) {
+				trackSlot = j;
+				break;
+			}
+		}
+
+		if (targetVisible) {
+			// Target is visible - increment scan count
+			if (trackSlot == -1) {
+				// Find empty slot for new target
+				for (int j = 0; j < IRST_TRACKING_LIMIT; j++) {
+					if (irst->trackedTargets[j] == NULL) {
+						trackSlot = j;
+						irst->trackedTargets[j] = currentMissile;
+						irst->scanCount[j] = 1;
+						break;
+					}
+				}
+			} else {
+				// Increment scan count for existing target
+				irst->scanCount[trackSlot]++;
+			}
+
+			if (trackSlot != -1) {
+				scannedThisFrame[trackSlot] = true;
+
+				// Only display if we have enough scans
+				if (irst->scanCount[trackSlot] >= irst->requiredScans && irst->targetCount < IRST_TRACKING_LIMIT) {
+					irst->targetScreenX[irst->targetCount] = screenX;
+					irst->targetScreenY[irst->targetCount] = screenY;
+					irst->targetTemperature[irst->targetCount] = objTemp[i];
+					irst->targetPositionX[irst->targetCount] = objX[i];
+					irst->targetPositionY[irst->targetCount] = objY[i];
+					irst->targetPositionZ[irst->targetCount] = objZ[i];
+					irst->targetCount++;
+				}
+			}
+		} else {
+			// Target not visible - reset tracking if it was being tracked
+			if (trackSlot != -1) {
+				irst->trackedTargets[trackSlot] = NULL;
+				irst->scanCount[trackSlot] = 0;
+			}
+		}
+	}
+
+	// Reset any tracked targets that weren't scanned this frame
+	for (int i = 0; i < IRST_TRACKING_LIMIT; i++) {
+		if (irst->trackedTargets[i] != NULL && !scannedThisFrame[i]) {
+			// Check if the missile still exists and is active
+			bool stillExists = false;
+			for (int j = 0; j < allMissiles->count; j++) {
+				if (allMissiles->missiles[j] == irst->trackedTargets[i] && allMissiles->active[j]) {
+					stillExists = true;
+					break;
+				}
+			}
+
+			if (!stillExists) {
+				// Missile destroyed or inactive - clear tracking
+				irst->trackedTargets[i] = NULL;
+				irst->scanCount[i] = 0;
+			}
+			// If missile still exists but wasn't scanned, keep tracking but don't reset
+			// (allows brief occlusion without losing all progress)
 		}
 	}
 }

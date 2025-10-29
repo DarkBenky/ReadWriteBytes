@@ -459,6 +459,8 @@ int renderDepthBuffer(
 
 		memcpy(out_depth_cpu, mapped_ptr, buffer_size);
 
+		
+
 		err = clEnqueueUnmapMemObject(ocl->queue, output_buffer, mapped_ptr, 0, NULL, NULL);
 		if (err != CL_SUCCESS) {
 			fprintf(stderr, "Error unmapping depth buffer: %s (%d)\n", clErrorString(err), err);
@@ -5501,6 +5503,23 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
+		// render depth map for IRST
+		float tempTimeTookMs = 0.0f;
+		renderDepthBuffer(&ocl,
+						  ocl.buffer_triangle_v1,
+						  ocl.buffer_triangle_v2,
+						  ocl.buffer_triangle_v3,
+						  ocl.buffer_triangle_normals,
+						  ocl.buffer_seeker_distances,
+						  triangles->count,
+						  irst.seekerCamera.ray.origin,
+						  irst.seekerCamera.ray.direction,
+						  irst.seekerCamera.fov,
+						  MISSILE_SEEKER_SIZE,
+						  MISSILE_SEEKER_SIZE,
+						  irst.seekerDepthMap,
+						  &tempTimeTookMs,
+						  0);
 		IRSearchAndTrackStep(&missiles, &irst, dt);
 		render(particles, &camera, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles, &missiles, &irst);
 		clock_t endRenderTime = clock();

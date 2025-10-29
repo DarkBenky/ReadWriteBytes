@@ -2,8 +2,8 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 250
-#define MISSILE_SEEKER_SIZE 64
-#define IRST_TRECKKING_LIMIT 16
+#define MISSILE_SEEKER_SIZE 96
+#define IRST_TRACKING_LIMIT 16
 #define MAX_FIRE_SIMS 16
 #define G 9.81f
 #define MAX_FLOAT 3.402823466e+38F
@@ -61,12 +61,12 @@ struct IRSearchAndTrack {
     float tiltSpeed;
     float searchYaw;        // Individual search yaw angle for this missile
     float searchPitch;      // Individual search pitch angle for this missile
-    float targetScreenX[IRST_TRECKKING_LIMIT];
-    float targetScreenY[IRST_TRECKKING_LIMIT];
-    float targetTemperature[IRST_TRECKKING_LIMIT];
-    float targetPositionX[IRST_TRECKKING_LIMIT];
-    float targetPositionY[IRST_TRECKKING_LIMIT];
-    float targetPositionZ[IRST_TRECKKING_LIMIT];
+    float targetScreenX[IRST_TRACKING_LIMIT];
+    float targetScreenY[IRST_TRACKING_LIMIT];
+    float targetTemperature[IRST_TRACKING_LIMIT];
+    float targetPositionX[IRST_TRACKING_LIMIT];
+    float targetPositionY[IRST_TRACKING_LIMIT];
+    float targetPositionZ[IRST_TRACKING_LIMIT];
     int selectedTargetId;
     int targetCount;
     int mainScreenWidth;
@@ -74,6 +74,11 @@ struct IRSearchAndTrack {
     struct Missile *lockedTarget;
     int lockedTargetId;
     float lockTime;
+    
+    // Multi-scan tracking state
+    struct Missile *trackedTargets[IRST_TRACKING_LIMIT]; // Pointers to missiles being tracked
+    int scanCount[IRST_TRACKING_LIMIT];                   // Number of consecutive successful scans per target
+    int requiredScans;                                     // Number of scans needed before displaying target
 };
 
 struct Missile {

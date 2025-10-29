@@ -30,8 +30,8 @@ The results show that writing frames is faster than reading them, with write ope
 
 - [ ] scale everything to real life scale (1.0f == 1 meter)
 - [ ] set up the githup copilot rules **https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?tool=visualstudio**
-- [ ] misslie view display
-- [ ] missiel lunch ( lock -> lunch -> if loss lock scan -> target )
+- [X] misslie view display
+- [X] missiel lunch ( lock -> lunch -> if loss lock scan -> target )
 - [X] Move guidanceGain to missile struct
 - [ ] Move fire sim to same open cl structure
   - [ ] Try it again
