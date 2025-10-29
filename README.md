@@ -27,7 +27,7 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
-
+- [ ] render wide view from position and direction of missile for check of collision
 - [ ] scale everything to real life scale (1.0f == 1 meter)
 - [ ] set up the githup copilot rules **https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?tool=visualstudio**
 - [X] misslie view display
