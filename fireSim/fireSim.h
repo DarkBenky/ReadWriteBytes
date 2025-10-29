@@ -44,13 +44,17 @@ enum MissileLock{
 
 struct Seeker {
     float seekerDepthMap[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE];
+    float seekerDepthWideView[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE]; // Wider FOV depth map collision detection
     struct Camera seekerCamera;
     float seekerFov;
     float searchMultiplayer;
     float tiltSpeed;
     enum  MissileLock lockState;
-    float searchYaw;        // Individual search yaw angle for this missile
-    float searchPitch;      // Individual search pitch angle for this missile
+    float searchYaw;
+    float searchPitch;
+    struct Missile *trackedTarget;
+    int consecutiveDetections;
+    int requiredDetections;
 };
 
 struct IRSearchAndTrack {

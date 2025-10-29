@@ -27,53 +27,22 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on priority
+- [ ] add same logic for searching mode in missile as in irst so it will need multiple successful lock to track target
 - [ ] render wide view from position and direction of missile for check of collision
 - [ ] scale everything to real life scale (1.0f == 1 meter)
 - [ ] set up the githup copilot rules **https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?tool=visualstudio**
-- [X] misslie view display
-- [X] missiel lunch ( lock -> lunch -> if loss lock scan -> target )
-- [X] Move guidanceGain to missile struct
-- [ ] Move fire sim to same open cl structure
-  - [ ] Try it again
-- [X] Simulate fluid on gpu move the code to separate file
-- [X] fire sim
-```c
-  type Particles struct {
-      float posX[count]
-      float posY[count]
-      float posZ[count]
-      float velX[count]
-      float velY[count]
-      float velZ[count]
-      float lifeTime[count]
-      float basePos[3]
-      float baseColor[3]
-      float fireColor[3]
-      float SmokeColor[3]
-      float maxLifeTime
-      Size  float
-    }
-```
-  - [X] run on gpu
-    - [X] move up with some random side wiggle
-    - [X] render color based on the lifetime lerp between base color -> fire color -> smoke color
-  -   [X] when life time is bigger then reset position and life time
-  - [ ] integrate it to main file
-    - [ ] add it to render modes
 - [ ] Add planes and misiles
-  - [ ] render heat in separate buffer
-    - [ ] add data link 
-- [ ] Add Setting for fluid with GUI
+  - [X] render heat in separate buffer
+    - [ ] add data link
+- [ ] Fix wire frame ghosting ![img](wireFrame.png)
 - [ ] Add Antialiasing
   - [X] Normals to enhance it
   - [X] Modified Antialiasing to be dynamic based on render mode
   - [ ] Add TAA
     - [ ] Previous frame buffer
-  - [ ] Add option to enable disable Antialiasing during run
-    - [ ] Add text rendering
+  - [X] Add option to enable disable Antialiasing during run
+    - [X] Add text rendering
   - [ ] Add Timings
-- [ ] Add Pause
-  - [ ] Add Text rendering
 - [ ] BVH c Implementation
 - [ ] Trace Ray Function prototype ![trace diagram](trace.png)
   - [ ] implemented it on your own
@@ -82,14 +51,13 @@ The results show that writing frames is faster than reading them, with write ope
         - [ ] BVH buffer ...
 - [ ] Fix Timings
   - [ ] Add More Timings
-    - [ ] Add timing for rendering of UI
-    - [ ] Add timings for simulations
+    - [ ] Marge It to one struct make it more dynamic mainly the open cl code
+      - [ ] Add timing for rendering of UI
+      - [ ] Add timings for simulations
 - [ ] Distance image normalization
   - [ ] Particle Sim
   - [ ] Triangles
   - [ ] *Note* save real values then before uploading image to Open GL normalize it
-- [ ] Fix wire frame ghosting ![img](wireFrame.png)
-- [ ] render all in open gl remove memory sharing with go code
 - [ ] Fix C reading and writing of BVH / open CL code
   - [ ] Read BVH in C
 - [ ] Fix C reading and writing of BVH / open CL code
@@ -110,10 +78,15 @@ The results show that writing frames is faster than reading them, with write ope
   - [ ] ***Note** can be handled with ray tracing
   - [ ] ***Optional*** add cnn to denoise ray tracer inmplement it in openCL to make it fast
 - [ ] render fluid in c (open gl) and openCL ([link](https://tympanus.net/codrops/2025/02/26/webgpu-fluid-simulations-high-performance-real-time-rendering/))
+- [ ] Add Setting for fluid with GUI -> **Not Important For Now**
 
 ### Add Open GL to the go code to project particles on GPU directly
 - Render headlessly the image and save it in the to drive so the go code can read it
 - [ ] implement
+
+### Not sure what i meant
+- [ ] Move fire sim to same open cl structure -> ***not sure what i meant***
+  - [ ] Try it again
 
 ### Add better timing
 - [ ] add timing
@@ -127,10 +100,41 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] why pragma opm is not helping
 
 ### Graphics Enhancement
-- [ ] Accelerate rendering with CUDA
+- [X] Accelerate rendering with CUDA -> **Using OpenCl/GL for it**
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] render all in open gl remove memory sharing with go code
+- [X] Add Pause
+  - [X] Add Text rendering
+- [X] misslie view display
+- [X] missiel lunch ( lock -> lunch -> if loss lock scan -> target )
+- [X] Move guidanceGain to missile struct
+- [X] Simulate fluid on gpu move the code to separate file
+- [X] fire sim
+```c
+  type Particles struct {
+      float posX[count]
+      float posY[count]
+      float posZ[count]
+      float velX[count]
+      float velY[count]
+      float velZ[count]
+      float lifeTime[count]
+      float basePos[3]
+      float baseColor[3]
+      float fireColor[3]
+      float SmokeColor[3]
+      float maxLifeTime
+      Size  float
+    }
+```
+  - [X] run on gpu -> **keeped on CPU for now**
+    - [X] move up with some random side wiggle
+    - [X] render color based on the lifetime lerp between base color -> fire color -> smoke color
+  -   [X] when life time is bigger then reset position and life time
+  - [X] integrate it to main file
+    - [X] add it to render modes
 - [X] add CohesionForce, ViscosityForce
 - [X] Remove CPU read backs
 - [X] Draw Bounding Box Around the particles

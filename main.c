@@ -846,6 +846,11 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 			float fovRadians = seekerFovDegrees * (M_PI / 180.0f);
 			float FOV = tanf(fovRadians / 2.0f);
 
+			const float wideRadians = 270.f * (M_PI / 180.0f);
+			const float wideFOV = tanf(wideRadians / 2.0f);
+
+			float tempMS = 0.0f;
+
 			renderDepthBuffer(ocl,
 							  ocl->buffer_triangle_v1,
 							  ocl->buffer_triangle_v2,
@@ -859,8 +864,28 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 							  MISSILE_SEEKER_SIZE,
 							  MISSILE_SEEKER_SIZE,
 							  missile->seeker.seekerDepthMap,
-							  &tempTimeTookMs,
+							  &tempMS,
 							  missileCount);
+
+			float tempMS2 = 0.0f;
+
+			renderDepthBuffer(ocl,
+							  ocl->buffer_triangle_v1,
+							  ocl->buffer_triangle_v2,
+							  ocl->buffer_triangle_v3,
+							  ocl->buffer_triangle_normals,
+							  ocl->buffer_seeker_distances,
+							  triangles->count,
+							  missile->seeker.seekerCamera.ray.origin,
+							  missile->bodyOrientation,
+							  wideFOV,
+							  MISSILE_SEEKER_SIZE,
+							  MISSILE_SEEKER_SIZE,
+							  missile->seeker.seekerDepthWideView,
+							  &tempMS2,
+							  missileCount);
+							
+			totalTimeTookMs += tempMS + tempMS2;
 
 			missileCount++;
 		}

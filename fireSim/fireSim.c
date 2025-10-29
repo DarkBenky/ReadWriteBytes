@@ -566,8 +566,11 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.lockState = Lunching;
 	missile->seeker.searchMultiplayer = randRange(1.25f, 2.5f);
 	missile->seeker.tiltSpeed = randRange(0.5f, 3.5f);
-	missile->seeker.searchYaw = randRange(-0.5f, 0.5f);	  // Random starting search position
-	missile->seeker.searchPitch = randRange(-0.3f, 0.3f); // Random starting search position
+	missile->seeker.searchYaw = randRange(-0.5f, 0.5f);
+	missile->seeker.searchPitch = randRange(-0.3f, 0.3f);
+	missile->seeker.trackedTarget = NULL;
+	missile->seeker.consecutiveDetections = 0;
+	missile->seeker.requiredDetections = 3;
 
 	// Core simulation
 	missile->position[0] = randRange(-450.0f, 450.0f);
@@ -792,7 +795,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 		for (int y = 0; y < MISSILE_SEEKER_SIZE; y++) {
 			for (int x = 0; x < MISSILE_SEEKER_SIZE; x++) {
 				int i = y * MISSILE_SEEKER_SIZE + x;
-				float dist = missile->seeker.seekerDepthMap[i];
+				float dist = missile->seeker.seekerDepthWideView[i];
 
 				if (dist > 0.001f && dist < avoidanceThreshold) {
 					closePixels++;
@@ -1134,54 +1137,65 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			count, 0.4f, 0.3f, 0.3f);
 
 		if (bestIdx >= 0 && bestIdx < count) {
-			missile->targetIdx = bestIdx;
+			struct Missile *detectedTarget = allMissiles->missiles[bestIdx];
 
-			// Calculate basic distance and intercept time
-			float toTarget[3] = {
-				objX[bestIdx] - rayOrigin[0],
-				objY[bestIdx] - rayOrigin[1],
-				objZ[bestIdx] - rayOrigin[2]};
-			float dist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
-
-			if (dist > 0.1f) {
-				// Simple lead calculation: estimate intercept time and predict target position
-				float missileSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
-										   missile->velocity[1] * missile->velocity[1] +
-										   missile->velocity[2] * missile->velocity[2]);
-				if (missileSpeed < 50.0f) missileSpeed = 200.0f; // Use estimated speed for newly launched missiles
-
-				// FIX: Remove incorrect SCALE multiplication - velocity already in m/s
-				float interceptTime = dist / (missileSpeed + 0.001f);
-				interceptTime = fminf(interceptTime, 5.0f); // Clamp prediction to 5 seconds
-
-				// Predict target position with lead
-				float leadPos[3] = {
-					objX[bestIdx] + objVelX[bestIdx] * interceptTime,
-					objY[bestIdx] + objVelY[bestIdx] * interceptTime,
-					objZ[bestIdx] + objVelZ[bestIdx] * interceptTime};
-
-				// Calculate direction to lead position
-				float toLeadTarget[3] = {
-					leadPos[0] - rayOrigin[0],
-					leadPos[1] - rayOrigin[1],
-					leadPos[2] - rayOrigin[2]};
-				float leadDist = sqrtf(toLeadTarget[0] * toLeadTarget[0] +
-									   toLeadTarget[1] * toLeadTarget[1] +
-									   toLeadTarget[2] * toLeadTarget[2]);
-
-				if (leadDist > 0.1f) {
-					rayDir[0] = toLeadTarget[0] / leadDist;
-					rayDir[1] = toLeadTarget[1] / leadDist;
-					rayDir[2] = toLeadTarget[2] / leadDist;
-				}
-
-				// FIX: Store LEAD position for consistent PN guidance
-				missile->targetPosition[0] = leadPos[0];
-				missile->targetPosition[1] = leadPos[1];
-				missile->targetPosition[2] = leadPos[2];
-
-				missile->seeker.lockState = Tracking;
+			// Multi-scan tracking logic
+			if (missile->seeker.trackedTarget == detectedTarget) {
+				missile->seeker.consecutiveDetections++;
+			} else {
+				missile->seeker.trackedTarget = detectedTarget;
+				missile->seeker.consecutiveDetections = 1;
 			}
+
+			// Only lock if we have enough consecutive detections
+			if (missile->seeker.consecutiveDetections >= missile->seeker.requiredDetections) {
+				missile->targetIdx = bestIdx;
+
+				// Calculate basic distance and intercept time
+				float toTarget[3] = {
+					objX[bestIdx] - rayOrigin[0],
+					objY[bestIdx] - rayOrigin[1],
+					objZ[bestIdx] - rayOrigin[2]};
+				float dist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
+
+				if (dist > 0.1f) {
+					float missileSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
+											   missile->velocity[1] * missile->velocity[1] +
+											   missile->velocity[2] * missile->velocity[2]);
+					if (missileSpeed < 50.0f) missileSpeed = 200.0f;
+
+					float interceptTime = dist / (missileSpeed + 0.001f);
+					interceptTime = fminf(interceptTime, 5.0f);
+
+					float leadPos[3] = {
+						objX[bestIdx] + objVelX[bestIdx] * interceptTime,
+						objY[bestIdx] + objVelY[bestIdx] * interceptTime,
+						objZ[bestIdx] + objVelZ[bestIdx] * interceptTime};
+
+					float toLeadTarget[3] = {
+						leadPos[0] - rayOrigin[0],
+						leadPos[1] - rayOrigin[1],
+						leadPos[2] - rayOrigin[2]};
+					float leadDist = sqrtf(toLeadTarget[0] * toLeadTarget[0] +
+										   toLeadTarget[1] * toLeadTarget[1] +
+										   toLeadTarget[2] * toLeadTarget[2]);
+
+					if (leadDist > 0.1f) {
+						rayDir[0] = toLeadTarget[0] / leadDist;
+						rayDir[1] = toLeadTarget[1] / leadDist;
+						rayDir[2] = toLeadTarget[2] / leadDist;
+					}
+
+					missile->targetPosition[0] = leadPos[0];
+					missile->targetPosition[1] = leadPos[1];
+					missile->targetPosition[2] = leadPos[2];
+
+					missile->seeker.lockState = Tracking;
+				}
+			}
+		} else {
+			missile->seeker.trackedTarget = NULL;
+			missile->seeker.consecutiveDetections = 0;
 		}
 
 	} else if (missile->seeker.lockState == Tracking) {
@@ -1264,76 +1278,83 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			count, 0.5f, 0.3f, 0.2f);
 
 		if (bestIdx >= 0 && bestIdx < count) {
-			missile->targetIdx = bestIdx;
+			struct Missile *detectedTarget = allMissiles->missiles[bestIdx];
 
-			// Calculate basic distance and intercept time
-			float toTarget[3] = {
-				objX[bestIdx] - rayOrigin[0],
-				objY[bestIdx] - rayOrigin[1],
-				objZ[bestIdx] - rayOrigin[2]};
-			float dist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
+			// Verify we're still tracking the same target
+			if (missile->seeker.trackedTarget == detectedTarget) {
+				missile->seeker.consecutiveDetections++;
+			} else {
+				missile->seeker.trackedTarget = NULL;
+				missile->seeker.consecutiveDetections = 0;
+				missile->seeker.lockState = Searching;
+			}
 
-			if (dist > 0.1f) {
-				float maxTilt = missile->seeker.tiltSpeed * deltaTime;
+			if (missile->seeker.lockState == Tracking) {
+				missile->targetIdx = bestIdx;
 
-				// Calculate missile speed for lead prediction
-				float missileSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
-										   missile->velocity[1] * missile->velocity[1] +
-										   missile->velocity[2] * missile->velocity[2]);
-				if (missileSpeed < 50.0f) missileSpeed = 200.0f;
+				float toTarget[3] = {
+					objX[bestIdx] - rayOrigin[0],
+					objY[bestIdx] - rayOrigin[1],
+					objZ[bestIdx] - rayOrigin[2]};
+				float dist = sqrtf(toTarget[0] * toTarget[0] + toTarget[1] * toTarget[1] + toTarget[2] * toTarget[2]);
 
-				// FIX: Remove incorrect SCALE multiplication
-				float interceptTime = dist / (missileSpeed + 0.001f);
-				interceptTime = fminf(interceptTime, 5.0f);
+				if (dist > 0.1f) {
+					float maxTilt = missile->seeker.tiltSpeed * deltaTime;
 
-				// Predict target position with lead
-				float leadPos[3] = {
-					objX[bestIdx] + objVelX[bestIdx] * interceptTime,
-					objY[bestIdx] + objVelY[bestIdx] * interceptTime,
-					objZ[bestIdx] + objVelZ[bestIdx] * interceptTime};
+					float missileSpeed = sqrtf(missile->velocity[0] * missile->velocity[0] +
+											   missile->velocity[1] * missile->velocity[1] +
+											   missile->velocity[2] * missile->velocity[2]);
+					if (missileSpeed < 50.0f) missileSpeed = 200.0f;
 
-				// Calculate direction to lead position
-				float toLeadTarget[3] = {
-					leadPos[0] - rayOrigin[0],
-					leadPos[1] - rayOrigin[1],
-					leadPos[2] - rayOrigin[2]};
-				float leadDist = sqrtf(toLeadTarget[0] * toLeadTarget[0] +
-									   toLeadTarget[1] * toLeadTarget[1] +
-									   toLeadTarget[2] * toLeadTarget[2]);
+					float interceptTime = dist / (missileSpeed + 0.001f);
+					interceptTime = fminf(interceptTime, 5.0f);
 
-				if (leadDist > 0.1f) {
-					float targetDir[3] = {toLeadTarget[0] / leadDist,
-										  toLeadTarget[1] / leadDist,
-										  toLeadTarget[2] / leadDist};
+					float leadPos[3] = {
+						objX[bestIdx] + objVelX[bestIdx] * interceptTime,
+						objY[bestIdx] + objVelY[bestIdx] * interceptTime,
+						objZ[bestIdx] + objVelZ[bestIdx] * interceptTime};
 
-					// Smoothly slew seeker toward lead target
-					float dot = rayDir[0] * targetDir[0] + rayDir[1] * targetDir[1] + rayDir[2] * targetDir[2];
-					dot = fmaxf(-1.0f, fminf(1.0f, dot));
+					float toLeadTarget[3] = {
+						leadPos[0] - rayOrigin[0],
+						leadPos[1] - rayOrigin[1],
+						leadPos[2] - rayOrigin[2]};
+					float leadDist = sqrtf(toLeadTarget[0] * toLeadTarget[0] +
+										   toLeadTarget[1] * toLeadTarget[1] +
+										   toLeadTarget[2] * toLeadTarget[2]);
 
-					float angle = acosf(dot);
-					float t = (angle > 0.001f) ? fminf(maxTilt / angle, 1.0f) : 1.0f;
+					if (leadDist > 0.1f) {
+						float targetDir[3] = {toLeadTarget[0] / leadDist,
+											  toLeadTarget[1] / leadDist,
+											  toLeadTarget[2] / leadDist};
 
-					rayDir[0] = rayDir[0] * (1.0f - t) + targetDir[0] * t;
-					rayDir[1] = rayDir[1] * (1.0f - t) + targetDir[1] * t;
-					rayDir[2] = rayDir[2] * (1.0f - t) + targetDir[2] * t;
-					normalize3(rayDir);
+						float dot = rayDir[0] * targetDir[0] + rayDir[1] * targetDir[1] + rayDir[2] * targetDir[2];
+						dot = fmaxf(-1.0f, fminf(1.0f, dot));
+
+						float angle = acosf(dot);
+						float t = (angle > 0.001f) ? fminf(maxTilt / angle, 1.0f) : 1.0f;
+
+						rayDir[0] = rayDir[0] * (1.0f - t) + targetDir[0] * t;
+						rayDir[1] = rayDir[1] * (1.0f - t) + targetDir[1] * t;
+						rayDir[2] = rayDir[2] * (1.0f - t) + targetDir[2] * t;
+						normalize3(rayDir);
+					}
+
+					missile->targetPosition[0] = leadPos[0];
+					missile->targetPosition[1] = leadPos[1];
+					missile->targetPosition[2] = leadPos[2];
+
+					missile->targetDirection[0] = rayDir[0];
+					missile->targetDirection[1] = rayDir[1];
+					missile->targetDirection[2] = rayDir[2];
+
+					missile->prevLOS[0] = rayDir[0];
+					missile->prevLOS[1] = rayDir[1];
+					missile->prevLOS[2] = rayDir[2];
 				}
-
-				// FIX: Store LEAD position for consistent PN guidance
-				missile->targetPosition[0] = leadPos[0];
-				missile->targetPosition[1] = leadPos[1];
-				missile->targetPosition[2] = leadPos[2];
-
-				// Update target direction for missile guidance
-				missile->targetDirection[0] = rayDir[0];
-				missile->targetDirection[1] = rayDir[1];
-				missile->targetDirection[2] = rayDir[2];
-
-				missile->prevLOS[0] = rayDir[0];
-				missile->prevLOS[1] = rayDir[1];
-				missile->prevLOS[2] = rayDir[2];
 			}
 		} else {
+			missile->seeker.trackedTarget = NULL;
+			missile->seeker.consecutiveDetections = 0;
 			missile->seeker.lockState = Searching;
 		}
 	}
