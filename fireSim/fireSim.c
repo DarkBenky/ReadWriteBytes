@@ -571,6 +571,7 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.trackedTarget = NULL;
 	missile->seeker.consecutiveDetections = 0;
 	missile->seeker.requiredDetections = 3;
+	missile->seeker.closePointsCount = 0;
 
 	// Core simulation
 	missile->position[0] = randRange(-450.0f, 450.0f);
@@ -782,8 +783,8 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 	if (*active) {
 		float minDistance = MAX_FLOAT;
 		int closePixels = 0;
-		const float avoidanceThreshold = 200.0f;
-		const float criticalThreshold = 40.0f;
+		const float avoidanceThreshold = 250.0f;
+		const float criticalThreshold = 100.0f;
 
 		int regions[9] = {0};
 		float regionMinDist[9];
@@ -792,12 +793,34 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 
 		int gridSize = MISSILE_SEEKER_SIZE / 3;
 
+		// Extract close points from wide depth view
+		missile->seeker.closePointsCount = 0;
+		float *wideDir = missile->bodyOrientation;
+		float wideRight[3], wideUp[3];
+		if (fabsf(wideDir[1]) < 0.99f) {
+			wideRight[0] = wideDir[2];
+			wideRight[1] = 0.0f;
+			wideRight[2] = -wideDir[0];
+		} else {
+			wideRight[0] = 1.0f;
+			wideRight[1] = 0.0f;
+			wideRight[2] = 0.0f;
+		}
+		normalize3(wideRight);
+		wideUp[0] = wideRight[1] * wideDir[2] - wideRight[2] * wideDir[1];
+		wideUp[1] = wideRight[2] * wideDir[0] - wideRight[0] * wideDir[2];
+		wideUp[2] = wideRight[0] * wideDir[1] - wideRight[1] * wideDir[0];
+		normalize3(wideUp);
+
+		const float wideRadians = 270.0f * (M_PI / 180.0f);
+		const float wideFOV = tanf(wideRadians / 2.0f);
+
 		for (int y = 0; y < MISSILE_SEEKER_SIZE; y++) {
 			for (int x = 0; x < MISSILE_SEEKER_SIZE; x++) {
 				int i = y * MISSILE_SEEKER_SIZE + x;
 				float dist = missile->seeker.seekerDepthWideView[i];
 
-				if (dist > 0.001f && dist < avoidanceThreshold) {
+				if (dist > 0.01f && dist < avoidanceThreshold) {
 					closePixels++;
 					if (dist < minDistance) minDistance = dist;
 
@@ -811,13 +834,68 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 					if (dist < regionMinDist[regionIdx]) {
 						regionMinDist[regionIdx] = dist;
 					}
+
+					// Store close points (limit to CLOSE_POINT_COUNT closest)
+					if (dist < 100.0f && missile->seeker.closePointsCount < CLOSE_POINT_COUNT) {
+						float ndcX = (float)x / (float)MISSILE_SEEKER_SIZE * 2.0f - 1.0f;
+						float ndcY = 1.0f - (float)y / (float)MISSILE_SEEKER_SIZE * 2.0f;
+
+						float rayDirX = wideDir[0] + wideRight[0] * ndcX * wideFOV + wideUp[0] * ndcY * wideFOV;
+						float rayDirY = wideDir[1] + wideRight[1] * ndcX * wideFOV + wideUp[1] * ndcY * wideFOV;
+						float rayDirZ = wideDir[2] + wideRight[2] * ndcX * wideFOV + wideUp[2] * ndcY * wideFOV;
+						float rdLen = sqrtf(rayDirX * rayDirX + rayDirY * rayDirY + rayDirZ * rayDirZ);
+						rayDirX /= rdLen;
+						rayDirY /= rdLen;
+						rayDirZ /= rdLen;
+
+						int idx = missile->seeker.closePointsCount;
+						missile->seeker.closePointsX[idx] = rayOrigin[0] + rayDirX * dist;
+						missile->seeker.closePointsY[idx] = rayOrigin[1] + rayDirY * dist;
+						missile->seeker.closePointsZ[idx] = rayOrigin[2] + rayDirZ * dist;
+						missile->seeker.closePointsDist[idx] = dist;
+						missile->seeker.closePointsCount++;
+					}
+				}
+			}
+		}
+
+		// Check against cached close points for additional collision detection
+		for (int i = 0; i < missile->seeker.closePointsCount; i++) {
+			float dx = missile->seeker.closePointsX[i] - missile->position[0];
+			float dy = missile->seeker.closePointsY[i] - missile->position[1];
+			float dz = missile->seeker.closePointsZ[i] - missile->position[2];
+			float distToPoint = sqrtf(dx * dx + dy * dy + dz * dz);
+
+			if (distToPoint < minDistance) {
+				minDistance = distToPoint;
+			}
+
+			// Update threat regions based on close points
+			if (distToPoint < avoidanceThreshold) {
+				float toPointNorm[3] = {dx / distToPoint, dy / distToPoint, dz / distToPoint};
+				float dotForward = dot3(missile->bodyOrientation, toPointNorm);
+
+				if (dotForward > 0.5f) { // Point is ahead
+					float dotRight = dot3(wideRight, toPointNorm);
+					float dotUp = dot3(wideUp, toPointNorm);
+
+					int rx = (dotRight > 0.3f) ? 2 : (dotRight < -0.3f) ? 0
+																		: 1;
+					int ry = (dotUp > 0.3f) ? 0 : (dotUp < -0.3f) ? 2
+																  : 1;
+					int regionIdx = ry * 3 + rx;
+
+					regions[regionIdx]++;
+					if (distToPoint < regionMinDist[regionIdx]) {
+						regionMinDist[regionIdx] = distToPoint;
+					}
 				}
 			}
 		}
 
 		float groundClearance = missile->position[1];
 		float minAltitude = 10.0f;
-		bool nearGround = groundClearance < 25.0f;
+		bool nearGround = groundClearance < 75.0f;
 
 		int leftThreat = regions[0] + regions[3] + regions[6];
 		int rightThreat = regions[2] + regions[5] + regions[8];
@@ -921,6 +999,24 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 					avoidanceDir[0] -= up[0] * escapeY * 0.5f;
 					avoidanceDir[1] -= up[1] * escapeY * 0.5f;
 					avoidanceDir[2] -= up[2] * escapeY * 0.5f;
+				}
+			}
+
+			// Hybrid: Add repulsion vectors from cached close points
+			for (int i = 0; i < missile->seeker.closePointsCount; i++) {
+				float dx = missile->position[0] - missile->seeker.closePointsX[i];
+				float dy = missile->position[1] - missile->seeker.closePointsY[i];
+				float dz = missile->position[2] - missile->seeker.closePointsZ[i];
+				float distToPoint = sqrtf(dx * dx + dy * dy + dz * dz);
+
+				if (distToPoint < avoidanceThreshold && distToPoint > 0.01f) {
+					float repulsionStrength = (1.0f - distToPoint / avoidanceThreshold);
+					repulsionStrength = repulsionStrength * repulsionStrength; // Square for stronger close-range effect
+
+					float repulsionDir[3] = {dx / distToPoint, dy / distToPoint, dz / distToPoint};
+					avoidanceDir[0] += repulsionDir[0] * repulsionStrength * 0.5f;
+					avoidanceDir[1] += repulsionDir[1] * repulsionStrength * 0.5f;
+					avoidanceDir[2] += repulsionDir[2] * repulsionStrength * 0.5f;
 				}
 			}
 

@@ -5,6 +5,7 @@
 #define MISSILE_SEEKER_SIZE 96
 #define IRST_TRACKING_LIMIT 16
 #define MAX_FIRE_SIMS 16
+#define CLOSE_POINT_COUNT 64
 #define G 9.81f
 #define MAX_FLOAT 3.402823466e+38F
 
@@ -44,7 +45,7 @@ enum MissileLock{
 
 struct Seeker {
     float seekerDepthMap[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE];
-    float seekerDepthWideView[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE]; // Wider FOV depth map collision detection
+    float seekerDepthWideView[MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE]; // 270deg FOV for collision
     struct Camera seekerCamera;
     float seekerFov;
     float searchMultiplayer;
@@ -55,6 +56,12 @@ struct Seeker {
     struct Missile *trackedTarget;
     int consecutiveDetections;
     int requiredDetections;
+    // Cached close points for robust collision detection
+    float closePointsX[CLOSE_POINT_COUNT];
+    float closePointsY[CLOSE_POINT_COUNT];
+    float closePointsZ[CLOSE_POINT_COUNT];
+    float closePointsDist[CLOSE_POINT_COUNT];
+    int closePointsCount;
 };
 
 struct IRSearchAndTrack {

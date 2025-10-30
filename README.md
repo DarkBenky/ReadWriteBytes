@@ -26,10 +26,9 @@ The results show that writing frames is faster than reading them, with write ope
 - Render text & charts into a temp buffer  
 - Copy buffer → GL texture → screen overlay  
   
-## TODO - Base on priority
-- [ ] add same logic for searching mode in missile as in irst so it will need multiple successful lock to track target
+## TODO - Base on prioritys in missile as in irst so it will need multiple successful lock to track target
 - [ ] render wide view from position and direction of missile for check of collision
-- [ ] scale everything to real life scale (1.0f == 1 meter)
+- [ ] scale everything to real life scale (1.0f =
 - [ ] set up the githup copilot rules **https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?tool=visualstudio**
 - [ ] Add planes and misiles
   - [X] render heat in separate buffer

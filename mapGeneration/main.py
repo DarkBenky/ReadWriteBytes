@@ -28,7 +28,7 @@ MATERIALS = {
     'snow': MaterialProperties(roughness=0.3, metallic=0.01, emission=0.1)
 }
 
-def generate_height_map(size=MAP_SIZE, seed=None):
+def generate_height_map(size=MAP_SIZE, seed=None, chunks = 8, mid_res=2, low_res=8):
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -148,9 +148,23 @@ def generate_height_map(size=MAP_SIZE, seed=None):
     # Set remaining water areas to flat surface at sea level
     water_mask = height_map < water_threshold
     height_map[water_mask] = sea_level
-    
-    return height_map
 
+    high_res_chunks = []
+    mid_res_chunks = []
+    low_res_chunks = []
+
+    def downsample(chunk, factor):
+        return chunk[::factor, ::factor]
+
+    chunk_size = size // chunks
+    for i in range(chunks):
+        for j in range(chunks):
+            chunk = height_map[i*chunk_size:(i+1)*chunk_size, j*chunk_size:(j+1)*chunk_size]
+            high_res_chunks.append(chunk)
+            mid_res_chunks.append(downsample(chunk, mid_res))
+            low_res_chunks.append(downsample(chunk, low_res))
+    
+    return high_res_chunks, mid_res_chunks, low_res_chunks, height_map
 
 def apply_thermal_erosion(height_map, iterations=1, talus_angle=0.08):
     """Apply thermal erosion to smooth steep slopes"""
@@ -437,7 +451,7 @@ def can_merge_quads(map, i1, j1, i2, j2, height_multiplier):
         return (abs(h1 - h5) < height_threshold and abs(h2 - h6) < height_threshold and 
                 abs(h3 - h7) < height_threshold and abs(h4 - h8) < height_threshold)
 
-def generate_mash(map):
+def generate_mash(map, file_name):
     triangles = []
     size_x, size_y = map.shape
     
@@ -537,7 +551,7 @@ def generate_mash(map):
     triangleStructSize = 76
     fileSize = 8 + numOfTriangles * triangleStructSize
 
-    with open("terrain.bin", "wb") as f:
+    with open(file_name, "wb") as f:
         # write uint32 file size
         f.write(fileSize.to_bytes(4, byteorder='little'))
         # write uint32 triangle struct size (to match Go format)
@@ -571,7 +585,7 @@ def generate_mash(map):
 
     # check if file size is correct
     actualFileSize = 0
-    with open("terrain.bin", "rb") as f:
+    with open(file_name, "rb") as f:
         f.seek(0, 2)  # move to end of file
         actualFileSize = f.tell()
     if actualFileSize == fileSize:
@@ -585,11 +599,26 @@ def generate_mash(map):
 
 
 if __name__ == "__main__":
-    test_map = generate_height_map(MAP_SIZE, seed=421)
-    print("Shape of generated map:", test_map.shape)
+    CHUNKS = 8
+    hight_res, mid_res, low_res, test_map = generate_height_map(MAP_SIZE, seed=421, chunks=CHUNKS, mid_res=2, low_res=8)
     
     print("\nGenerating binary mesh file...")
-    generate_mash(test_map)
+    for i, chunk in enumerate(hight_res):
+        x = i // CHUNKS
+        y = i % CHUNKS
+        generate_mash(chunk, file_name=f"highRes/terrain_chunk_x_{x}_y_{y}_.bin")
+    
+    for i, chunk in enumerate(mid_res):
+        x = i // CHUNKS
+        y = i % CHUNKS
+        generate_mash(chunk, file_name=f"midRes/terrain_midres_chunk_x_{x}_y_{y}_.bin")
+
+    for i, chunk in enumerate(low_res):
+        x = i // CHUNKS
+        y = i % CHUNKS
+        generate_mash(chunk, file_name=f"lowRes/terrain_lowres_chunk_x_{x}_y_{y}_.bin")
+    
+
     
     print(f"\nGenerated {MAP_SIZE}x{MAP_SIZE} enhanced terrain map")
     save_height_map_image(test_map, save_path="terrain_map.png")
