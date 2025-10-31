@@ -4635,7 +4635,6 @@ void rotateVector(float v[3], float matrix[3][3], float result[3]) {
 	result[2] = matrix[2][0] * v[0] + matrix[2][1] * v[1] + matrix[2][2] * v[2];
 }
 
-// New method: Load model with rotation in degrees
 void loadModelWithRotation(const char *filename, struct Triangles *triangles,
 						   float scale, float translate[3],
 						   float rotationXDeg, float rotationYDeg, float rotationZDeg) {
