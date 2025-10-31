@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include "fireSim/fireSim.h"
 #include "openGlShaders/gpuStruct.h"
+#include "mapGeneration/loadMap.h"
 
 void *SharedMem = NULL;
 #define chartPosY 480 // Y position on screen for timing chart
@@ -66,11 +67,6 @@ pthread_t threads[NUM_THREADS];
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3native.h>
 #include <CL/cl_gl.h>
-
-// Ensure M_PI is defined
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 const char *clErrorString(cl_int err) {
 	switch (err) {
@@ -5348,7 +5344,9 @@ int main() {
 	// }
 
 	float translate1[3] = {0.0f, 0.0f, 0.0f};
-	loadModelWithRotation("mapGeneration/terrain.bin", triangles, 1000.0f, translate1, 0.0f, 90.0f, 90.0f);
+	// loadModelWithRotation("mapGeneration/terrain.bin", triangles, 1000.0f, translate1, 0.0f, 90.0f, 90.0f);
+	struct Map terrain;
+	init_terrain_map("mapGeneration/highRes", "mapGeneration/lowRes", "mapGeneration/midRes", &terrain, 1000.0f, translate1, 0.0f, 90.0f, 90.0f);
 	// readFileTriangles("mapGeneration/terrain.bin", triangles, 10.0f);
 
 	// CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
@@ -5528,6 +5526,9 @@ int main() {
 
 		clock_t startRenderTime = clock();
 		// render depth map for IRST
+
+		loadCurrentMap(&terrain, &camera, triangles);
+
 		float tempTimeTookMs = 0.0f;
 		renderDepthBuffer(&ocl,
 						  ocl.buffer_triangle_v1,

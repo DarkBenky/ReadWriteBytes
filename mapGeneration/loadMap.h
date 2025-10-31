@@ -3,7 +3,6 @@
 
 #include "../fireSim/fireSim.h"
 
-// LOD configuration - you can adjust these distances
 #define LOD_HIGH_DISTANCE 5000.0f
 #define LOD_MED_DISTANCE 15000.0f
 #define LOD_LOW_DISTANCE 30000.0f
@@ -41,9 +40,7 @@ struct Map {
 void init_terrain_map(char *dir_high, char *dir_med, char *dir_low, struct Map *map,
                       float scale, float translate[3], 
                       float rotXDeg, float rotYDeg, float rotZDeg);
-void loadCurrentMap(struct Map *map, struct Camera *camera, struct Triangles *sceneTriangles,
-                    float scale, float translate[3], float rotXDeg, float rotYDeg, float rotZDeg,
-                    float tile_size);
+void loadCurrentMap(struct Map *map, struct Camera *camera, struct Triangles *sceneTriangles);
 struct MapTile* get_tile(struct Map *map, int world_x, int world_y);
 void free_map(struct Map *map);
 

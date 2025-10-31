@@ -1,0 +1,41 @@
+---
+applyTo: '**'
+---
+
+# Project Context and Coding Guidelines
+
+## Code Style & Conventions
+- **Naming**: Use `camelCase` for variables and functions, `PascalCase` for types and classes
+- **Comments**: Only when necessary—explain **why**, not **what**. Avoid obvious or boilerplate comments
+- **Formatting**: Consistent indentation, clear separation between logical blocks
+
+## Architecture & Performance
+- **Memory Layout**: Prefer **Structure-of-Arrays (SoA)** over Array-of-Structs for data-oriented design
+- **Allocation Strategy**: Use arena allocators and memory pools. Minimize heap allocations
+- **Data Locality**: Keep related data contiguous in memory for better cache performance
+- **Reuse Over Allocation**: Reuse buffers, preallocate when sizes are known, avoid repeated allocations
+
+## Design Principles
+- **Simplicity First**: Avoid premature abstraction. Start simple, refactor when patterns emerge
+- **Locality**: Keep related data and behavior together. Minimize cross-module dependencies
+- **Explicitness**: Prefer explicit code over clever tricks. Clear > clever
+- **Functions**: Small, focused functions with clear inputs/outputs. Avoid side effects when possible
+
+## What to Generate
+- **Minimal Boilerplate**: Skip unnecessary setup code, getters/setters, or wrapper functions
+- **Focused Implementation**: Generate the core logic, not scaffolding
+- **Idiomatic Code**: Follow language-specific best practices and standard library patterns
+- **Error Handling**: Include explicit error handling, avoid silent failures
+
+## What to Avoid
+- Over-engineering solutions for simple problems
+- Excessive inheritance hierarchies or interface abstractions
+- Magic numbers or undocumented constants
+- Premature optimization without profiling
+- Hidden allocations or performance traps
+
+## Context Awareness
+- Consider existing codebase patterns and match that style
+- Suggest performance-critical improvements when relevant
+- Highlight potential memory or performance issues
+- Recommend simpler alternatives when over-complexity is detected

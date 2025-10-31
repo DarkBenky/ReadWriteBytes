@@ -43,7 +43,7 @@ struct Map {
     char dir_low[512];
 };
 
-// Utility functions
+
 static float degreesToRadians(float degrees) {
     return degrees * M_PI / 180.0f;
 }
@@ -94,7 +94,6 @@ static float calculate_tile_distance(struct Camera *camera, int tile_x, int tile
     return sqrtf(dx * dx + dz * dz);
 }
 
-// Determine required LOD level based on distance
 static LODLevel get_required_lod(float distance) {
     if (distance <= LOD_HIGH_DISTANCE) {
         return LOD_HIGH;
@@ -106,7 +105,7 @@ static LODLevel get_required_lod(float distance) {
     return LOD_NONE;
 }
 
-// Load model function (self-contained)
+
 static int loadModelWithRotation(const char *filename, struct Triangles *triangles,
                                   float scale, float translate[3],
                                   float rotationXDeg, float rotationYDeg, float rotationZDeg,
@@ -225,7 +224,6 @@ static int loadModelWithRotation(const char *filename, struct Triangles *triangl
     return triangleCount;
 }
 
-// Parse filename to extract x and y coordinates
 static int parse_chunk_coords(const char* filename, int* x, int* y) {
     // Expected format: terrain_chunk_x_N_y_M_.bin
     const char* x_ptr = strstr(filename, "_x_");
@@ -344,7 +342,6 @@ void init_terrain_map(char *dir_high, char *dir_med, char *dir_low, struct Map *
     printf("Terrain map initialized!\n");
 }
 
-// Load a specific tile with given LOD
 static int load_tile(struct MapTile *tile, LODLevel lod, float scale, float translate[3],
                      float rotXDeg, float rotYDeg, float rotZDeg) {
     const char *filepath = NULL;
@@ -397,9 +394,7 @@ static void unload_tile(struct MapTile *tile) {
     tile->is_loaded = 0;
 }
 
-void loadCurrentMap(struct Map *map, struct Camera *camera, struct Triangles *sceneTriangles,
-                    float scale, float translate[3], float rotXDeg, float rotYDeg, float rotZDeg,
-                    float tile_size) {
+void loadCurrentMap(struct Map *map, struct Camera *camera, struct Triangles *sceneTriangles) {
     if (!map || !map->tiles || !camera || !sceneTriangles) {
         return;
     }
