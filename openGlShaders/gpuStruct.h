@@ -150,6 +150,9 @@ struct OpenCLContext {
 	float *host_normals_result;
 	float *host_screen_colors_result;
 	float *mapped_seeker_distances;
+	
+	// Track last uploaded triangle count to avoid redundant uploads
+	int last_uploaded_triangle_count;
 };
 
 struct Triangles {

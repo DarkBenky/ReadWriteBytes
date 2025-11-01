@@ -3,7 +3,8 @@ import numpy as np
 import random
 from PIL import Image
 
-MAP_SIZE = 450 # 15 km
+MAP_SIZE = 500 # 15 km
+CHUNKS = 16
 ITERATIONS = 3
 HEIGHT_RANGE = (-45, 22.5)  # Elevation range with more dramatic variation
 
@@ -451,7 +452,12 @@ def can_merge_quads(map, i1, j1, i2, j2, height_multiplier):
         return (abs(h1 - h5) < height_threshold and abs(h2 - h6) < height_threshold and 
                 abs(h3 - h7) < height_threshold and abs(h4 - h8) < height_threshold)
 
-def generate_mash(map, file_name):
+def generate_mash(map, file_name, lod_scale=1.0):
+    """
+    Generate mesh from heightmap.
+    lod_scale: scaling factor for vertex positions to maintain physical size across LODs
+               For high-res: 1.0, for mid-res (2x downsample): 2.0, for low-res (8x): 8.0
+    """
     triangles = []
     size_x, size_y = map.shape
     
@@ -506,10 +512,11 @@ def generate_mash(map, file_name):
                 for jj in range(j, min(j + width, size_y - 1)):
                     processed[ii][jj] = True
             
-            v1_merged = (i, j, map[i][j])
-            v2_merged = (i + height, j, map[min(i + height, size_x - 1)][j])
-            v3_merged = (i, j + width, map[i][min(j + width, size_y - 1)])
-            v4_merged = (i + height, j + width, map[min(i + height, size_x - 1)][min(j + width, size_y - 1)])
+            # Apply LOD scaling to XY coordinates to maintain physical size
+            v1_merged = (i * lod_scale, j * lod_scale, map[i][j])
+            v2_merged = ((i + height) * lod_scale, j * lod_scale, map[min(i + height, size_x - 1)][j])
+            v3_merged = (i * lod_scale, (j + width) * lod_scale, map[i][min(j + width, size_y - 1)])
+            v4_merged = ((i + height) * lod_scale, (j + width) * lod_scale, map[min(i + height, size_x - 1)][min(j + width, size_y - 1)])
             
             normal = compute_normal(v1_merged, v2_merged, v3_merged)
             base_color = get_color_from_height(avg_height)
@@ -551,6 +558,9 @@ def generate_mash(map, file_name):
     triangleStructSize = 76
     fileSize = 8 + numOfTriangles * triangleStructSize
 
+    minBB = [float('inf'), float('inf'), float('inf')]
+    maxBB = [float('-inf'), float('-inf'), float('-inf')]
+
     with open(file_name, "wb") as f:
         # write uint32 file size
         f.write(fileSize.to_bytes(4, byteorder='little'))
@@ -558,6 +568,27 @@ def generate_mash(map, file_name):
         f.write(triangleStructSize.to_bytes(4, byteorder='little'))
 
         for i, triangle in enumerate(triangles):
+            if triangle.v1x < minBB[0]: minBB[0] = triangle.v1x
+            if triangle.v1y < minBB[1]: minBB[1] = triangle.v1y
+            if triangle.v1z < minBB[2]: minBB[2] = triangle.v1z
+            if triangle.v2x < minBB[0]: minBB[0] = triangle.v2x
+            if triangle.v2y < minBB[1]: minBB[1] = triangle.v2y
+            if triangle.v2z < minBB[2]: minBB[2] = triangle.v2z
+            if triangle.v3x < minBB[0]: minBB[0] = triangle.v3x
+            if triangle.v3y < minBB[1]: minBB[1] = triangle.v3y
+            if triangle.v3z < minBB[2]: minBB[2] = triangle.v3z
+
+            if triangle.v1x > maxBB[0]: maxBB[0] = triangle.v1x
+            if triangle.v1y > maxBB[1]: maxBB[1] = triangle.v1y
+            if triangle.v1z > maxBB[2]: maxBB[2] = triangle.v1z
+            if triangle.v2x > maxBB[0]: maxBB[0] = triangle.v2x
+            if triangle.v2y > maxBB[1]: maxBB[1] = triangle.v2y
+            if triangle.v2z > maxBB[2]: maxBB[2] = triangle.v2z
+            if triangle.v3x > maxBB[0]: maxBB[0] = triangle.v3x
+            if triangle.v3y > maxBB[1]: maxBB[1] = triangle.v3y
+            if triangle.v3z > maxBB[2]: maxBB[2] = triangle.v3z
+
+
             # Vertices (36 bytes: 9 float32s)
             f.write(np.float32(triangle.v1x).tobytes())
             f.write(np.float32(triangle.v1y).tobytes())
@@ -595,30 +626,64 @@ def generate_mash(map, file_name):
         print(f"Total: {fileSize} bytes")
     else:
         print(f"Error in file size: expected {fileSize}, got {actualFileSize}.")
+
+    return minBB, maxBB
             
 
 
 if __name__ == "__main__":
-    CHUNKS = 8
     hight_res, mid_res, low_res, test_map = generate_height_map(MAP_SIZE, seed=421, chunks=CHUNKS, mid_res=2, low_res=8)
     
     print("\nGenerating binary mesh file...")
+    
+    # First, verify all chunks have the same array dimensions
+    print(f"\nVerifying chunk dimensions...")
+    high_shape = hight_res[0].shape
+    mid_shape = mid_res[0].shape  
+    low_shape = low_res[0].shape
+    
     for i, chunk in enumerate(hight_res):
-        x = i // CHUNKS
-        y = i % CHUNKS
-        generate_mash(chunk, file_name=f"highRes/terrain_chunk_x_{x}_y_{y}_.bin")
+        if chunk.shape != high_shape:
+            raise ValueError(f"High-res chunk {i} has shape {chunk.shape}, expected {high_shape}")
     
     for i, chunk in enumerate(mid_res):
-        x = i // CHUNKS
-        y = i % CHUNKS
-        generate_mash(chunk, file_name=f"midRes/terrain_midres_chunk_x_{x}_y_{y}_.bin")
+        if chunk.shape != mid_shape:
+            raise ValueError(f"Mid-res chunk {i} has shape {chunk.shape}, expected {mid_shape}")
+    
+    for i, chunk in enumerate(low_res):
+        if chunk.shape != low_shape:
+            raise ValueError(f"Low-res chunk {i} has shape {chunk.shape}, expected {low_shape}")
+    
+    print(f"All high-res chunks: {high_shape}")
+    print(f"All mid-res chunks: {mid_shape}")
+    print(f"All low-res chunks: {low_shape}")
+    
+    # Generate binary files for all chunks
+    for i, chunk in enumerate(hight_res):
+        y = i // CHUNKS
+        x = i % CHUNKS
+        minBB, maxBB = generate_mash(chunk, file_name=f"highRes/terrain_chunk_x_{x}_y_{y}_.bin", lod_scale=1.0)
+        save_height_map_image(chunk, save_path=f"highRes/terrain_highres_chunk_x_{x}_y_{y}_.png")
+        save_height_gradient_image(chunk, save_path=f"highRes/height_gradient_highres_chunk_x_{x}_y_{y}_.png")
+    
+    for i, chunk in enumerate(mid_res):
+        y = i // CHUNKS
+        x = i % CHUNKS
+        minBB1, maxBB1 = generate_mash(chunk, file_name=f"midRes/terrain_midres_chunk_x_{x}_y_{y}_.bin", lod_scale=2.0)
+        save_height_map_image(chunk, save_path=f"midRes/terrain_midres_chunk_x_{x}_y_{y}_.png")
+        save_height_gradient_image(chunk, save_path=f"midRes/height_gradient_midres_chunk_x_{x}_y_{y}_.png")
 
     for i, chunk in enumerate(low_res):
-        x = i // CHUNKS
-        y = i % CHUNKS
-        generate_mash(chunk, file_name=f"lowRes/terrain_lowres_chunk_x_{x}_y_{y}_.bin")
+        y = i // CHUNKS
+        x = i % CHUNKS
+        minBB2, maxBB2 = generate_mash(chunk, file_name=f"lowRes/terrain_lowres_chunk_x_{x}_y_{y}_.bin", lod_scale=8.0)
+        save_height_gradient_image(chunk, save_path=f"lowRes/height_gradient_lowres_chunk_x_{x}_y_{y}_.png")
+        save_height_map_image(chunk, save_path=f"lowRes/terrain_lowres_chunk_x_{x}_y_{y}_.png")
     
-
+    print(f"\n Generated {len(hight_res)} chunks at each LOD level")
+    print(f"Chunk grid size: {CHUNKS} x {CHUNKS}")
+    print(f"Map size: {MAP_SIZE} x {MAP_SIZE}")
+    print(f"Expected spatial size per chunk: {MAP_SIZE/CHUNKS:.2f} x {MAP_SIZE/CHUNKS:.2f}")
     
     print(f"\nGenerated {MAP_SIZE}x{MAP_SIZE} enhanced terrain map")
     save_height_map_image(test_map, save_path="terrain_map.png")

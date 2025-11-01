@@ -455,8 +455,6 @@ int renderDepthBuffer(
 
 		memcpy(out_depth_cpu, mapped_ptr, buffer_size);
 
-		
-
 		err = clEnqueueUnmapMemObject(ocl->queue, output_buffer, mapped_ptr, 0, NULL, NULL);
 		if (err != CL_SUCCESS) {
 			fprintf(stderr, "Error unmapping depth buffer: %s (%d)\n", clErrorString(err), err);
@@ -880,7 +878,7 @@ void missilesSimulation(struct OpenCLContext *ocl, struct Missiles *missiles, fl
 							  missile->seeker.seekerDepthWideView,
 							  &tempMS2,
 							  missileCount);
-							
+
 			totalTimeTookMs += tempMS + tempMS2;
 
 			missileCount++;
@@ -1942,10 +1940,28 @@ void render(struct PointSOA *particles, struct Camera *camera, struct TimePartit
 	}
 }
 
-int uploadTriangleDataOnce(struct OpenCLContext *ocl, struct Triangles *triangles) {
+int uploadTriangleData(struct OpenCLContext *ocl, struct Triangles *triangles) {
 	cl_int err;
 
-	printf("Uploading triangle data once: %d triangles\n", triangles->count);
+	if (triangles->count > NUMBER_OF_TRIANGLES) {
+		printf("Error: Triangle count (%d) exceeds maximum buffer size (%d)\n",
+			   triangles->count, NUMBER_OF_TRIANGLES);
+		return 0;
+	}
+
+	// Skip upload if triangle count hasn't changed (optimization for static scenes)
+	if (ocl->last_uploaded_triangle_count == triangles->count) {
+		return 1; // Data already uploaded, no need to re-upload
+	}
+
+	err = clFinish(ocl->queue);
+	if (err != CL_SUCCESS) {
+		printf("Error waiting for GPU to finish before uploading triangles: %d\n", err);
+		return 0;
+	}
+
+	printf("Uploading triangle data: %d triangles (previous: %d)\n",
+		   triangles->count, ocl->last_uploaded_triangle_count);
 
 	// Upload all triangle data once
 	err = clEnqueueWriteBuffer(ocl->queue, ocl->buffer_triangle_v1, CL_TRUE, 0,
@@ -2002,6 +2018,18 @@ int uploadTriangleDataOnce(struct OpenCLContext *ocl, struct Triangles *triangle
 							   triangles->count * sizeof(float), triangles->Emission, 0, NULL, NULL);
 	if (err != CL_SUCCESS) {
 		printf("Error writing triangle emission buffer during init: %d\n", err);
+		return 0;
+	}
+
+	// Update the last uploaded count
+	ocl->last_uploaded_triangle_count = triangles->count;
+
+	// CRITICAL: Update the triangle count kernel argument
+	// The triangle_kernel uses this at argument index 11
+	cl_int num_triangles = triangles->count;
+	err = clSetKernelArg(ocl->triangle_kernel, 11, sizeof(cl_int), &num_triangles);
+	if (err != CL_SUCCESS) {
+		printf("Error updating triangle count kernel argument: %d\n", err);
 		return 0;
 	}
 
@@ -2908,22 +2936,23 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 												ScreenWidth * ScreenHeight * sizeof(float), NULL, &err);
 
 	// Triangle buffers
-	ocl->buffer_triangle_roughness = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-													triangles->count * sizeof(float), NULL, &err);
-	ocl->buffer_triangle_metallic = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-												   triangles->count * sizeof(float), NULL, &err);
-	ocl->buffer_triangle_emission = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-												   triangles->count * sizeof(float), NULL, &err);
-	ocl->buffer_triangle_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-											 triangles->count * 3 * sizeof(float), NULL, &err);
-	ocl->buffer_triangle_v2 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-											 triangles->count * 3 * sizeof(float), NULL, &err);
-	ocl->buffer_triangle_v3 = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-											 triangles->count * 3 * sizeof(float), NULL, &err);
-	ocl->buffer_triangle_normals = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-												  triangles->count * 3 * sizeof(float), NULL, &err);
-	ocl->buffer_triangle_colors = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
-												 triangles->count * 3 * sizeof(float), NULL, &err);
+	// Allocate buffers to maximum size to support dynamic LOD terrain loading
+	ocl->buffer_triangle_roughness = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+													NUMBER_OF_TRIANGLES * sizeof(float), NULL, &err);
+	ocl->buffer_triangle_metallic = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+												   NUMBER_OF_TRIANGLES * sizeof(float), NULL, &err);
+	ocl->buffer_triangle_emission = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+												   NUMBER_OF_TRIANGLES * sizeof(float), NULL, &err);
+	ocl->buffer_triangle_v1 = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+											 NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+	ocl->buffer_triangle_v2 = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+											 NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+	ocl->buffer_triangle_v3 = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+											 NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+	ocl->buffer_triangle_normals = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+												  NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
+	ocl->buffer_triangle_colors = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
+												 NUMBER_OF_TRIANGLES * 3 * sizeof(float), NULL, &err);
 	ocl->buffer_screen_colors = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE,
 											   ScreenWidth * ScreenHeight * 3 * sizeof(float), NULL, &err);
 
@@ -2972,7 +3001,7 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	}
 
 	// Upload triangle data
-	if (!uploadTriangleDataOnce(ocl, triangles)) {
+	if (!uploadTriangleData(ocl, triangles)) {
 		printf("Failed to upload triangle data during OpenCL init\n");
 		return 0;
 	}
@@ -3014,6 +3043,9 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 #endif
+
+	// Initialize triangle tracking
+	ocl->last_uploaded_triangle_count = 0;
 
 	printf("OpenCL-GL interop initialized successfully\n");
 	return 1;
@@ -5265,9 +5297,11 @@ int main() {
 	triangles->count = 0;
 
 	struct Camera camera;
-	camera.ray.origin[0] = 50.0f;
-	camera.ray.origin[1] = 50.0f;
-	camera.ray.origin[2] = -50.0f;
+	// Position camera near the center of the terrain map (tiles are 55000x55000)
+	// Map is 8x8 tiles, so center is around 4*55000 = 220000 in each direction
+	camera.ray.origin[0] = 2750.0f; // Center of first tile (tile 0,0)
+	camera.ray.origin[1] = 500.0f;	// 5km above ground
+	camera.ray.origin[2] = 2750.0f; // Center of first tile (tile 0,0)
 	camera.ray.direction[0] = 0.0f;
 	camera.ray.direction[1] = 0.0f;
 	camera.ray.direction[2] = 1.0f;
@@ -5344,10 +5378,28 @@ int main() {
 	// }
 
 	float translate1[3] = {0.0f, 0.0f, 0.0f};
-	// loadModelWithRotation("mapGeneration/terrain.bin", triangles, 1000.0f, translate1, 0.0f, 90.0f, 90.0f);
+
+	// Initialize terrain map with all LOD levels
 	struct Map terrain;
-	init_terrain_map("mapGeneration/highRes", "mapGeneration/lowRes", "mapGeneration/midRes", &terrain, 1000.0f, translate1, 0.0f, 90.0f, 90.0f);
-	// readFileTriangles("mapGeneration/terrain.bin", triangles, 10.0f);
+	printf("Loading terrain map...\n");
+	init_terrain_map(
+		"mapGeneration/highRes", // High resolution directory
+		"mapGeneration/midRes",	 // Medium resolution directory
+		"mapGeneration/lowRes",	 // Low resolution directory
+		&terrain,
+		100.0f,		// Scale
+		translate1, // Base translation [x, y, z]
+		90.0f,		// Rotation X (degrees)
+		0.0f,		// Rotation Y (degrees)
+		90.0f,		// Rotation Z (degrees)
+		0.0f,		// Map position X
+		0.0f,		// Map position Y
+		0.0f		// Map position Z
+	);
+
+	printf("Terrain map initialized. Loading visible tiles based on camera...\n");
+	loadCurrentMap(&terrain, &camera, triangles);
+	printf("Loaded %d triangles from terrain\n", triangles->count);
 
 	// CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
@@ -5528,6 +5580,7 @@ int main() {
 		// render depth map for IRST
 
 		loadCurrentMap(&terrain, &camera, triangles);
+		uploadTriangleData(&ocl, triangles);
 
 		float tempTimeTookMs = 0.0f;
 		renderDepthBuffer(&ocl,
@@ -5674,7 +5727,27 @@ int main() {
 	}
 
 	// Clean up
+	printf("Cleaning up...\n");
+
+	// Free terrain map
+	free_map(&terrain);
+
+	// Free triangles and other resources
+	free(triangles);
 	free(particles);
+	free(particleIndexes);
+	free(timePartition);
+	free(missileModel);
+
+	// Free fire particles
+	free(fireParticles);
+
+	// Cleanup OpenCL
+	cleanupOpenCL(&ocl);
+
+	// Cleanup GLFW
+	glfwDestroyWindow(window);
+	glfwTerminate();
 
 	return 0;
 }
