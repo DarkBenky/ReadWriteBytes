@@ -6,7 +6,7 @@ from PIL import Image
 MAP_SIZE = 750 # 15 km
 CHUNKS = 16
 ITERATIONS = 3
-HEIGHT_RANGE = (-45, 22.5)  # Elevation range with more dramatic variation
+HEIGHT_RANGE = (-45, 27.5)  # Elevation range with more dramatic variation
 
 WATER_MERGE_THRESHOLD = 0.02
 FLAT_TERRAIN_MERGE_THRESHOLD = 0.0125
