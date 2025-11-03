@@ -27,9 +27,9 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on prioritys in missile as in irst so it will need multiple successful lock to track target
-- [ ] render wide view from position and direction of missile for check of collision
-- [ ] scale everything to real life scale (1.0f =
-- [ ] set up the githup copilot rules **https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?tool=visualstudio**
+- [ ] make seaker work with flares
+- [ ] add render / add functionality to lunch flares 
+- [ ] scale everything to real life scale (1.0f = 1.0 meter)
 - [ ] Add planes and misiles
   - [X] render heat in separate buffer
     - [ ] add data link
@@ -103,6 +103,8 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] add screens based fluid rendering
 
 ### DONE
+- [X] render wide view from position and direction of missile for check of collision
+- [X] set up the githup copilot rules **https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions?tool=visualstudio**
 - [X] render all in open gl remove memory sharing with go code
 - [X] Add Pause
   - [X] Add Text rendering
