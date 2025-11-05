@@ -1,4 +1,5 @@
 #include "fireSim.h"
+#include "../flares/flare.h"
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
@@ -294,9 +295,9 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		normalize3(irst->seekerCamera.ray.direction);
 	}
 
-	float objX[MAX_FIRE_SIMS], objY[MAX_FIRE_SIMS], objZ[MAX_FIRE_SIMS];
-	float objTemp[MAX_FIRE_SIMS];
-	struct Missile *potentialTargets[MAX_FIRE_SIMS];
+	float objX[MAX_FIRE_SIMS + MAX_FLARES], objY[MAX_FIRE_SIMS + MAX_FLARES], objZ[MAX_FIRE_SIMS + MAX_FLARES];
+	float objTemp[MAX_FIRE_SIMS + MAX_FLARES];
+	struct Missile *potentialTargets[MAX_FIRE_SIMS]; add flares to target list
 	int count = 0;
 
 	for (int i = 0; i < allMissiles->count; i++) {
@@ -1456,6 +1457,9 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 	}
 
 	missileSimStep(missile, deltaTime, timeTook, active, fireSimulationTime);
+	float temp;
+	UpdateFlares(allMissiles, deltaTime, &temp);
+	*timeTook = temp;
 	updateSeekerPositions(allMissiles);
 }
 
@@ -1975,6 +1979,7 @@ void fireSimStep(struct FireSOA *particles, float deltaTime, float *timeTook) {
 void InitializeMissiles(struct Missiles *missiles, int count, struct Triangles *model) {
 	missiles->count = min(count, MAX_FIRE_SIMS);
 	missiles->missileModel = model;
+	missiles->flareCount = 0;
 
 	for (int i = 0; i < missiles->count; i++) {
 		missiles->missiles[i] = malloc(sizeof(struct Missile));
@@ -2106,3 +2111,19 @@ int main(int argc, char **argv) {
 	return 0;
 }
 #endif
+
+void UpdateFlares(struct Missiles *missiles, float deltaTime, float *timeTook) {
+	if (!missiles) return;
+
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+
+	for (int i = 0; i < missiles->flareCount; i++) {
+		if (missiles->flares[i].lifeTimeRemaining > 0.0f) {
+			UpdateFlare(&missiles->flares[i], deltaTime);
+		}
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	*timeTook = (end.tv_sec - start.tv_sec) * 1000.0f + (end.tv_nsec - start.tv_nsec) / 1000000.0f;
+}

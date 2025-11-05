@@ -1,21 +1,7 @@
 #ifndef FLARE_H
 #define FLARE_H
 
-#include "../openGlShaders/gpuStruct.h"
-#include <stdbool.h>
 #include "../fireSim/fireSim.h"
-
-struct Flare {
-    struct FireSOA flareSim;
-    float flareTemperature[NUM_FIRE_PARTICLES];
-    float startingTemperature;
-    float maxTemperature;
-    float coolingRate;
-    float lifeTimeRemaining;
-    float burningRate;
-    float maxLifeTime;
-    float riseTimeAspect;
-};
 
 void InitializeFlare(struct Flare *flare);
 void UpdateFlare(struct Flare *flare, float deltaTime);

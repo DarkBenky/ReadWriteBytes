@@ -7,6 +7,7 @@
 #define MAX_FIRE_SIMS 16
 #define CLOSE_POINT_COUNT 64
 #define G 9.81f
+#define MAX_FLARES 256
 #define MAX_FLOAT 3.402823466e+38F
 
 #include "../openGlShaders/gpuStruct.h"
@@ -34,6 +35,18 @@ struct FireSOA {
     float maxDistance;            // Farthest distance from base (m)
     float swirlIntensity;         // Circular motion strength
     float swirlFrequency;         // Rotation speed (Hz)
+};
+
+struct Flare {
+    struct FireSOA flareSim;
+    float flareTemperature[NUM_FIRE_PARTICLES];
+    float startingTemperature;
+    float maxTemperature;
+    float coolingRate;
+    float lifeTimeRemaining;
+    float burningRate;
+    float maxLifeTime;
+    float riseTimeAspect;
 };
 
 
@@ -191,6 +204,8 @@ struct Missiles {
     bool active[MAX_FIRE_SIMS];
     int activeCount;
     int count;
+    struct Flare flares[MAX_FLARES];
+    int flareCount;
 };
 
 void InitializeFireParticles(struct FireSOA *particles);
@@ -209,6 +224,9 @@ float randRange(float min, float max);
 
 void scanConeForTargets(struct Missile *missile, struct Missiles *allMissiles, float coneAngle, float coneDepth);
 void fuseSensorData(struct Missile *missile, float *fusedTargetPos, float *fusedConfidence);
+
+void LunchFlare(struct Flare *flare, float *position, float *initialVelocity, float *lunchDirection);
+void UpdateFlares(struct Missiles *missiles, float deltaTime, float *timeTook);
 
 void InitializeIRST(struct Camera *mainRenderingCamera, struct IRSearchAndTrack *irst, int screenWidth, int screenHeight);
 void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack *irst, float deltaTime);
