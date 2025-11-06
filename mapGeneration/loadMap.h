@@ -3,9 +3,11 @@
 
 #include "../fireSim/fireSim.h"
 
-#define LOD_HIGH_DISTANCE 10000.0f
-#define LOD_MED_DISTANCE 20000.0f
+#define LOD_HIGH_DISTANCE 20000.0f
+#define LOD_MED_DISTANCE 35000.0f
 #define LOD_LOW_DISTANCE 50000.0f
+
+change tringles on gpu
 
 typedef enum {
     LOD_NONE = 0,

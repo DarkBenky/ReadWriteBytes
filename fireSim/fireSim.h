@@ -2,7 +2,7 @@
 #define FIRE_SIM_H
 
 #define NUM_FIRE_PARTICLES 150
-#define MISSILE_SEEKER_SIZE 96
+#define MISSILE_SEEKER_SIZE 64
 #define IRST_TRACKING_LIMIT 16
 #define MAX_FIRE_SIMS 16
 #define CLOSE_POINT_COUNT 64
@@ -66,7 +66,7 @@ struct Seeker {
     enum  MissileLock lockState;
     float searchYaw;
     float searchPitch;
-    struct Missile *trackedTarget;
+    struct GenericType trackedTarget;
     int consecutiveDetections;
     int requiredDetections;
     // Cached close points for robust collision detection
@@ -95,14 +95,14 @@ struct IRSearchAndTrack {
     int targetCount;
     int mainScreenWidth;
     int mainScreenHeight;
-    struct Missile *lockedTarget;
+    struct GenericType lockedTarget;
     int lockedTargetId;
     float lockTime;
     
     // Multi-scan tracking state
-    struct Missile *trackedTargets[IRST_TRACKING_LIMIT]; // Pointers to missiles being tracked
-    int scanCount[IRST_TRACKING_LIMIT];                   // Number of consecutive successful scans per target
-    int requiredScans;                                     // Number of scans needed before displaying target
+    struct GenericType trackedTargets[IRST_TRACKING_LIMIT];
+    int scanCount[IRST_TRACKING_LIMIT];
+    int requiredScans;
 };
 
 struct Missile {

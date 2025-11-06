@@ -155,6 +155,17 @@ struct OpenCLContext {
 	int last_uploaded_triangle_count;
 };
 
+enum Types {
+    MISSILE_TYPE,
+    FLARE_TYPE
+};
+
+struct GenericType {
+    enum Types type;
+    int size;
+    void *ptr;
+};
+
 struct Triangles {
 	float v1[NUMBER_OF_TRIANGLES * 3];
 	float v2[NUMBER_OF_TRIANGLES * 3];

@@ -42,6 +42,91 @@ float randRange(float min, float max) {
 	return min + scale * (max - min);
 }
 
+// Extract position from GenericType (either Missile or Flare)
+static void getGenericPosition(struct GenericType target, float outPos[3]) {
+	if (target.type == MISSILE_TYPE) {
+		struct Missile *missile = (struct Missile *)target.ptr;
+		outPos[0] = missile->position[0];
+		outPos[1] = missile->position[1];
+		outPos[2] = missile->position[2];
+	} else if (target.type == FLARE_TYPE) {
+		struct Flare *flare = (struct Flare *)target.ptr;
+		outPos[0] = flare->flareSim.basePosition[0];
+		outPos[1] = flare->flareSim.basePosition[1];
+		outPos[2] = flare->flareSim.basePosition[2];
+	}
+}
+
+// Extract velocity from GenericType
+static void getGenericVelocity(struct GenericType target, float outVel[3]) {
+	if (target.type == MISSILE_TYPE) {
+		struct Missile *missile = (struct Missile *)target.ptr;
+		outVel[0] = missile->velocity[0];
+		outVel[1] = missile->velocity[1];
+		outVel[2] = missile->velocity[2];
+	} else if (target.type == FLARE_TYPE) {
+		struct Flare *flare = (struct Flare *)target.ptr;
+		// Compute average velocity from particles
+		float sumVel[3] = {0.0f, 0.0f, 0.0f};
+		int count = 0;
+		for (int i = 0; i < NUM_FIRE_PARTICLES; i++) {
+			if (flare->flareSim.lifeTime[i] > 0.0f) {
+				sumVel[0] += flare->flareSim.xVelocity[i];
+				sumVel[1] += flare->flareSim.yVelocity[i];
+				sumVel[2] += flare->flareSim.zVelocity[i];
+				count++;
+			}
+		}
+		if (count > 0) {
+			outVel[0] = sumVel[0] / count;
+			outVel[1] = sumVel[1] / count;
+			outVel[2] = sumVel[2] / count;
+		} else {
+			outVel[0] = outVel[1] = outVel[2] = 0.0f;
+		}
+	}
+}
+
+// Extract temperature from GenericType
+static float getGenericTemperature(struct GenericType target) {
+	if (target.type == MISSILE_TYPE) {
+		struct Missile *missile = (struct Missile *)target.ptr;
+		return missile->burningTemp;
+	} else if (target.type == FLARE_TYPE) {
+		struct Flare *flare = (struct Flare *)target.ptr;
+		// Return average temperature
+		float sumTemp = 0.0f;
+		int count = 0;
+		for (int i = 0; i < NUM_FIRE_PARTICLES; i++) {
+			if (flare->flareSim.lifeTime[i] > 0.0f) {
+				sumTemp += flare->flareTemperature[i];
+				count++;
+			}
+		}
+		return (count > 0) ? (sumTemp / count) : 0.0f;
+	}
+	return 0.0f;
+}
+
+// Check if GenericType is valid and active
+static bool isGenericTargetActive(struct GenericType target, struct Missiles *allMissiles) {
+	if (target.ptr == NULL) return false;
+
+	if (target.type == MISSILE_TYPE) {
+		struct Missile *missile = (struct Missile *)target.ptr;
+		for (int i = 0; i < allMissiles->count; i++) {
+			if (allMissiles->missiles[i] == missile && allMissiles->active[i]) {
+				return true;
+			}
+		}
+		return false;
+	} else if (target.type == FLARE_TYPE) {
+		struct Flare *flare = (struct Flare *)target.ptr;
+		return flare->lifeTimeRemaining > 0.0f;
+	}
+	return false;
+}
+
 float getAirDensity(float altitude) {
 	if (altitude < 0.0f) altitude = 0.0f;
 	return SEA_LEVEL_DENSITY * expf(-altitude / SCALE_HEIGHT);
@@ -189,15 +274,15 @@ void InitializeIRST(struct Camera *mainRenderingCamera, struct IRSearchAndTrack 
 	irst->targetCount = 0;
 	irst->mainScreenWidth = screenWidth;
 	irst->mainScreenHeight = screenHeight;
-	irst->lockedTarget = NULL;
+	irst->lockedTarget.ptr = NULL;
 	irst->lockedTargetId = -1;
 	irst->selectedTargetId = -1;
 	irst->lockTime = 0.0f;
-	irst->requiredScans = 5; // Require 5 consecutive successful scans before displaying
+	irst->requiredScans = 5;
 
 	// Initialize tracking state
 	for (int i = 0; i < IRST_TRACKING_LIMIT; i++) {
-		irst->trackedTargets[i] = NULL;
+		irst->trackedTargets[i].ptr = NULL;
 		irst->scanCount[i] = 0;
 	}
 }
@@ -210,25 +295,23 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 
 	// Target Tracking Logic
 	if (irst->lockedTargetId != -1) {
-		bool targetStillExists = false;
-		for (int i = 0; i < allMissiles->count; i++) {
-			if (allMissiles->missiles[i] == irst->lockedTarget) {
-				targetStillExists = true;
-				break;
-			}
-		}
+		bool targetStillExists = isGenericTargetActive(irst->lockedTarget, allMissiles);
 
-		if (!targetStillExists || !allMissiles->active[irst->lockedTargetId]) {
+		if (!targetStillExists) {
 			// Target is gone, reset tracking
-			irst->lockedTarget = NULL;
+			irst->lockedTarget.ptr = NULL;
 			irst->lockedTargetId = -1;
 			irst->lockTime = 0.0f;
 		} else {
 			// Predict target's next position (simple linear prediction)
+			float targetPos[3], targetVel[3];
+			getGenericPosition(irst->lockedTarget, targetPos);
+			getGenericVelocity(irst->lockedTarget, targetVel);
+
 			float predictedPos[3] = {
-				irst->lockedTarget->position[0] + irst->lockedTarget->velocity[0] * deltaTime,
-				irst->lockedTarget->position[1] + irst->lockedTarget->velocity[1] * deltaTime,
-				irst->lockedTarget->position[2] + irst->lockedTarget->velocity[2] * deltaTime};
+				targetPos[0] + targetVel[0] * deltaTime,
+				targetPos[1] + targetVel[1] * deltaTime,
+				targetPos[2] + targetVel[2] * deltaTime};
 
 			float toTarget[3] = {
 				predictedPos[0] - irst->seekerCamera.ray.origin[0],
@@ -297,8 +380,11 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 
 	float objX[MAX_FIRE_SIMS + MAX_FLARES], objY[MAX_FIRE_SIMS + MAX_FLARES], objZ[MAX_FIRE_SIMS + MAX_FLARES];
 	float objTemp[MAX_FIRE_SIMS + MAX_FLARES];
-	struct Missile *potentialTargets[MAX_FIRE_SIMS]; add flares to target list
+	struct GenericType potentialTargets[MAX_FIRE_SIMS + MAX_FLARES];
 	int count = 0;
+
+	int missileSize = sizeof(struct Missile);
+	int flareSize = sizeof(struct Flare);
 
 	for (int i = 0; i < allMissiles->count; i++) {
 		if (allMissiles->active[i]) {
@@ -313,7 +399,23 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 			float velocityMag = sqrtf(m->velocity[0] * m->velocity[0] + m->velocity[1] * m->velocity[1] + m->velocity[2] * m->velocity[2]);
 			float kineticHeat = velocityMag * 0.5f; // Simplified kinetic heating
 			objTemp[count] = baseTemp + kineticHeat;
-			potentialTargets[count] = m;
+			potentialTargets[count].ptr = m;
+			potentialTargets[count].size = missileSize;
+			potentialTargets[count].type = MISSILE_TYPE;
+			count++;
+		}
+	}
+
+	for (int i = 0; i < MAX_FLARES; i++) {
+		struct Flare *flare = &allMissiles->flares[i];
+		if (flare->lifeTimeRemaining > 0.0f) {
+			objX[count] = flare->flareSim.basePosition[0];
+			objY[count] = flare->flareSim.basePosition[1];
+			objZ[count] = flare->flareSim.basePosition[2];
+			objTemp[count] = getGenericTemperature((struct GenericType){.type = FLARE_TYPE, .ptr = flare, .size = flareSize});
+			potentialTargets[count].ptr = flare;
+			potentialTargets[count].size = flareSize;
+			potentialTargets[count].type = FLARE_TYPE;
 			count++;
 		}
 	}
@@ -330,17 +432,11 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 	if (irst->selectedTargetId == -1) {
 		if (bestIdx != -1) {
 			irst->lockedTarget = potentialTargets[bestIdx];
-			irst->lockedTargetId = -1;
-			for (int i = 0; i < allMissiles->count; i++) {
-				if (allMissiles->missiles[i] == irst->lockedTarget) {
-					irst->lockedTargetId = i;
-					break;
-				}
-			}
+			irst->lockedTargetId = bestIdx;
 			if (irst->lockTime < 0.1f) irst->lockTime = 0.1f;
 		} else {
 			if (irst->lockedTargetId != -1 && irst->lockTime > 0.5f) {
-				irst->lockedTarget = NULL;
+				irst->lockedTarget.ptr = NULL;
 				irst->lockedTargetId = -1;
 				irst->lockTime = 0.0f;
 			}
@@ -454,12 +550,12 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		}
 
 		// Multi-scan tracking logic
-		struct Missile *currentMissile = potentialTargets[i];
+		struct GenericType currentTarget = potentialTargets[i];
 		int trackSlot = -1;
 
-		// Find existing tracking slot for this missile
+		// Find existing tracking slot for this target
 		for (int j = 0; j < IRST_TRACKING_LIMIT; j++) {
-			if (irst->trackedTargets[j] == currentMissile) {
+			if (irst->trackedTargets[j].ptr == currentTarget.ptr) {
 				trackSlot = j;
 				break;
 			}
@@ -470,9 +566,9 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 			if (trackSlot == -1) {
 				// Find empty slot for new target
 				for (int j = 0; j < IRST_TRACKING_LIMIT; j++) {
-					if (irst->trackedTargets[j] == NULL) {
+					if (irst->trackedTargets[j].ptr == NULL) {
 						trackSlot = j;
-						irst->trackedTargets[j] = currentMissile;
+						irst->trackedTargets[j] = currentTarget;
 						irst->scanCount[j] = 1;
 						break;
 					}
@@ -499,7 +595,7 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 		} else {
 			// Target not visible - reset tracking if it was being tracked
 			if (trackSlot != -1) {
-				irst->trackedTargets[trackSlot] = NULL;
+				irst->trackedTargets[trackSlot].ptr = NULL;
 				irst->scanCount[trackSlot] = 0;
 			}
 		}
@@ -507,22 +603,16 @@ void IRSearchAndTrackStep(struct Missiles *allMissiles, struct IRSearchAndTrack 
 
 	// Reset any tracked targets that weren't scanned this frame
 	for (int i = 0; i < IRST_TRACKING_LIMIT; i++) {
-		if (irst->trackedTargets[i] != NULL && !scannedThisFrame[i]) {
-			// Check if the missile still exists and is active
-			bool stillExists = false;
-			for (int j = 0; j < allMissiles->count; j++) {
-				if (allMissiles->missiles[j] == irst->trackedTargets[i] && allMissiles->active[j]) {
-					stillExists = true;
-					break;
-				}
-			}
+		if (irst->trackedTargets[i].ptr != NULL && !scannedThisFrame[i]) {
+			// Check if the target still exists and is active
+			bool stillExists = isGenericTargetActive(irst->trackedTargets[i], allMissiles);
 
 			if (!stillExists) {
-				// Missile destroyed or inactive - clear tracking
-				irst->trackedTargets[i] = NULL;
+				// Target destroyed or inactive - clear tracking
+				irst->trackedTargets[i].ptr = NULL;
 				irst->scanCount[i] = 0;
 			}
-			// If missile still exists but wasn't scanned, keep tracking but don't reset
+			// If target still exists but wasn't scanned, keep tracking but don't reset
 			// (allows brief occlusion without losing all progress)
 		}
 	}
@@ -569,7 +659,7 @@ void InitializeMissile(struct Missile *missile) {
 	missile->seeker.tiltSpeed = randRange(0.5f, 3.5f);
 	missile->seeker.searchYaw = randRange(-0.5f, 0.5f);
 	missile->seeker.searchPitch = randRange(-0.3f, 0.3f);
-	missile->seeker.trackedTarget = NULL;
+	missile->seeker.trackedTarget.ptr = NULL;
 	missile->seeker.consecutiveDetections = 0;
 	missile->seeker.requiredDetections = 3;
 	missile->seeker.closePointsCount = 0;
@@ -1236,11 +1326,13 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 		if (bestIdx >= 0 && bestIdx < count) {
 			struct Missile *detectedTarget = allMissiles->missiles[bestIdx];
 
-			// Multi-scan tracking logic
-			if (missile->seeker.trackedTarget == detectedTarget) {
+			// Multi-scan tracking logic (only tracking missiles for now in Lunching state)
+			if (missile->seeker.trackedTarget.ptr == detectedTarget && missile->seeker.trackedTarget.type == MISSILE_TYPE) {
 				missile->seeker.consecutiveDetections++;
 			} else {
-				missile->seeker.trackedTarget = detectedTarget;
+				missile->seeker.trackedTarget.ptr = detectedTarget;
+				missile->seeker.trackedTarget.type = MISSILE_TYPE;
+				missile->seeker.trackedTarget.size = sizeof(struct Missile);
 				missile->seeker.consecutiveDetections = 1;
 			}
 
@@ -1291,7 +1383,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 				}
 			}
 		} else {
-			missile->seeker.trackedTarget = NULL;
+			missile->seeker.trackedTarget.ptr = NULL;
 			missile->seeker.consecutiveDetections = 0;
 		}
 
@@ -1378,10 +1470,10 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			struct Missile *detectedTarget = allMissiles->missiles[bestIdx];
 
 			// Verify we're still tracking the same target
-			if (missile->seeker.trackedTarget == detectedTarget) {
+			if (missile->seeker.trackedTarget.ptr == detectedTarget && missile->seeker.trackedTarget.type == MISSILE_TYPE) {
 				missile->seeker.consecutiveDetections++;
 			} else {
-				missile->seeker.trackedTarget = NULL;
+				missile->seeker.trackedTarget.ptr = NULL;
 				missile->seeker.consecutiveDetections = 0;
 				missile->seeker.lockState = Searching;
 			}
@@ -1450,7 +1542,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 				}
 			}
 		} else {
-			missile->seeker.trackedTarget = NULL;
+			missile->seeker.trackedTarget.ptr = NULL;
 			missile->seeker.consecutiveDetections = 0;
 			missile->seeker.lockState = Searching;
 		}

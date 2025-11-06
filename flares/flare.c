@@ -108,6 +108,8 @@ void UpdateFlare(struct Flare *flare, float deltaTime) {
 	float timeTook = 0.0f;
 	fireSimStep(&flare->flareSim, deltaTime, &timeTook);
 
+	float averageVelocity[3] = {0.0f, 0.0f, 0.0f};
+
 	for (int i = 0; i < NUM_FIRE_PARTICLES; i++) {
 		float particleLifeRatio = flare->flareSim.lifeTime[i] / flare->flareSim.maxLifeTime;
 
@@ -120,8 +122,18 @@ void UpdateFlare(struct Flare *flare, float deltaTime) {
 				flare->coolingRate,
 				flare->burningRate,
 				flare->flareTemperature[i]);
+			averageVelocity[0] += flare->flareSim.xVelocity[i];
+			averageVelocity[1] += flare->flareSim.yVelocity[i];
+			averageVelocity[2] += flare->flareSim.zVelocity[i];
 		} else {
 			flare->flareTemperature[i] = flare->startingTemperature;
 		}
 	}
+	averageVelocity[0] /= NUM_FIRE_PARTICLES;
+	averageVelocity[1] /= NUM_FIRE_PARTICLES;
+	averageVelocity[2] /= NUM_FIRE_PARTICLES;
+
+	flare->flareSim.basePosition[0] += averageVelocity[0] * deltaTime;
+	flare->flareSim.basePosition[1] += averageVelocity[1] * deltaTime;
+	flare->flareSim.basePosition[2] += averageVelocity[2] * deltaTime;
 }
