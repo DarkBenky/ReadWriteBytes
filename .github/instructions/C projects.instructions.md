@@ -26,6 +26,7 @@ applyTo: '**'
 - **Focused Implementation**: Generate the core logic, not scaffolding
 - **Idiomatic Code**: Follow language-specific best practices and standard library patterns
 - **Error Handling**: Include explicit error handling, avoid silent failures
+- **Documentation**: Do not generate extensive documentation—focus on code clarity instead so no extra docs are needed
 
 ## What to Avoid
 - Over-engineering solutions for simple problems

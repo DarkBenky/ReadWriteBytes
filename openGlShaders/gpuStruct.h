@@ -40,6 +40,8 @@ struct OpenCLContext {
 	cl_kernel overlayImage_kernel;        // Overlay image kernel
 	cl_kernel renderDepth;
 	cl_kernel composite_cones_kernel;
+	cl_kernel renderTerrainLOD_kernel;    // GPU LOD terrain rendering kernel
+	cl_kernel renderTerrainDepthLOD_kernel; // GPU LOD terrain depth-only rendering (for IRST seeker)
 	// buffers
 	cl_mem buffer_seeker_distances_atlas;
 	cl_mem buffer_seeker_distances;
@@ -51,6 +53,7 @@ struct OpenCLContext {
 	cl_mem buffer_valid_triangles; // Pre-calculated validity flags
 	cl_mem buffer_tileLists;       // Tile triangle lists
 	cl_mem buffer_tileListCounts;  // Triangle count per tile
+	cl_mem struct_mapGpu;         // Map data for OpenCL
 
 	// Add OpenGL interop members
 	GLuint gl_texture;		  // OpenGL texture ID

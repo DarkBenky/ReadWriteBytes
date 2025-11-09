@@ -2,8 +2,11 @@ from noise import pnoise2
 import numpy as np
 import random
 from PIL import Image
+import re
+import os
+from update_opencl_defines import OpenCLDefineUpdater
 
-MAP_SIZE = 750 # 15 km
+MAP_SIZE = 850 # 15 km
 CHUNKS = 16
 ITERATIONS = 3
 HEIGHT_RANGE = (-45, 27.5)  # Elevation range with more dramatic variation
@@ -627,11 +630,12 @@ def generate_mash(map, file_name, lod_scale=1.0):
     else:
         print(f"Error in file size: expected {fileSize}, got {actualFileSize}.")
 
-    return minBB, maxBB
+    return minBB, maxBB, numOfTriangles
             
 
 
 if __name__ == "__main__":
+    seed = random.randint(0, 10000)
     hight_res, mid_res, low_res, test_map = generate_height_map(MAP_SIZE, seed=421, chunks=CHUNKS, mid_res=2, low_res=8)
     
     print("\nGenerating binary mesh file...")
@@ -659,26 +663,76 @@ if __name__ == "__main__":
     print(f"All low-res chunks: {low_shape}")
     
     # Generate binary files for all chunks
+    # Match C code indexing: idx = (world_x - min_x) * height + (world_y - min_y)
+    # So: x = i / tilesPerRow, y = i % tilesPerRow
+    highResTringleCount = 0
     for i, chunk in enumerate(hight_res):
         y = i // CHUNKS
         x = i % CHUNKS
-        minBB, maxBB = generate_mash(chunk, file_name=f"highRes/terrain_chunk_x_{x}_y_{y}_.bin", lod_scale=1.0)
+        minBB, maxBB, numOfTriangles = generate_mash(chunk, file_name=f"highRes/terrain_chunk_x_{x}_y_{y}_.bin", lod_scale=1.0)
         save_height_map_image(chunk, save_path=f"highRes/terrain_highres_chunk_x_{x}_y_{y}_.png")
         save_height_gradient_image(chunk, save_path=f"highRes/height_gradient_highres_chunk_x_{x}_y_{y}_.png")
+        highResTringleCount += numOfTriangles
     
+    midResTringleCount = 0
     for i, chunk in enumerate(mid_res):
         y = i // CHUNKS
         x = i % CHUNKS
-        minBB1, maxBB1 = generate_mash(chunk, file_name=f"midRes/terrain_midres_chunk_x_{x}_y_{y}_.bin", lod_scale=2.0)
+        minBB1, maxBB1, numOfTriangles = generate_mash(chunk, file_name=f"midRes/terrain_midres_chunk_x_{x}_y_{y}_.bin", lod_scale=2.0)
         save_height_map_image(chunk, save_path=f"midRes/terrain_midres_chunk_x_{x}_y_{y}_.png")
         save_height_gradient_image(chunk, save_path=f"midRes/height_gradient_midres_chunk_x_{x}_y_{y}_.png")
-
+        midResTringleCount += numOfTriangles
+    
+    lowResTringleCount = 0
     for i, chunk in enumerate(low_res):
         y = i // CHUNKS
         x = i % CHUNKS
-        minBB2, maxBB2 = generate_mash(chunk, file_name=f"lowRes/terrain_lowres_chunk_x_{x}_y_{y}_.bin", lod_scale=8.0)
+        minBB2, maxBB2, numOfTriangles = generate_mash(chunk, file_name=f"lowRes/terrain_lowres_chunk_x_{x}_y_{y}_.bin", lod_scale=8.0)
         save_height_gradient_image(chunk, save_path=f"lowRes/height_gradient_lowres_chunk_x_{x}_y_{y}_.png")
         save_height_map_image(chunk, save_path=f"lowRes/terrain_lowres_chunk_x_{x}_y_{y}_.png")
+        lowResTringleCount += numOfTriangles
+
+    # Update or append counts to loadMap.h
+    with open("loadMap.h", "r") as f:
+        content = f.read()
+    
+    # Remove old defines if they exist
+    content = re.sub(r'#define HIGH_RES_TRIANGLE_COUNT \d+\n', '', content)
+    content = re.sub(r'#define MID_RES_TRIANGLE_COUNT \d+\n', '', content)
+    content = re.sub(r'#define LOW_RES_TRIANGLE_COUNT \d+\n', '', content)
+    content = re.sub(r'#define CHUNK_COUNT \d+\n', '', content)
+    
+    # Add new defines right after #define TERRAIN_LOADER_H
+    lines = content.split('\n')
+    new_lines = []
+    inserted = False
+    
+    for i, line in enumerate(lines):
+        new_lines.append(line)
+        # Insert after the header guard #define
+        if not inserted and line.strip() == '#define TERRAIN_LOADER_H':
+            new_lines.append('')
+            new_lines.append(f'#define HIGH_RES_TRIANGLE_COUNT {highResTringleCount}')
+            new_lines.append(f'#define MID_RES_TRIANGLE_COUNT {midResTringleCount}')
+            new_lines.append(f'#define LOW_RES_TRIANGLE_COUNT {lowResTringleCount}')
+            new_lines.append(f'#define CHUNK_COUNT {len(hight_res)}')
+            inserted = True
+    
+    with open("loadMap.h", "w") as f:
+        f.write('\n'.join(new_lines))
+
+    # Update OpenCL defines dynamically
+    print("\nUpdating OpenCL kernel defines...")
+    cl_file_path = os.path.join(os.path.dirname(__file__), '../openGlShaders/screenCordinates.cl')
+    updater = OpenCLDefineUpdater(cl_file_path)
+    updater.update_defines({
+        'HIGH_RES_TRIANGLE_COUNT': highResTringleCount,
+        'MID_RES_TRIANGLE_COUNT': midResTringleCount,
+        'LOW_RES_TRIANGLE_COUNT': lowResTringleCount,
+        'CHUNK_COUNT': len(hight_res)
+    })
+    print("OpenCL kernel defines updated successfully!")
+    
     
     print(f"\n Generated {len(hight_res)} chunks at each LOD level")
     print(f"Chunk grid size: {CHUNKS} x {CHUNKS}")

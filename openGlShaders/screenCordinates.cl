@@ -2,6 +2,54 @@
 #define TILE_SIZE 16
 #define MAX_TRIS_PER_TILE 512
 
+#define HIGH_RES_TRIANGLE_COUNT 1305334
+#define MID_RES_TRIANGLE_COUNT 329922
+#define LOW_RES_TRIANGLE_COUNT 18106
+#define CHUNK_COUNT 256
+#define LOD_HIGH_DISTANCE 10000.0f
+#define LOD_MED_DISTANCE 25000.0f
+#define LOD_LOW_DISTANCE 50000.0f
+
+struct MapGPU {
+    int numberOfTiles;
+    float posX;
+    float posY;
+    float posZ;
+    float tileSizeX;
+    float tileSizeY;
+    float tileSizeZ;
+    int tilesX;
+    int tilesY;
+    float mapSizeX;
+    float mapSizeY;
+    float mapSizeZ;
+    int chunkStartHigh[CHUNK_COUNT];
+    int chunkStartMed[CHUNK_COUNT];
+    int chunkStartLow[CHUNK_COUNT];
+
+    float chunkHighTrianglesData[HIGH_RES_TRIANGLE_COUNT * 9];
+    float chunkHighRoughnessData[HIGH_RES_TRIANGLE_COUNT];
+    float chunkHighMetallicData[HIGH_RES_TRIANGLE_COUNT];
+    float chunkHighEmissionData[HIGH_RES_TRIANGLE_COUNT];
+    float chunkHighNormalsData[HIGH_RES_TRIANGLE_COUNT * 3];
+    float chunkHighColorsData[HIGH_RES_TRIANGLE_COUNT * 3];
+
+    float chunkMedTrianglesData[MID_RES_TRIANGLE_COUNT * 9];
+    float chunkMedRoughnessData[MID_RES_TRIANGLE_COUNT];
+    float chunkMedMetallicData[MID_RES_TRIANGLE_COUNT];
+    float chunkMedEmissionData[MID_RES_TRIANGLE_COUNT];
+    float chunkMedNormalsData[MID_RES_TRIANGLE_COUNT * 3];
+    float chunkMedColorsData[MID_RES_TRIANGLE_COUNT * 3];
+
+    float chunkLowTrianglesData[LOW_RES_TRIANGLE_COUNT * 9];
+    float chunkLowRoughnessData[LOW_RES_TRIANGLE_COUNT];
+    float chunkLowMetallicData[LOW_RES_TRIANGLE_COUNT];
+    float chunkLowEmissionData[LOW_RES_TRIANGLE_COUNT];
+    float chunkLowNormalsData[LOW_RES_TRIANGLE_COUNT * 3];
+    float chunkLowColorsData[LOW_RES_TRIANGLE_COUNT * 3];
+
+};
+
 float fract(float x) {
     return x - floor(x);
 }
@@ -3036,6 +3084,189 @@ __kernel void renderDepthBufferFast(
     }
 }
 
+// GPU-based LOD terrain depth-only rendering kernel (for IRST seeker)
+__kernel void renderTerrainDepthLOD(
+    __global const struct MapGPU *mapData,
+    __global float *ScreenDistances,
+    const float3 camPos,
+    const float3 camDir,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight
+) {
+    int triangleId = get_global_id(0);
+    
+    // Determine which chunk and LOD level this triangle belongs to
+    int chunkIdx = 0;
+    int localTriangleId = triangleId;
+    int lodLevel = 3;
+    
+    // Find which chunk and LOD this triangle belongs to
+    for (int i = 0; i < CHUNK_COUNT; i++) {
+        int highStart = mapData->chunkStartHigh[i];
+        int medStart = mapData->chunkStartMed[i];
+        int lowStart = mapData->chunkStartLow[i];
+        
+        int highCount = (i < CHUNK_COUNT - 1) ? 
+            (mapData->chunkStartHigh[i + 1] - highStart) / 9 : 
+            (HIGH_RES_TRIANGLE_COUNT * 9 - highStart) / 9;
+        int medCount = (i < CHUNK_COUNT - 1) ? 
+            (mapData->chunkStartMed[i + 1] - medStart) / 9 : 
+            (MID_RES_TRIANGLE_COUNT * 9 - medStart) / 9;
+        int lowCount = (i < CHUNK_COUNT - 1) ? 
+            (mapData->chunkStartLow[i + 1] - lowStart) / 9 : 
+            (LOW_RES_TRIANGLE_COUNT * 9 - lowStart) / 9;
+        
+        if (localTriangleId < highCount) {
+            chunkIdx = i;
+            lodLevel = 3;
+            break;
+        }
+        localTriangleId -= highCount;
+        
+        if (localTriangleId < medCount) {
+            chunkIdx = i;
+            lodLevel = 2;
+            break;
+        }
+        localTriangleId -= medCount;
+        
+        if (localTriangleId < lowCount) {
+            chunkIdx = i;
+            lodLevel = 1;
+            break;
+        }
+        localTriangleId -= lowCount;
+    }
+    
+    // Calculate chunk center and distance
+    int tilesPerRow = (int)(mapData->mapSizeZ / mapData->tileSizeZ);
+    int chunkX = chunkIdx / tilesPerRow;
+    int chunkZ = chunkIdx % tilesPerRow;
+    
+    float chunkCenterX = mapData->posX + chunkX * mapData->tileSizeX + mapData->tileSizeX * 0.5f;
+    float chunkCenterZ = mapData->posZ + chunkZ * mapData->tileSizeZ + mapData->tileSizeZ * 0.5f;
+    
+    float dx = camPos.x - chunkCenterX;
+    float dz = camPos.z - chunkCenterZ;
+    float distanceToChunk = sqrt(dx * dx + dz * dz);
+    
+    // Determine required LOD based on distance
+    int requiredLOD = 0;
+    if (distanceToChunk <= LOD_HIGH_DISTANCE) {
+        requiredLOD = 3;
+    } else if (distanceToChunk <= LOD_MED_DISTANCE) {
+        requiredLOD = 2;
+    } else if (distanceToChunk <= LOD_LOW_DISTANCE) {
+        requiredLOD = 1;
+    }
+    
+    if (lodLevel != requiredLOD) return;
+    
+    // Load triangle vertices
+    float3 p0, p1, p2;
+    int dataOffset;
+    
+    if (lodLevel == 3) {
+        dataOffset = mapData->chunkStartHigh[chunkIdx] + localTriangleId * 9;
+        p0 = (float3)(mapData->chunkHighTrianglesData[dataOffset + 0],
+                      mapData->chunkHighTrianglesData[dataOffset + 1],
+                      mapData->chunkHighTrianglesData[dataOffset + 2]);
+        p1 = (float3)(mapData->chunkHighTrianglesData[dataOffset + 3],
+                      mapData->chunkHighTrianglesData[dataOffset + 4],
+                      mapData->chunkHighTrianglesData[dataOffset + 5]);
+        p2 = (float3)(mapData->chunkHighTrianglesData[dataOffset + 6],
+                      mapData->chunkHighTrianglesData[dataOffset + 7],
+                      mapData->chunkHighTrianglesData[dataOffset + 8]);
+    } else if (lodLevel == 2) {
+        dataOffset = mapData->chunkStartMed[chunkIdx] + localTriangleId * 9;
+        p0 = (float3)(mapData->chunkMedTrianglesData[dataOffset + 0],
+                      mapData->chunkMedTrianglesData[dataOffset + 1],
+                      mapData->chunkMedTrianglesData[dataOffset + 2]);
+        p1 = (float3)(mapData->chunkMedTrianglesData[dataOffset + 3],
+                      mapData->chunkMedTrianglesData[dataOffset + 4],
+                      mapData->chunkMedTrianglesData[dataOffset + 5]);
+        p2 = (float3)(mapData->chunkMedTrianglesData[dataOffset + 6],
+                      mapData->chunkMedTrianglesData[dataOffset + 7],
+                      mapData->chunkMedTrianglesData[dataOffset + 8]);
+    } else {
+        dataOffset = mapData->chunkStartLow[chunkIdx] + localTriangleId * 9;
+        p0 = (float3)(mapData->chunkLowTrianglesData[dataOffset + 0],
+                      mapData->chunkLowTrianglesData[dataOffset + 1],
+                      mapData->chunkLowTrianglesData[dataOffset + 2]);
+        p1 = (float3)(mapData->chunkLowTrianglesData[dataOffset + 3],
+                      mapData->chunkLowTrianglesData[dataOffset + 4],
+                      mapData->chunkLowTrianglesData[dataOffset + 5]);
+        p2 = (float3)(mapData->chunkLowTrianglesData[dataOffset + 6],
+                      mapData->chunkLowTrianglesData[dataOffset + 7],
+                      mapData->chunkLowTrianglesData[dataOffset + 8]);
+    }
+    
+    // Back-face culling
+    float3 edge1 = p1 - p0;
+    float3 edge2 = p2 - p0;
+    float3 fn = normalize(cross(edge1, edge2));
+    float3 center = (p0 + p1 + p2) * (1.0f/3.0f);
+    if (dot(fn, normalize(camPos - center)) <= 0.0f) return;
+    
+    // Camera basis
+    float3 F = normalize(camDir);
+    float3 U = (float3)(0,1,0);
+    float3 R = normalize(cross(F,U));
+    U = cross(R,F);
+    
+    float invF = 1.0f / fov;
+    float halfW = screenWidth * 0.5f, halfH = screenHeight * 0.5f;
+    
+    // Project vertices
+    float3 r0 = p0 - camPos, r1 = p1 - camPos, r2 = p2 - camPos;
+    float d0 = dot(r0,F), d1 = dot(r1,F), d2 = dot(r2,F);
+    float minD = fmin(fmin(d0,d1),d2);
+    if (minD <= 0.001f) return;
+    
+    float s0 = invF/d0, s1 = invF/d1, s2 = invF/d2;
+    float3 sp0 = (float3)(dot(r0,R)*halfW*s0 + halfW, -dot(r0,U)*halfH*s0 + halfH, d0);
+    float3 sp1 = (float3)(dot(r1,R)*halfW*s1 + halfW, -dot(r1,U)*halfH*s1 + halfH, d1);
+    float3 sp2 = (float3)(dot(r2,R)*halfW*s2 + halfW, -dot(r2,U)*halfH*s2 + halfH, d2);
+    
+    // Frustum culling
+    float minXf = fmin(fmin(sp0.x,sp1.x),sp2.x),
+          maxXf = fmax(fmax(sp0.x,sp1.x),sp2.x),
+          minYf = fmin(fmin(sp0.y,sp1.y),sp2.y),
+          maxYf = fmax(fmax(sp0.y,sp1.y),sp2.y);
+    if (maxXf < 0 || minXf >= screenWidth || maxYf < 0 || minYf >= screenHeight) return;
+    
+    int x0 = max(0,(int)minXf), x1 = min(screenWidth-1,(int)maxXf);
+    int y0 = max(0,(int)minYf), y1 = min(screenHeight-1,(int)maxYf);
+    
+    // Barycentric setup
+    float2 e1 = sp2.xy - sp0.xy, e2 = sp1.xy - sp0.xy;
+    float d00 = dot(e1,e1), d01 = dot(e1,e2), d11 = dot(e2,e2);
+    float invDen = 1.0f / (d00*d11 - d01*d01);
+    
+    // Rasterize (depth only)
+    for (int y = y0; y <= y1; ++y) {
+        float cy = (y + 0.5f) - sp0.y;
+        int row = y * screenWidth;
+        for (int x = x0; x <= x1; ++x) {
+            float cx = (x + 0.5f) - sp0.x;
+            float l0 = e1.x*cx + e1.y*cy;
+            float l1 = e2.x*cx + e2.y*cy;
+            float u = (d11*l0 - d01*l1) * invDen;
+            float v = (d00*l1 - d01*l0) * invDen;
+            if (u >= 0.0f && v >= 0.0f && u + v <= 1.0f) {
+                int idx = row + x;
+                float w = 1.0f - u - v;
+                float depth = w*sp0.z + u*sp1.z + v*sp2.z;
+                float prev = ScreenDistances[idx];
+                if (prev == 0.0f || depth < prev) {
+                    ScreenDistances[idx] = depth;
+                }
+            }
+        }
+    }
+}
+
 // Helper function: find ray-cone intersection
 // Returns the distance along the ray, or -1 if no intersection
 float findConeIntersection(
@@ -3342,3 +3573,280 @@ __kernel void composite_cones(
     }
 }
 
+// GPU-based LOD terrain rendering kernel
+__kernel void renderTerrainLOD(
+    __global const struct MapGPU *mapData,
+    __global float *ScreenColors,
+    __global float *ScreenDistances,
+    __global float *ScreenNormals,
+    __global float *ScreenMaterialRoughness,
+    __global float *ScreenMaterialMetallic,
+    __global float *ScreenMaterialEmission,
+    const float3 camPos,
+    const float3 camDir,
+    const float fov,
+    const int screenWidth,
+    const int screenHeight
+) {
+    int triangleId = get_global_id(0);
+    
+    // Determine which chunk and LOD level this triangle belongs to
+    int chunkIdx = 0;
+    int localTriangleId = triangleId;
+    int lodLevel = 3; // Start with high LOD
+    
+    // Find which chunk and LOD this triangle belongs to
+    for (int i = 0; i < CHUNK_COUNT; i++) {
+        int highStart = mapData->chunkStartHigh[i];
+        int medStart = mapData->chunkStartMed[i];
+        int lowStart = mapData->chunkStartLow[i];
+        
+        // Calculate chunk bounds (number of triangles)
+        int highCount = (i < CHUNK_COUNT - 1) ? 
+            (mapData->chunkStartHigh[i + 1] - highStart) / 9 : 
+            (HIGH_RES_TRIANGLE_COUNT * 9 - highStart) / 9;
+        int medCount = (i < CHUNK_COUNT - 1) ? 
+            (mapData->chunkStartMed[i + 1] - medStart) / 9 : 
+            (MID_RES_TRIANGLE_COUNT * 9 - medStart) / 9;
+        int lowCount = (i < CHUNK_COUNT - 1) ? 
+            (mapData->chunkStartLow[i + 1] - lowStart) / 9 : 
+            (LOW_RES_TRIANGLE_COUNT * 9 - lowStart) / 9;
+        
+        // Check if triangle is in this chunk's high LOD
+        if (localTriangleId < highCount) {
+            chunkIdx = i;
+            lodLevel = 3;
+            break;
+        }
+        localTriangleId -= highCount;
+        
+        // Check medium LOD
+        if (localTriangleId < medCount) {
+            chunkIdx = i;
+            lodLevel = 2;
+            break;
+        }
+        localTriangleId -= medCount;
+        
+        // Check low LOD
+        if (localTriangleId < lowCount) {
+            chunkIdx = i;
+            lodLevel = 1;
+            break;
+        }
+        localTriangleId -= lowCount;
+    }
+    
+    // Calculate chunk center position
+    // CPU uses: idx = (world_x - min_x) * height + (world_y - min_y)
+    // So to reverse: given idx, we need to find world_x and world_y
+    int tilesPerCol = (int)(mapData->mapSizeZ / mapData->tileSizeZ);
+    int chunkX = chunkIdx / tilesPerCol;  // Row index
+    int chunkY = chunkIdx % tilesPerCol;  // Column index
+    
+    float chunkCenterX = mapData->posX + chunkX * mapData->tileSizeX + mapData->tileSizeX * 0.5f;
+    float chunkCenterZ = mapData->posZ + chunkY * mapData->tileSizeZ + mapData->tileSizeZ * 0.5f;
+    
+    // Calculate distance from camera to chunk center
+    float dx = camPos.x - chunkCenterX;
+    float dz = camPos.z - chunkCenterZ;
+    float distanceToChunk = sqrt(dx * dx + dz * dz);
+    
+    // Determine required LOD based on distance
+    int requiredLOD = 0; // LOD_NONE
+    if (distanceToChunk <= LOD_HIGH_DISTANCE) {
+        requiredLOD = 3; // LOD_HIGH
+    } else if (distanceToChunk <= LOD_MED_DISTANCE) {
+        requiredLOD = 2; // LOD_MEDIUM
+    } else if (distanceToChunk <= LOD_LOW_DISTANCE) {
+        requiredLOD = 1; // LOD_LOW
+    }
+    
+    // Skip this triangle if it doesn't match the required LOD
+    if (lodLevel != requiredLOD) {
+        return;
+    }
+    
+    // Load triangle vertices based on LOD level
+    float3 p0, p1, p2, normal, color;
+    float roughness, metallic, emission;
+    int dataOffset, materialOffset;
+    
+    if (lodLevel == 3) {
+        dataOffset = mapData->chunkStartHigh[chunkIdx] + localTriangleId * 9;
+        materialOffset = mapData->chunkStartHigh[chunkIdx] / 9 + localTriangleId;
+        
+        p0 = (float3)(mapData->chunkHighTrianglesData[dataOffset + 0],
+                      mapData->chunkHighTrianglesData[dataOffset + 1],
+                      mapData->chunkHighTrianglesData[dataOffset + 2]);
+        p1 = (float3)(mapData->chunkHighTrianglesData[dataOffset + 3],
+                      mapData->chunkHighTrianglesData[dataOffset + 4],
+                      mapData->chunkHighTrianglesData[dataOffset + 5]);
+        p2 = (float3)(mapData->chunkHighTrianglesData[dataOffset + 6],
+                      mapData->chunkHighTrianglesData[dataOffset + 7],
+                      mapData->chunkHighTrianglesData[dataOffset + 8]);
+        
+        // Load color
+        color = (float3)(mapData->chunkHighColorsData[materialOffset * 3 + 0],
+                        mapData->chunkHighColorsData[materialOffset * 3 + 1],
+                        mapData->chunkHighColorsData[materialOffset * 3 + 2]);
+        
+        // Load normal
+        normal = (float3)(mapData->chunkHighNormalsData[materialOffset * 3 + 0],
+                         mapData->chunkHighNormalsData[materialOffset * 3 + 1],
+                         mapData->chunkHighNormalsData[materialOffset * 3 + 2]);
+        
+        // Load material properties
+        roughness = mapData->chunkHighRoughnessData[materialOffset];
+        metallic = mapData->chunkHighMetallicData[materialOffset];
+        emission = mapData->chunkHighEmissionData[materialOffset];
+        
+    } else if (lodLevel == 2) {
+        dataOffset = mapData->chunkStartMed[chunkIdx] + localTriangleId * 9;
+        materialOffset = mapData->chunkStartMed[chunkIdx] / 9 + localTriangleId;
+        
+        p0 = (float3)(mapData->chunkMedTrianglesData[dataOffset + 0],
+                      mapData->chunkMedTrianglesData[dataOffset + 1],
+                      mapData->chunkMedTrianglesData[dataOffset + 2]);
+        p1 = (float3)(mapData->chunkMedTrianglesData[dataOffset + 3],
+                      mapData->chunkMedTrianglesData[dataOffset + 4],
+                      mapData->chunkMedTrianglesData[dataOffset + 5]);
+        p2 = (float3)(mapData->chunkMedTrianglesData[dataOffset + 6],
+                      mapData->chunkMedTrianglesData[dataOffset + 7],
+                      mapData->chunkMedTrianglesData[dataOffset + 8]);
+        
+        // Load color
+        color = (float3)(mapData->chunkMedColorsData[materialOffset * 3 + 0],
+                        mapData->chunkMedColorsData[materialOffset * 3 + 1],
+                        mapData->chunkMedColorsData[materialOffset * 3 + 2]);
+        
+        // Load normal
+        normal = (float3)(mapData->chunkMedNormalsData[materialOffset * 3 + 0],
+                         mapData->chunkMedNormalsData[materialOffset * 3 + 1],
+                         mapData->chunkMedNormalsData[materialOffset * 3 + 2]);
+        
+        // Load material properties
+        roughness = mapData->chunkMedRoughnessData[materialOffset];
+        metallic = mapData->chunkMedMetallicData[materialOffset];
+        emission = mapData->chunkMedEmissionData[materialOffset];
+        
+    } else {
+        dataOffset = mapData->chunkStartLow[chunkIdx] + localTriangleId * 9;
+        materialOffset = mapData->chunkStartLow[chunkIdx] / 9 + localTriangleId;
+        
+        p0 = (float3)(mapData->chunkLowTrianglesData[dataOffset + 0],
+                      mapData->chunkLowTrianglesData[dataOffset + 1],
+                      mapData->chunkLowTrianglesData[dataOffset + 2]);
+        p1 = (float3)(mapData->chunkLowTrianglesData[dataOffset + 3],
+                      mapData->chunkLowTrianglesData[dataOffset + 4],
+                      mapData->chunkLowTrianglesData[dataOffset + 5]);
+        p2 = (float3)(mapData->chunkLowTrianglesData[dataOffset + 6],
+                      mapData->chunkLowTrianglesData[dataOffset + 7],
+                      mapData->chunkLowTrianglesData[dataOffset + 8]);
+        
+        // Load color
+        color = (float3)(mapData->chunkLowColorsData[materialOffset * 3 + 0],
+                        mapData->chunkLowColorsData[materialOffset * 3 + 1],
+                        mapData->chunkLowColorsData[materialOffset * 3 + 2]);
+        
+        // Load normal
+        normal = (float3)(mapData->chunkLowNormalsData[materialOffset * 3 + 0],
+                         mapData->chunkLowNormalsData[materialOffset * 3 + 1],
+                         mapData->chunkLowNormalsData[materialOffset * 3 + 2]);
+        
+        // Load material properties
+        roughness = mapData->chunkLowRoughnessData[materialOffset];
+        metallic = mapData->chunkLowMetallicData[materialOffset];
+        emission = mapData->chunkLowEmissionData[materialOffset];
+    }
+    
+    // Calculate face normal from geometry (for back-face culling)
+    float3 edge1 = p1 - p0;
+    float3 edge2 = p2 - p0;
+    float3 fn = normalize(cross(edge1, edge2));
+    
+    // Back-face culling
+    float3 center = (p0 + p1 + p2) * (1.0f/3.0f);
+    if (dot(fn, normalize(camPos - center)) <= 0.0f) return;
+    
+    // Camera basis
+    float3 F = normalize(camDir);
+    float3 U = (float3)(0,1,0);
+    float3 R = normalize(cross(F,U));
+    U = cross(R,F);
+    
+    // Constants
+    float invF = 1.0f / fov;
+    float halfW = screenWidth * 0.5f, halfH = screenHeight * 0.5f;
+    
+    // Compute depths and screen projections
+    float3 r0 = p0 - camPos, r1 = p1 - camPos, r2 = p2 - camPos;
+    float d0 = dot(r0,F), d1 = dot(r1,F), d2 = dot(r2,F);
+    float minD = fmin(fmin(d0,d1),d2);
+    if (minD <= 0.001f) return;
+    
+    float s0 = invF/d0, s1 = invF/d1, s2 = invF/d2;
+    float3 sp0 = (float3)(dot(r0,R)*halfW*s0 + halfW, -dot(r0,U)*halfH*s0 + halfH, d0);
+    float3 sp1 = (float3)(dot(r1,R)*halfW*s1 + halfW, -dot(r1,U)*halfH*s1 + halfH, d1);
+    float3 sp2 = (float3)(dot(r2,R)*halfW*s2 + halfW, -dot(r2,U)*halfH*s2 + halfH, d2);
+    
+    // Frustum culling & bounding box
+    float minXf = fmin(fmin(sp0.x,sp1.x),sp2.x),
+          maxXf = fmax(fmax(sp0.x,sp1.x),sp2.x),
+          minYf = fmin(fmin(sp0.y,sp1.y),sp2.y),
+          maxYf = fmax(fmax(sp0.y,sp1.y),sp2.y);
+    if (maxXf < 0 || minXf >= screenWidth || maxYf < 0 || minYf >= screenHeight) return;
+    
+    int x0 = max(0,(int)minXf), x1 = min(screenWidth-1,(int)maxXf);
+    int y0 = max(0,(int)minYf), y1 = min(screenHeight-1,(int)maxYf);
+    
+    // Small triangle culling
+    float area = fabs((sp1.x-sp0.x)*(sp2.y-sp0.y) - (sp2.x-sp0.x)*(sp1.y-sp0.y)) * 0.5f;
+    if (area < 0.5f) return;
+    
+    // Precompute barycentric constants
+    float2 e1 = sp2.xy - sp0.xy, e2 = sp1.xy - sp0.xy;
+    float d00 = dot(e1,e1), d01 = dot(e1,e2), d11 = dot(e2,e2);
+    float invDen = 1.0f / (d00*d11 - d01*d01);
+    
+    // Use the stored normal (normalized)
+    float3 nrm = normalize(normal);
+    
+    // Rasterize
+    for (int y = y0; y <= y1; ++y) {
+        float cy = (y + 0.5f) - sp0.y;
+        int row = y * screenWidth;
+        for (int x = x0; x <= x1; ++x) {
+            float cx = (x + 0.5f) - sp0.x;
+            float l0 = e1.x*cx + e1.y*cy;
+            float l1 = e2.x*cx + e2.y*cy;
+            float u = (d11*l0 - d01*l1) * invDen;
+            float v = (d00*l1 - d01*l0) * invDen;
+            if (u >= 0.0f && v >= 0.0f && u + v <= 1.0f) {
+                int idx = row + x;
+                float w = 1.0f - u - v;
+                float depth = w*sp0.z + u*sp1.z + v*sp2.z;
+                float prev = ScreenDistances[idx];
+                if (prev != 0.0f && depth >= prev) continue;
+                ScreenDistances[idx] = depth;
+                
+                int i3 = idx * 3;
+                ScreenNormals[i3  ] = nrm.x;
+                ScreenNormals[i3+1] = nrm.y;
+                ScreenNormals[i3+2] = nrm.z;
+                
+                // Apply basic lighting to the stored color
+                float intensity = max(0.3f, dot(nrm, normalize((float3)(0.3f, 0.7f, 0.5f))));
+                float3 finalCol = clamp(color * intensity, 0.0f, 1.0f);
+                ScreenColors[i3  ] = finalCol.x;
+                ScreenColors[i3+1] = finalCol.y;
+                ScreenColors[i3+2] = finalCol.z;
+                
+                // Store material properties
+                ScreenMaterialRoughness[idx] = roughness;
+                ScreenMaterialMetallic[idx]  = metallic;
+                ScreenMaterialEmission[idx]  = emission;
+            }
+        }
+    }
+}

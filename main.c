@@ -24,6 +24,7 @@
 #include "mapGeneration/loadMap.h"
 
 void *SharedMem = NULL;
+#define USE_GPU_LOD 1 // 1 = GPU LOD selection, 0 = CPU LOD selection
 #define chartPosY 480 // Y position on screen for timing chart
 #define chartPosX 700 // X position on screen for timing chart
 #define MAX_TEXT_LENGTH 2048
@@ -2304,9 +2305,127 @@ void renderWireframeOpenCL(struct OpenCLContext *ocl, struct Triangles *triangle
 	clReleaseEvent(kernel_event);
 }
 
+void renderTerrainLOD_GPU(struct OpenCLContext *ocl, struct Camera *camera, float *gpuTimeMs) {
+	cl_int err;
+	cl_event kernel_event;
+
+	// Set camera parameters
+	cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+	cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+	cl_float fov = camera->fov;
+	cl_int screen_width = ScreenWidth;
+	cl_int screen_height = ScreenHeight;
+
+	// Calculate total number of triangles across all LOD levels
+	int totalTriangles = HIGH_RES_TRIANGLE_COUNT + MID_RES_TRIANGLE_COUNT + LOW_RES_TRIANGLE_COUNT;
+
+	// Set kernel arguments
+	err = clSetKernelArg(ocl->renderTerrainLOD_kernel, 0, sizeof(cl_mem), &ocl->struct_mapGpu);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 1, sizeof(cl_mem), &ocl->buffer_screen_colors);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 2, sizeof(cl_mem), &ocl->buffer_distances);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 3, sizeof(cl_mem), &ocl->buffer_normals);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 4, sizeof(cl_mem), &ocl->buffer_screen_material_roughness);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 5, sizeof(cl_mem), &ocl->buffer_screen_material_metallic);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 6, sizeof(cl_mem), &ocl->buffer_screen_material_emission);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 7, sizeof(cl_float3), &cam_pos);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 8, sizeof(cl_float3), &cam_dir);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 9, sizeof(cl_float), &fov);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 10, sizeof(cl_int), &screen_width);
+	err |= clSetKernelArg(ocl->renderTerrainLOD_kernel, 11, sizeof(cl_int), &screen_height);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting renderTerrainLOD kernel arguments: %d\n", err);
+		return;
+	}
+
+	// Execute kernel - one work item per triangle
+	size_t global_work_size = totalTriangles;
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderTerrainLOD_kernel, 1, NULL,
+								 &global_work_size, NULL, 0, NULL, &kernel_event);
+
+	if (err != CL_SUCCESS) {
+		printf("Error executing renderTerrainLOD kernel: %d\n", err);
+		return;
+	}
+
+	clWaitForEvents(1, &kernel_event);
+
+	// Get timing info
+	if (gpuTimeMs) {
+		cl_ulong start_time, end_time;
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END, sizeof(end_time), &end_time, NULL);
+		*gpuTimeMs = (end_time - start_time) * 1e-6; // convert ns to ms
+	}
+
+	clReleaseEvent(kernel_event);
+}
+
+void renderTerrainDepthLOD_GPU(struct OpenCLContext *ocl, struct Camera *camera,
+							   cl_mem output_buffer, int screenWidth, int screenHeight,
+							   float *gpuTimeMs) {
+	cl_int err;
+	cl_event kernel_event;
+
+	// Clear output buffer
+	float zeroFloat = 0.0f;
+	err = clEnqueueFillBuffer(ocl->queue, output_buffer, &zeroFloat, sizeof(float), 0,
+							  screenWidth * screenHeight * sizeof(float), 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		fprintf(stderr, "Error clearing depth buffer: %d\n", err);
+		return;
+	}
+
+	// Set camera parameters
+	cl_float3 cam_pos = {camera->ray.origin[0], camera->ray.origin[1], camera->ray.origin[2]};
+	cl_float3 cam_dir = {camera->ray.direction[0], camera->ray.direction[1], camera->ray.direction[2]};
+	cl_float fov = camera->fov;
+	cl_int cl_screen_width = screenWidth;
+	cl_int cl_screen_height = screenHeight;
+
+	// Calculate total number of triangles across all LOD levels
+	int totalTriangles = HIGH_RES_TRIANGLE_COUNT + MID_RES_TRIANGLE_COUNT + LOW_RES_TRIANGLE_COUNT;
+
+	// Set kernel arguments
+	err = clSetKernelArg(ocl->renderTerrainDepthLOD_kernel, 0, sizeof(cl_mem), &ocl->struct_mapGpu);
+	err |= clSetKernelArg(ocl->renderTerrainDepthLOD_kernel, 1, sizeof(cl_mem), &output_buffer);
+	err |= clSetKernelArg(ocl->renderTerrainDepthLOD_kernel, 2, sizeof(cl_float3), &cam_pos);
+	err |= clSetKernelArg(ocl->renderTerrainDepthLOD_kernel, 3, sizeof(cl_float3), &cam_dir);
+	err |= clSetKernelArg(ocl->renderTerrainDepthLOD_kernel, 4, sizeof(cl_float), &fov);
+	err |= clSetKernelArg(ocl->renderTerrainDepthLOD_kernel, 5, sizeof(cl_int), &cl_screen_width);
+	err |= clSetKernelArg(ocl->renderTerrainDepthLOD_kernel, 6, sizeof(cl_int), &cl_screen_height);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting renderTerrainDepthLOD kernel arguments: %d\n", err);
+		return;
+	}
+
+	// Execute kernel
+	size_t global_work_size = totalTriangles;
+	err = clEnqueueNDRangeKernel(ocl->queue, ocl->renderTerrainDepthLOD_kernel, 1, NULL,
+								 &global_work_size, NULL, 0, NULL, &kernel_event);
+
+	if (err != CL_SUCCESS) {
+		printf("Error executing renderTerrainDepthLOD kernel: %d\n", err);
+		return;
+	}
+
+	clWaitForEvents(1, &kernel_event);
+
+	// Get timing info
+	if (gpuTimeMs) {
+		cl_ulong start_time, end_time;
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_START, sizeof(start_time), &start_time, NULL);
+		clGetEventProfilingInfo(kernel_event, CL_PROFILING_COMMAND_END, sizeof(end_time), &end_time, NULL);
+		*gpuTimeMs = (end_time - start_time) * 1e-6; // convert ns to ms
+	}
+
+	clReleaseEvent(kernel_event);
+}
+
 int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangles,
 						   struct SkyBox *skyBox, struct ImageFont *imageFont,
-						   struct BVHLinear *bvh, GLFWwindow *window, struct Missiles *missiles) {
+						   struct BVHLinear *bvh, GLFWwindow *window, struct Missiles *missiles, struct MapGPU *mapGPU) {
 	cl_int err;
 
 	// Make sure OpenGL context is current
@@ -2593,6 +2712,18 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 		return 0;
 	}
 
+	ocl->renderTerrainLOD_kernel = clCreateKernel(ocl->program, "renderTerrainLOD", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating renderTerrainLOD kernel: %d\n", err);
+		return 0;
+	}
+
+	ocl->renderTerrainDepthLOD_kernel = clCreateKernel(ocl->program, "renderTerrainDepthLOD", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating renderTerrainDepthLOD kernel: %d\n", err);
+		return 0;
+	}
+
 #if WATER_SIMULATION == 1
 	ocl->buffer_points = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY,
 										NUM_PARTICLES * 3 * sizeof(float), NULL, &err);
@@ -2604,6 +2735,13 @@ int initializeOpenCLWithGL(struct OpenCLContext *ocl, struct Triangles *triangle
 	// Set to NULL when water simulation is disabled
 	ocl->buffer_points = NULL;
 #endif
+
+	ocl->struct_mapGpu = clCreateBuffer(ocl->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+										sizeof(struct MapGPU), mapGPU, &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating MapGPU struct buffer: %d\n", err);
+		return 0;
+	}
 
 	ocl->buffer_seeker_distances = clCreateBuffer(ocl->context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
 												  MISSILE_SEEKER_SIZE * MISSILE_SEEKER_SIZE * sizeof(float), NULL, &err);
@@ -3453,9 +3591,17 @@ void projectParticlesOpenCL(struct OpenCLContext *ocl, struct PointSOA *particle
 			err = clEnqueueNDRangeKernel(ocl->queue, ocl->calculateVertex_kernel, 1, NULL, &vertex_global_size, NULL, 0, NULL, NULL);
 			clFinish(ocl->queue);
 
+#if USE_GPU_LOD == 1
+			renderTerrainLOD_GPU(ocl, camera, &gpuTimings->renderTrianglesTime);
+#else
 			renderWireframeOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+#endif
 		} else {
+#if USE_GPU_LOD == 1
+			renderTerrainLOD_GPU(ocl, camera, &gpuTimings->renderTrianglesTime);
+#else
 			renderTrianglesOpenCL_TwoPass(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+#endif
 		}
 	}
 
@@ -4072,9 +4218,17 @@ void projectParticlesOpenCL_NoWater(struct OpenCLContext *ocl, struct Camera *ca
 			err = clEnqueueNDRangeKernel(ocl->queue, ocl->calculateVertex_kernel, 1, NULL, &vertex_global_size, NULL, 0, NULL, NULL);
 			clFinish(ocl->queue);
 
+#if USE_GPU_LOD == 1
+			renderTerrainLOD_GPU(ocl, camera, &gpuTimings->renderTrianglesTime);
+#else
 			renderWireframeOpenCL(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+#endif
 		} else {
+#if USE_GPU_LOD == 1
+			renderTerrainLOD_GPU(ocl, camera, &gpuTimings->renderTrianglesTime);
+#else
 			renderTrianglesOpenCL_TwoPass(ocl, triangles, camera, &gpuTimings->renderTrianglesTime);
+#endif
 		}
 	}
 
@@ -5387,7 +5541,7 @@ int main() {
 		"mapGeneration/midRes",	 // Medium resolution directory
 		"mapGeneration/lowRes",	 // Low resolution directory
 		&terrain,
-		100.0f,		// Scale
+		150.0f,		// Scale
 		translate1, // Base translation [x, y, z]
 		90.0f,		// Rotation X (degrees)
 		0.0f,		// Rotation Y (degrees)
@@ -5400,6 +5554,13 @@ int main() {
 	printf("Terrain map initialized. Loading visible tiles based on camera...\n");
 	loadCurrentMap(&terrain, &camera, triangles);
 	printf("Loaded %d triangles from terrain\n", triangles->count);
+
+	struct MapGPU *mapGPU = (struct MapGPU *)malloc(sizeof(struct MapGPU));
+	if (!mapGPU) {
+		perror("Failed to allocate memory for mapGPU");
+		return 1;
+	}
+	initMapGPU(mapGPU, &terrain);
 
 	// CreateBoardPlane(0.0f, -20.0f, 0.0f, 50.0f, 32, triangles);
 
@@ -5434,7 +5595,7 @@ int main() {
 
 	// Now initialize OpenCL with OpenGL sharing
 	struct OpenCLContext ocl;
-	int useOpenCL = initializeOpenCLWithGL(&ocl, triangles, &skyBox, &font, &bvh, window, &missiles);
+	int useOpenCL = initializeOpenCLWithGL(&ocl, triangles, &skyBox, &font, &bvh, window, &missiles, mapGPU);
 	if (!useOpenCL) {
 		printf("Failed to initialize OpenCL-GL interop, falling back to CPU\n");
 	}
@@ -5577,27 +5738,12 @@ int main() {
 		float averageUpdateTime = (float)(afterUpdateTime - loopStartTime) / (float)CLOCKS_PER_SEC;
 
 		clock_t startRenderTime = clock();
-		// render depth map for IRST
 
-		loadCurrentMap(&terrain, &camera, triangles);
-		uploadTriangleData(&ocl, triangles);
-
+		// Render depth map for IRST using GPU LOD terrain (no CPU-side loading needed)
 		float tempTimeTookMs = 0.0f;
-		renderDepthBuffer(&ocl,
-						  ocl.buffer_triangle_v1,
-						  ocl.buffer_triangle_v2,
-						  ocl.buffer_triangle_v3,
-						  ocl.buffer_triangle_normals,
-						  ocl.buffer_seeker_distances,
-						  triangles->count,
-						  irst.seekerCamera.ray.origin,
-						  irst.seekerCamera.ray.direction,
-						  irst.seekerCamera.fov,
-						  MISSILE_SEEKER_SIZE,
-						  MISSILE_SEEKER_SIZE,
-						  irst.seekerDepthMap,
-						  &tempTimeTookMs,
-						  0);
+		renderTerrainDepthLOD_GPU(&ocl, &irst.seekerCamera, ocl.buffer_seeker_distances,
+								  MISSILE_SEEKER_SIZE, MISSILE_SEEKER_SIZE, &tempTimeTookMs);
+
 		IRSearchAndTrackStep(&missiles, &irst, dt);
 		render(particles, &camera, timePartition, particleIndexes, &ocl, triangles, &skyBox, &gpuTimings, &font, fireParticles, &missiles, &irst);
 		clock_t endRenderTime = clock();

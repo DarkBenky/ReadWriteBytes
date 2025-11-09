@@ -510,6 +510,166 @@ struct MapTile *get_tile(struct Map *map, int world_x, int world_y) {
 	return &map->tiles[idx];
 }
 
+struct MapTile *get_tile_by_index(struct Map *map, int index) {
+	if (!map || !map->tiles) {
+		return NULL;
+	}
+
+	int total_tiles = (int)(map->mapSizeX / map->tileSizeX) * (int)(map->mapSizeZ / map->tileSizeZ);
+	if (index < 0 || index >= total_tiles) {
+		return NULL;
+	}
+
+	return &map->tiles[index];
+}
+
+void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
+	if (!mapGpu) {
+		return;
+	}
+
+	mapGpu->numberOfTiles = CHUNK_COUNT;
+	mapGpu->posX = map->posX;
+	mapGpu->posY = map->posY;
+	mapGpu->posZ = map->posZ;
+	mapGpu->tileSizeX = map->tileSizeX;
+	mapGpu->tileSizeY = map->tileSizeY;
+	mapGpu->tileSizeZ = map->tileSizeZ;
+	mapGpu->tilesX = map->tilesX;
+	mapGpu->tilesY = map->tilesY;
+	mapGpu->mapSizeX = map->mapSizeX;
+	mapGpu->mapSizeY = map->mapSizeY;
+	mapGpu->mapSizeZ = map->mapSizeZ;
+
+	// Initialize chunk start indices and copy data
+	int highOffset = 0;
+	int medOffset = 0;
+	int lowOffset = 0;
+
+	for (int i = 0; i < CHUNK_COUNT; i++) {
+		struct MapTile *tile = get_tile_by_index(map, i);
+		if (!tile) continue;
+
+		// Set start indices
+		mapGpu->chunkStartHigh[i] = highOffset;
+		mapGpu->chunkStartMed[i] = medOffset;
+		mapGpu->chunkStartLow[i] = lowOffset;
+
+		// Copy high-res triangle data (v1, v2, v3 = 9 floats per triangle)
+		int highCount = tile->terrainHigh.count;
+		for (int j = 0; j < highCount; j++) {
+			int srcIdx = j * 3;
+			int dstIdx = highOffset + j * 9;
+			int dstTriIdx = highOffset / 9 + j;
+
+			// Copy v1
+			mapGpu->chunkHighTrianglesData[dstIdx + 0] = tile->terrainHigh.v1[srcIdx + 0];
+			mapGpu->chunkHighTrianglesData[dstIdx + 1] = tile->terrainHigh.v1[srcIdx + 1];
+			mapGpu->chunkHighTrianglesData[dstIdx + 2] = tile->terrainHigh.v1[srcIdx + 2];
+			// Copy v2
+			mapGpu->chunkHighTrianglesData[dstIdx + 3] = tile->terrainHigh.v2[srcIdx + 0];
+			mapGpu->chunkHighTrianglesData[dstIdx + 4] = tile->terrainHigh.v2[srcIdx + 1];
+			mapGpu->chunkHighTrianglesData[dstIdx + 5] = tile->terrainHigh.v2[srcIdx + 2];
+			// Copy v3
+			mapGpu->chunkHighTrianglesData[dstIdx + 6] = tile->terrainHigh.v3[srcIdx + 0];
+			mapGpu->chunkHighTrianglesData[dstIdx + 7] = tile->terrainHigh.v3[srcIdx + 1];
+			mapGpu->chunkHighTrianglesData[dstIdx + 8] = tile->terrainHigh.v3[srcIdx + 2];
+
+			// Copy colors (3 floats per triangle)
+			mapGpu->chunkHighColorsData[dstTriIdx * 3 + 0] = tile->terrainHigh.colors[srcIdx + 0];
+			mapGpu->chunkHighColorsData[dstTriIdx * 3 + 1] = tile->terrainHigh.colors[srcIdx + 1];
+			mapGpu->chunkHighColorsData[dstTriIdx * 3 + 2] = tile->terrainHigh.colors[srcIdx + 2];
+
+			// Copy normals (3 floats per triangle)
+			mapGpu->chunkHighNormalsData[dstTriIdx * 3 + 0] = tile->terrainHigh.normals[srcIdx + 0];
+			mapGpu->chunkHighNormalsData[dstTriIdx * 3 + 1] = tile->terrainHigh.normals[srcIdx + 1];
+			mapGpu->chunkHighNormalsData[dstTriIdx * 3 + 2] = tile->terrainHigh.normals[srcIdx + 2];
+
+			// Copy material properties (1 float per triangle)
+			mapGpu->chunkHighRoughnessData[dstTriIdx] = tile->terrainHigh.Roughness[j];
+			mapGpu->chunkHighMetallicData[dstTriIdx] = tile->terrainHigh.Metallic[j];
+			mapGpu->chunkHighEmissionData[dstTriIdx] = tile->terrainHigh.Emission[j];
+		}
+		highOffset += highCount * 9;
+
+		// Copy mid-res triangle data
+		int medCount = tile->terrainMed.count;
+		for (int j = 0; j < medCount; j++) {
+			int srcIdx = j * 3;
+			int dstIdx = medOffset + j * 9;
+			int dstTriIdx = medOffset / 9 + j;
+
+			mapGpu->chunkMedTrianglesData[dstIdx + 0] = tile->terrainMed.v1[srcIdx + 0];
+			mapGpu->chunkMedTrianglesData[dstIdx + 1] = tile->terrainMed.v1[srcIdx + 1];
+			mapGpu->chunkMedTrianglesData[dstIdx + 2] = tile->terrainMed.v1[srcIdx + 2];
+
+			mapGpu->chunkMedTrianglesData[dstIdx + 3] = tile->terrainMed.v2[srcIdx + 0];
+			mapGpu->chunkMedTrianglesData[dstIdx + 4] = tile->terrainMed.v2[srcIdx + 1];
+			mapGpu->chunkMedTrianglesData[dstIdx + 5] = tile->terrainMed.v2[srcIdx + 2];
+
+			mapGpu->chunkMedTrianglesData[dstIdx + 6] = tile->terrainMed.v3[srcIdx + 0];
+			mapGpu->chunkMedTrianglesData[dstIdx + 7] = tile->terrainMed.v3[srcIdx + 1];
+			mapGpu->chunkMedTrianglesData[dstIdx + 8] = tile->terrainMed.v3[srcIdx + 2];
+
+			// Copy colors
+			mapGpu->chunkMedColorsData[dstTriIdx * 3 + 0] = tile->terrainMed.colors[srcIdx + 0];
+			mapGpu->chunkMedColorsData[dstTriIdx * 3 + 1] = tile->terrainMed.colors[srcIdx + 1];
+			mapGpu->chunkMedColorsData[dstTriIdx * 3 + 2] = tile->terrainMed.colors[srcIdx + 2];
+
+			// Copy normals
+			mapGpu->chunkMedNormalsData[dstTriIdx * 3 + 0] = tile->terrainMed.normals[srcIdx + 0];
+			mapGpu->chunkMedNormalsData[dstTriIdx * 3 + 1] = tile->terrainMed.normals[srcIdx + 1];
+			mapGpu->chunkMedNormalsData[dstTriIdx * 3 + 2] = tile->terrainMed.normals[srcIdx + 2];
+
+			// Copy material properties
+			mapGpu->chunkMedRoughnessData[dstTriIdx] = tile->terrainMed.Roughness[j];
+			mapGpu->chunkMedMetallicData[dstTriIdx] = tile->terrainMed.Metallic[j];
+			mapGpu->chunkMedEmissionData[dstTriIdx] = tile->terrainMed.Emission[j];
+		}
+		medOffset += medCount * 9;
+
+		// Copy low-res triangle data
+		int lowCount = tile->terrainLow.count;
+		for (int j = 0; j < lowCount; j++) {
+			int srcIdx = j * 3;
+			int dstIdx = lowOffset + j * 9;
+			int dstTriIdx = lowOffset / 9 + j;
+
+			mapGpu->chunkLowTrianglesData[dstIdx + 0] = tile->terrainLow.v1[srcIdx + 0];
+			mapGpu->chunkLowTrianglesData[dstIdx + 1] = tile->terrainLow.v1[srcIdx + 1];
+			mapGpu->chunkLowTrianglesData[dstIdx + 2] = tile->terrainLow.v1[srcIdx + 2];
+
+			mapGpu->chunkLowTrianglesData[dstIdx + 3] = tile->terrainLow.v2[srcIdx + 0];
+			mapGpu->chunkLowTrianglesData[dstIdx + 4] = tile->terrainLow.v2[srcIdx + 1];
+			mapGpu->chunkLowTrianglesData[dstIdx + 5] = tile->terrainLow.v2[srcIdx + 2];
+
+			mapGpu->chunkLowTrianglesData[dstIdx + 6] = tile->terrainLow.v3[srcIdx + 0];
+			mapGpu->chunkLowTrianglesData[dstIdx + 7] = tile->terrainLow.v3[srcIdx + 1];
+			mapGpu->chunkLowTrianglesData[dstIdx + 8] = tile->terrainLow.v3[srcIdx + 2];
+
+			// Copy colors
+			mapGpu->chunkLowColorsData[dstTriIdx * 3 + 0] = tile->terrainLow.colors[srcIdx + 0];
+			mapGpu->chunkLowColorsData[dstTriIdx * 3 + 1] = tile->terrainLow.colors[srcIdx + 1];
+			mapGpu->chunkLowColorsData[dstTriIdx * 3 + 2] = tile->terrainLow.colors[srcIdx + 2];
+
+			// Copy normals
+			mapGpu->chunkLowNormalsData[dstTriIdx * 3 + 0] = tile->terrainLow.normals[srcIdx + 0];
+			mapGpu->chunkLowNormalsData[dstTriIdx * 3 + 1] = tile->terrainLow.normals[srcIdx + 1];
+			mapGpu->chunkLowNormalsData[dstTriIdx * 3 + 2] = tile->terrainLow.normals[srcIdx + 2];
+
+			// Copy material properties
+			mapGpu->chunkLowRoughnessData[dstTriIdx] = tile->terrainLow.Roughness[j];
+			mapGpu->chunkLowMetallicData[dstTriIdx] = tile->terrainLow.Metallic[j];
+			mapGpu->chunkLowEmissionData[dstTriIdx] = tile->terrainLow.Emission[j];
+		}
+		lowOffset += lowCount * 9;
+	}
+
+	printf("MapGPU initialized: %d chunks loaded\n", CHUNK_COUNT);
+	printf("  High-res: %d floats, Med-res: %d floats, Low-res: %d floats\n",
+		   highOffset, medOffset, lowOffset);
+}
+
 void free_map(struct Map *map) {
 	if (!map) {
 		return;
