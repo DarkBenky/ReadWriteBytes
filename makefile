@@ -1,6 +1,6 @@
 CC = clang
-CFLAGS = -O3 -march=native
-LDFLAGS = -lm -lOpenCL -ljpeg -lglfw -lGL -g
+CFLAGS = -O3 -march=native -mtune=native -flto -ffast-math -funroll-loops -fomit-frame-pointer -fno-stack-protector -fno-math-errno -ffinite-math-only -fno-signed-zeros -fno-trapping-math -freciprocal-math -DNDEBUG
+LDFLAGS = -flto -lm -lOpenCL -ljpeg -lglfw -lGL
 
 all: main
 
