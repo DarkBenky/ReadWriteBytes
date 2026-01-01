@@ -27,6 +27,7 @@ The results show that writing frames is faster than reading them, with write ope
 - Copy buffer → GL texture → screen overlay  
   
 ## TODO - Base on prioritys in missile as in irst so it will need multiple successful lock to track target
+- [ ] missile avoidence and collision on cpu based on triangle collision optimalization check for colision only in correct chunk
 - [ ] make seaker work with flares
 - [ ] add render / add functionality to lunch flares 
 - [ ] scale everything to real life scale (1.0f = 1.0 meter)
