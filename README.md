@@ -30,6 +30,7 @@ The results show that writing frames is faster than reading them, with write ope
 - [ ] missile avoidence and collision on cpu based on triangle collision optimalization check for colision only in correct chunk
 - [ ] render z buffer first then colors
 - [ ] make seaker work with flares
+- [ ] crt screen based shader
 - [ ] add render / add functionality to lunch flares 
 - [ ] scale everything to real life scale (1.0f = 1.0 meter)
 - [ ] Add planes and misiles
