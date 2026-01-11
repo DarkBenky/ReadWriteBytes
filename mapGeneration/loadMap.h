@@ -6,18 +6,6 @@
 #define LOW_RES_TRIANGLE_COUNT 18106
 #define CHUNK_COUNT 256
 
-
-
-
-
-
-
-
-
-
-
-
-
 #include "../fireSim/fireSim.h"
 
 #define LOD_HIGH_DISTANCE 20000.0f
