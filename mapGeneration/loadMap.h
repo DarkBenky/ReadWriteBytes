@@ -25,10 +25,13 @@ struct MapTile {
     char name[64];
     char filepath_high[512];
     struct Triangles terrainHigh;
+    struct BoundingBox *terrainHighBoundingBoxes; // BBoxMin BBoxMax triangleIndex
     char filepath_med[512];
     struct Triangles terrainMed;
+    struct BoundingBox *terrainMedBoundingBoxes; // BBoxMin BBoxMax triangleIndex
     char filepath_low[512];
     struct Triangles terrainLow;
+    struct BoundingBox *terrainLowBoundingBoxes; // BBoxMin BBoxMax triangleIndex
     LODLevel current_lod;
     int is_loaded;
 };
@@ -98,5 +101,7 @@ void loadCurrentMap(struct Map *map, struct Camera *camera, struct Triangles *sc
 struct MapTile* get_tile(struct Map *map, int world_x, int world_y);
 void free_map(struct Map *map);
 void initMapGPU(struct MapGPU *mapGpu, struct Map *map);
+void calculateBoundingBoxMapTile(struct MapTile *tile);
+void calculateBoundingBoxesMap(struct Map *map);
 
 #endif

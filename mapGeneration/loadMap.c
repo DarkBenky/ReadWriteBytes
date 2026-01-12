@@ -524,6 +524,7 @@ struct MapTile *get_tile_by_index(struct Map *map, int index) {
 }
 
 void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
+	// Initialize MapGPU structure from Map data
 	if (!mapGpu) {
 		return;
 	}
@@ -671,6 +672,7 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 }
 
 void free_map(struct Map *map) {
+	// Free map resources
 	if (!map) {
 		return;
 	}
@@ -689,3 +691,203 @@ void free_map(struct Map *map) {
 	map->tileSizeY = 0;
 	map->tileSizeZ = 0;
 }
+
+
+void calculateBoundingBoxMapTile(struct MapTile *tile) {
+	// Helper function to update bounding box with a vertex
+
+	// Calculate bounding boxes for high-res terrain triangles
+	int triangleCountHigh = tile->terrainHigh.count;
+	tile->terrainHighBoundingBoxes = malloc(triangleCountHigh * sizeof(struct BoundingBox));
+	for (int i = 0; i < triangleCountHigh; i++) {
+		float minBB[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+		float maxBB[3] = {FLT_MIN, FLT_MIN, FLT_MIN};
+		int idx = i * 3;
+		updateBBox(tile->terrainHigh.v1[idx], tile->terrainHigh.v1[idx + 1], tile->terrainHigh.v1[idx + 2], minBB, maxBB);
+		updateBBox(tile->terrainHigh.v2[idx], tile->terrainHigh.v2[idx + 1], tile->terrainHigh.v2[idx + 2], minBB, maxBB);
+		updateBBox(tile->terrainHigh.v3[idx], tile->terrainHigh.v3[idx + 1], tile->terrainHigh.v3[idx + 2], minBB, maxBB);
+		tile->terrainHighBoundingBoxes[i].min[0] = minBB[0];
+		tile->terrainHighBoundingBoxes[i].min[1] = minBB[1];
+		tile->terrainHighBoundingBoxes[i].min[2] = minBB[2];
+		tile->terrainHighBoundingBoxes[i].max[0] = maxBB[0];
+		tile->terrainHighBoundingBoxes[i].max[1] = maxBB[1];
+		tile->terrainHighBoundingBoxes[i].max[2] = maxBB[2];
+		float centerX = (minBB[0] + maxBB[0]) / 2.0f;
+		float centerY = (minBB[1] + maxBB[1]) / 2.0f;
+		float centerZ = (minBB[2] + maxBB[2]) / 2.0f;
+		tile->terrainHighBoundingBoxes[i].center[0] = centerX;
+		tile->terrainHighBoundingBoxes[i].center[1] = centerY;
+		tile->terrainHighBoundingBoxes[i].center[2] = centerZ;
+	}
+	// Calculate bounding boxes for medium-res terrain triangles
+	int triangleCountMed = tile->terrainMed.count;
+	tile->terrainMedBoundingBoxes = malloc(triangleCountMed * sizeof(struct BoundingBox));
+	for (int i = 0; i < triangleCountMed; i++) {
+		float minBB[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+		float maxBB[3] = {FLT_MIN, FLT_MIN, FLT_MIN};
+		int idx = i * 3;
+		updateBBox(tile->terrainMed.v1[idx], tile->terrainMed.v1[idx + 1], tile->terrainMed.v1[idx + 2], minBB, maxBB);
+		updateBBox(tile->terrainMed.v2[idx], tile->terrainMed.v2[idx + 1], tile->terrainMed.v2[idx + 2], minBB, maxBB);
+		updateBBox(tile->terrainMed.v3[idx], tile->terrainMed.v3[idx + 1], tile->terrainMed.v3[idx + 2], minBB, maxBB);
+		tile->terrainMedBoundingBoxes[i].min[0] = minBB[0];
+		tile->terrainMedBoundingBoxes[i].min[1] = minBB[1];
+		tile->terrainMedBoundingBoxes[i].min[2] = minBB[2];
+		tile->terrainMedBoundingBoxes[i].max[0] = maxBB[0];
+		tile->terrainMedBoundingBoxes[i].max[1] = maxBB[1];
+		tile->terrainMedBoundingBoxes[i].max[2] = maxBB[2];
+		float centerX = (minBB[0] + maxBB[0]) / 2.0f;
+		float centerY = (minBB[1] + maxBB[1]) / 2.0f;
+		float centerZ = (minBB[2] + maxBB[2]) / 2.0f;
+		tile->terrainMedBoundingBoxes[i].center[0] = centerX;
+		tile->terrainMedBoundingBoxes[i].center[1] = centerY;
+		tile->terrainMedBoundingBoxes[i].center[2] = centerZ;
+	}
+	// Calculate bounding boxes for low-res terrain triangles
+	int triangleCountLow = tile->terrainLow.count;
+	tile->terrainLowBoundingBoxes = malloc(triangleCountLow * sizeof(struct BoundingBox));
+	for (int i = 0; i < triangleCountLow; i++) {
+		float minBB[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+		float maxBB[3] = {FLT_MIN, FLT_MIN, FLT_MIN};
+		int idx = i * 3;
+		updateBBox(tile->terrainLow.v1[idx], tile->terrainLow.v1[idx + 1], tile->terrainLow.v1[idx + 2], minBB, maxBB);
+		updateBBox(tile->terrainLow.v2[idx], tile->terrainLow.v2[idx + 1], tile->terrainLow.v2[idx + 2], minBB, maxBB);
+		updateBBox(tile->terrainLow.v3[idx], tile->terrainLow.v3[idx + 1], tile->terrainLow.v3[idx + 2], minBB, maxBB);
+		tile->terrainLowBoundingBoxes[i].min[0] = minBB[0];
+		tile->terrainLowBoundingBoxes[i].min[1] = minBB[1];
+		tile->terrainLowBoundingBoxes[i].min[2] = minBB[2];
+		tile->terrainLowBoundingBoxes[i].max[0] = maxBB[0];
+		tile->terrainLowBoundingBoxes[i].max[1] = maxBB[1];
+		tile->terrainLowBoundingBoxes[i].max[2] = maxBB[2];
+		float centerX = (minBB[0] + maxBB[0]) / 2.0f;
+		float centerY = (minBB[1] + maxBB[1]) / 2.0f;
+		float centerZ = (minBB[2] + maxBB[2]) / 2.0f;
+		tile->terrainLowBoundingBoxes[i].center[0] = centerX;
+		tile->terrainLowBoundingBoxes[i].center[1] = centerY;
+		tile->terrainLowBoundingBoxes[i].center[2] = centerZ;
+	}
+}
+
+void calculateBoundingBoxesMap(struct Map *map) {
+	// Calculate bounding boxes for all map tiles
+	if (!map || !map->tiles) {
+		return;
+	}
+
+	int total_tiles = (int)(map->mapSizeX / map->tileSizeX) * (int)(map->mapSizeZ / map->tileSizeZ);
+	for (int i = 0; i < total_tiles; i++) {
+		struct MapTile *tile = get_tile_by_index(map, i);
+		if (tile) {
+			calculateBoundingBoxMapTile(tile);
+		}
+	}
+}
+
+bool inline PointInBoundingBox(float point[3], struct BoundingBox *bbox) {
+	// Check if point is inside bounding box
+	return (point[0] >= bbox->min[0] && point[0] <= bbox->max[0] &&
+			point[1] >= bbox->min[1] && point[1] <= bbox->max[1] &&
+			point[2] >= bbox->min[2] && point[2] <= bbox->max[2]);
+}
+
+float inline distance(float a[3], float b[3]) {
+	// Calculate Euclidean distance between two points
+	return sqrtf((a[0] - b[0]) * (a[0] - b[0]) +
+				 (a[1] - b[1]) * (a[1] - b[1]) +
+				 (a[2] - b[2]) * (a[2] - b[2]));
+}
+
+void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, float *hitDistance, float *hitPos[3], int *hitTriangleIndex) {
+	// Check collision of point with mesh bounding boxes in the tile at given LOD level
+	// If a bounding box is hit, return its center position and index
+	// If no bounding box is hit, return the closest bounding box info
+	
+	float closestDist = FLT_MAX;
+	float closestPos[3] = {0.0f, 0.0f, 0.0f};
+	int closestIndex = -1;
+
+	if (lod == LOD_HIGH) {
+		for (int i = 0; i < tile->terrainHigh.count; i++) {
+			if (PointInBoundingBox(pos, &tile->terrainHighBoundingBoxes[i])) {
+				*hitPos[0] = tile->terrainHighBoundingBoxes[i].center[0];
+				*hitPos[1] = tile->terrainHighBoundingBoxes[i].center[1];
+				*hitPos[2] = tile->terrainHighBoundingBoxes[i].center[2];
+				*hitTriangleIndex = i;
+				*hitDistance = distance(pos, *hitPos);
+				return;
+			} else {
+				// Keep track of closest bounding box
+				float dist = distance(pos, tile->terrainHighBoundingBoxes[i].center);
+				if (dist < closestDist) {
+					closestDist = dist;
+					closestPos[0] = tile->terrainHighBoundingBoxes[i].center[0];
+					closestPos[1] = tile->terrainHighBoundingBoxes[i].center[1];
+					closestPos[2] = tile->terrainHighBoundingBoxes[i].center[2];
+					closestIndex = i;
+				}
+			}
+		}
+	} else if (lod == LOD_MEDIUM) {
+		for (int i = 0; i < tile->terrainMed.count; i++) {
+			if (PointInBoundingBox(pos, &tile->terrainMedBoundingBoxes[i])) {
+				*hitPos[0] = tile->terrainMedBoundingBoxes[i].center[0];
+				*hitPos[1] = tile->terrainMedBoundingBoxes[i].center[1];
+				*hitPos[2] = tile->terrainMedBoundingBoxes[i].center[2];
+				*hitTriangleIndex = i;
+				*hitDistance = distance(pos, *hitPos);
+				return;
+			} else {
+				// Keep track of closest bounding box
+				float dist = distance(pos, tile->terrainMedBoundingBoxes[i].center);
+				if (dist < closestDist) {
+					closestDist = dist;
+					closestPos[0] = tile->terrainMedBoundingBoxes[i].center[0];
+					closestPos[1] = tile->terrainMedBoundingBoxes[i].center[1];
+					closestPos[2] = tile->terrainMedBoundingBoxes[i].center[2];
+					closestIndex = i;
+				}
+			}
+		}
+	} else if (lod == LOD_LOW) {
+		for (int i = 0; i < tile->terrainLow.count; i++) {
+			if (PointInBoundingBox(pos, &tile->terrainLowBoundingBoxes[i])) {
+				*hitPos[0] = tile->terrainLowBoundingBoxes[i].center[0];
+				*hitPos[1] = tile->terrainLowBoundingBoxes[i].center[1];
+				*hitPos[2] = tile->terrainLowBoundingBoxes[i].center[2];
+				*hitTriangleIndex = i;
+				*hitDistance = distance(pos, *hitPos);
+				return;
+			} else {
+				// Keep track of closest bounding box
+				float dist = distance(pos, tile->terrainLowBoundingBoxes[i].center);
+				if (dist < closestDist) {
+					closestDist = dist;
+					closestPos[0] = tile->terrainLowBoundingBoxes[i].center[0];
+					closestPos[1] = tile->terrainLowBoundingBoxes[i].center[1];
+					closestPos[2] = tile->terrainLowBoundingBoxes[i].center[2];
+					closestIndex = i;
+				}
+			}
+		}
+	}
+	// If no bounding box was hit, return closest
+	if (closestIndex != -1) {
+		*hitPos[0] = closestPos[0];
+		*hitPos[1] = closestPos[1];
+		*hitPos[2] = closestPos[2];
+		*hitTriangleIndex = closestIndex;
+		*hitDistance = closestDist;
+	} else {
+		*hitDistance = FLT_MAX;
+		*hitTriangleIndex = -1;
+	}
+	return;
+}
+
+void collideRayWithMapTile(struct MapTile *tile, struct Ray ray, float *hitDistance, float *hitPos[3], int *hitTriangleIndex) {
+	// Implement ray-triangle intersection tests for the given map tile
+	// This function should iterate through the triangles in the tile
+	// and check for intersections with the provided ray.
+	// If an intersection is found, handle it accordingly (e.g., store intersection data).
+}
+
+void calculateClosesSurfaces

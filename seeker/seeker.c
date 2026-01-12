@@ -39,7 +39,7 @@ int findClosestObjectToViewCenter(
     float viewDir[3] = {dir[0], dir[1], dir[2]};
     normalize3(viewDir);
     
-    float fovHalfRad = (FOV / 2.0f) * (M_PI / 180.0f);
+    float fovHalfRad = (FOV / 2.0f) * (PI / 180.0f);
     float fovCosThreshold = cosf(fovHalfRad);
     
     int bestIdx = -1;
@@ -98,7 +98,7 @@ int findClosestObjectToViewCenter(
         int py = (int)(pixelY * MISSILE_SEEKER_SIZE);
         
         // Check if object is occluded
-        if (px >= 0 && px < MISSILE_SEEKER_SIZE && py >= 0 && py < SEEKER_SIZE) {
+        if (px >= 0 && px < MISSILE_SEEKER_SIZE && py >= 0 && py < MISSILE_SEEKER_SIZE) {
             int pixelIdx = py * MISSILE_SEEKER_SIZE + px;
             float geometryDist = seekerImageDistances[pixelIdx];
             

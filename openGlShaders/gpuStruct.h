@@ -205,6 +205,12 @@ struct Ray {
 	float direction[3];
 };
 
+struct BoundingBox {
+	float min[3];
+	float max[3];
+	float center[3];
+};
+
 struct Camera {
 	struct Ray ray;
 	float fov;

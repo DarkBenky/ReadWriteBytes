@@ -4787,7 +4787,7 @@ void readFileTriangles(const char *filename, struct Triangles *triangles, float 
 
 // Helper function to convert degrees to radians
 float degreesToRadians(float degrees) {
-	return degrees * M_PI / 180.0f;
+	return degrees * PI / 180.0f;
 }
 
 // Add this helper function to create a rotation matrix from angles
@@ -5553,6 +5553,7 @@ int main() {
 
 	printf("Terrain map initialized. Loading visible tiles based on camera...\n");
 	loadCurrentMap(&terrain, &camera, triangles);
+	calculateBoundingBoxesMap(&terrain);
 	printf("Loaded %d triangles from terrain\n", triangles->count);
 
 	struct MapGPU *mapGPU = (struct MapGPU *)malloc(sizeof(struct MapGPU));

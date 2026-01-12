@@ -9,6 +9,7 @@
 #define G 9.81f
 #define MAX_FLARES 256
 #define MAX_FLOAT 3.402823466e+38F
+#define PI 3.14159265358979323846f
 
 #include "../openGlShaders/gpuStruct.h"
 #include <stdbool.h>
