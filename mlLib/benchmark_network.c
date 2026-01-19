@@ -156,8 +156,8 @@ int main() {
     int H = 600, W = 800;
     int ITERATIONS = 100;
     
-    /* Encoder-Decoder architecture: 3 -> 32 -> 64 -> 32 -> 3 */
-    int layers[] = {3, 32, 64, 32, 3};
+    /* Real-time network: 3 -> 24 -> 48 -> 24 -> 3 */
+    int layers[] = {3, 24, 48, 24, 3};
     int num_layers = 4;
     
     printf("\nNetwork Architecture:\n");
