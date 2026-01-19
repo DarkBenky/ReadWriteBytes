@@ -29,6 +29,13 @@ typedef struct {
     int use_profiling;       /* Enable timing profiling */
 } CNNConfig;
 
+typedef struct learning_rate_decay {
+    float initial_lr;
+    float decay_rate;
+    int decay_steps;
+    int step;
+} LearningRateDecay;
+
 /* Layer configuration */
 typedef struct {
     int cin;                 /* Input channels */
@@ -46,6 +53,10 @@ typedef struct {
     double total_time_ms;
 } TimingStats;
 
+void learning_rate_decay_init(LearningRateDecay* lr_decay, 
+                              float initial_lr, float decay_rate, int decay_steps);
+float learning_rate_decay_get(LearningRateDecay* lr_decay, int current_step);
+
 /* Create/destroy network */
 CNNDenoiser* cnn_create(CNNConfig config);
 void cnn_destroy(CNNDenoiser* cnn);
@@ -59,6 +70,9 @@ float cnn_train_step(CNNDenoiser* cnn,
                      float* noisy_input,   /* [batch][h][w][channels] */
                      float* clean_target,  /* [batch][h][w][channels] */
                      int batch_size);
+
+void cnn_set_learning_rate(CNNDenoiser* cnn, float learning_rate);
+float cnn_get_learning_rate(CNNDenoiser* cnn);
 
 /* Inference */
 int cnn_denoise(CNNDenoiser* cnn,

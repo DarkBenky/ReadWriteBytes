@@ -16,7 +16,7 @@
 /* Internal layer representation */
 typedef struct {
     int cin, cout, h, w, cin4;
-    cl_mem weights, bias, output, grad_bias;
+    cl_mem weights, bias, output, grad_bias, grad_weights, grad_input;
     float *h_weights, *h_bias, *h_grad_w, *h_grad_b;
     char name[64];
     int use_relu;
@@ -27,7 +27,7 @@ struct CNNDenoiser {
     cl_context ctx;
     cl_command_queue queue;
     cl_program program;
-    cl_kernel k_forward, k_backward, k_weight_grad, k_mae_loss;
+    cl_kernel k_forward, k_backward, k_weight_grad, k_mae_loss, k_sgd_update;
     
     CNNConfig config;
     int n_layers;
@@ -180,7 +180,26 @@ static const char *kernel_source =
 "        barrier(CLK_LOCAL_MEM_FENCE);\n"
 "    }\n"
 "    \n"
-"    if (lid == 0) atomic_add_global(loss_accum, local_loss[0]);\n"
+"    if (lid == 0) loss_accum[get_group_id(0)] = local_loss[0];\n"
+"}\n"
+"\n"
+"__kernel void sgd_update(\n"
+"    __global float4* weights, __global float* bias,\n"
+"    __global const float4* grad_w, __global const float* grad_b,\n"
+"    float lr, int w_size, int b_size)\n"
+"{\n"
+"    int gid = get_global_id(0);\n"
+"    \n"
+"    if (gid < w_size) {\n"
+"        float4 g = grad_w[gid] * lr;\n"
+"        g = clamp(g, (float4)(-1.0f), (float4)(1.0f));\n"
+"        weights[gid] -= g;\n"
+"    }\n"
+"    \n"
+"    if (gid < b_size) {\n"
+"        float g = clamp(grad_b[gid] * lr, -1.0f, 1.0f);\n"
+"        bias[gid] -= g;\n"
+"    }\n"
 "}\n";
 
 static void init_weights(float *w, int n) {
@@ -217,10 +236,21 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     const char *opts = "-cl-fast-relaxed-math -cl-mad-enable";
     err = clBuildProgram(cnn->program, 0, NULL, opts, NULL, NULL);
     
+    if (err != CL_SUCCESS) {
+        size_t log_size;
+        clGetProgramBuildInfo(cnn->program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char *log = malloc(log_size);
+        clGetProgramBuildInfo(cnn->program, device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        fprintf(stderr, "OpenCL kernel build failed:\n%s\n", log);
+        free(log);
+        return NULL;
+    }
+    
     cnn->k_forward = clCreateKernel(cnn->program, "conv3x3_forward_relu_f4", &err);
     cnn->k_backward = clCreateKernel(cnn->program, "conv3x3_backward_input_f4", &err);
     cnn->k_weight_grad = clCreateKernel(cnn->program, "weight_grad_reduce", &err);
     cnn->k_mae_loss = clCreateKernel(cnn->program, "mae_loss_gradient", &err);
+    cnn->k_sgd_update = clCreateKernel(cnn->program, "sgd_update", &err);
     
     return cnn;
 }
@@ -250,12 +280,14 @@ int cnn_add_layer(CNNDenoiser *cnn, LayerConfig layer) {
     init_weights(l->h_weights, w_size * 4);
     
     cl_int err;
-    l->weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+    l->weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                                 w_size * 16, l->h_weights, &err);
-    l->bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+    l->bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                             layer.cout * 4, l->h_bias, &err);
     l->output = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
     l->grad_bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cout * 4, NULL, &err);
+    l->grad_weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, w_size * 16, NULL, &err);
+    l->grad_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cin * l->h * l->w * 4, NULL, &err);
     
     return 0;
 }
@@ -283,14 +315,16 @@ int cnn_finalize(CNNDenoiser *cnn) {
 float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, int batch_size) {
     if (!cnn->finalized) return -1.0f;
     
-    /* Upload data (simplified for single batch) */
     int input_size = cnn->config.input_height * cnn->config.input_width * cnn->config.input_channels;
+    int hw = cnn->config.input_height * cnn->config.input_width;
+    
+    /* Upload data */
     clEnqueueWriteBuffer(cnn->queue, cnn->input_buf, CL_FALSE, 0, input_size * 4, 
                         noisy_input, 0, NULL, NULL);
     clEnqueueWriteBuffer(cnn->queue, cnn->target_buf, CL_FALSE, 0, input_size * 4,
                         clean_target, 0, NULL, NULL);
     
-    /* Forward pass */
+    /* ========== FORWARD PASS ========== */
     cl_mem current = cnn->input_buf;
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
@@ -311,11 +345,12 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         current = l->output;
     }
     
-    /* Compute loss */
-    int out_size = cnn->layers[cnn->n_layers - 1].cout * cnn->config.input_height * cnn->config.input_width;
-    cl_mem loss_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, 4, NULL, NULL);
-    float zero = 0.0f;
-    clEnqueueWriteBuffer(cnn->queue, loss_buf, CL_FALSE, 0, 4, &zero, 0, NULL, NULL);
+    /* ========== COMPUTE LOSS & GRADIENT ========== */
+    ConvLayer *last_layer = &cnn->layers[cnn->n_layers - 1];
+    int out_size = last_layer->cout * hw;
+    
+    int num_workgroups = 64;
+    cl_mem loss_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, num_workgroups * 4, NULL, NULL);
     
     clSetKernelArg(cnn->k_mae_loss, 0, sizeof(cl_mem), &current);
     clSetKernelArg(cnn->k_mae_loss, 1, sizeof(cl_mem), &cnn->target_buf);
@@ -323,16 +358,78 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     clSetKernelArg(cnn->k_mae_loss, 3, sizeof(cl_mem), &loss_buf);
     clSetKernelArg(cnn->k_mae_loss, 4, sizeof(int), &out_size);
     
-    size_t global_loss = 256 * 64;
+    size_t global_loss = 256 * num_workgroups;
     size_t local_loss = 256;
     clEnqueueNDRangeKernel(cnn->queue, cnn->k_mae_loss, 1, NULL, &global_loss, &local_loss, 0, NULL, NULL);
     
-    float loss;
-    clEnqueueReadBuffer(cnn->queue, loss_buf, CL_TRUE, 0, 4, &loss, 0, NULL, NULL);
+    float loss_per_wg[64];
+    clEnqueueReadBuffer(cnn->queue, loss_buf, CL_TRUE, 0, num_workgroups * 4, loss_per_wg, 0, NULL, NULL);
     clReleaseMemObject(loss_buf);
     
-    /* Backward pass and weight update would go here */
-    /* Simplified for this example */
+    float loss = 0.0f;
+    for (int i = 0; i < num_workgroups; i++) loss += loss_per_wg[i];
+    
+    /* ========== BACKWARD PASS ========== */
+    cl_mem grad_current = cnn->grad_buf;
+    
+    /* First pass: Compute all gradients (without updating weights) */
+    for (int i = cnn->n_layers - 1; i >= 0; i--) {
+        ConvLayer *l = &cnn->layers[i];
+        cl_mem layer_input = (i == 0) ? cnn->input_buf : cnn->layers[i-1].output;
+        
+        /* Compute weight gradients */
+        clSetKernelArg(cnn->k_weight_grad, 0, sizeof(cl_mem), &layer_input);
+        clSetKernelArg(cnn->k_weight_grad, 1, sizeof(cl_mem), &grad_current);
+        clSetKernelArg(cnn->k_weight_grad, 2, sizeof(cl_mem), &l->output);
+        clSetKernelArg(cnn->k_weight_grad, 3, sizeof(cl_mem), &l->grad_weights);
+        clSetKernelArg(cnn->k_weight_grad, 4, sizeof(cl_mem), &l->grad_bias);
+        clSetKernelArg(cnn->k_weight_grad, 5, sizeof(int), &l->cin4);
+        clSetKernelArg(cnn->k_weight_grad, 6, sizeof(int), &l->h);
+        clSetKernelArg(cnn->k_weight_grad, 7, sizeof(int), &l->w);
+        clSetKernelArg(cnn->k_weight_grad, 8, sizeof(int), &l->use_relu);
+        
+        size_t grad_global[3] = {(size_t)l->cout, (size_t)l->cin4, 9};
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_weight_grad, 3, NULL, grad_global, NULL, 0, NULL, NULL);
+        
+        /* Backprop to previous layer (if not first) */
+        if (i > 0) {
+            int prev_cin4 = cnn->layers[i-1].cout / 4;
+            
+            clSetKernelArg(cnn->k_backward, 0, sizeof(cl_mem), &grad_current);
+            clSetKernelArg(cnn->k_backward, 1, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_backward, 2, sizeof(cl_mem), &l->weights);
+            clSetKernelArg(cnn->k_backward, 3, sizeof(cl_mem), &l->grad_input);
+            clSetKernelArg(cnn->k_backward, 4, sizeof(int), &prev_cin4);
+            clSetKernelArg(cnn->k_backward, 5, sizeof(int), &l->cout);
+            clSetKernelArg(cnn->k_backward, 6, sizeof(int), &l->h);
+            clSetKernelArg(cnn->k_backward, 7, sizeof(int), &l->w);
+            clSetKernelArg(cnn->k_backward, 8, sizeof(int), &l->use_relu);
+            
+            size_t back_global[3] = {(size_t)l->w, (size_t)l->h, (size_t)prev_cin4};
+            size_t back_local[3] = {16, 8, 1};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_backward, 3, NULL, back_global, back_local, 0, NULL, NULL);
+            
+            grad_current = l->grad_input;
+        }
+    }
+    
+    /* Second pass: Update all weights using computed gradients */
+    for (int i = 0; i < cnn->n_layers; i++) {
+        ConvLayer *l = &cnn->layers[i];
+        int w_vec_size = l->cout * l->cin4 * 9;
+        float lr = cnn->config.learning_rate;
+        
+        clSetKernelArg(cnn->k_sgd_update, 0, sizeof(cl_mem), &l->weights);
+        clSetKernelArg(cnn->k_sgd_update, 1, sizeof(cl_mem), &l->bias);
+        clSetKernelArg(cnn->k_sgd_update, 2, sizeof(cl_mem), &l->grad_weights);
+        clSetKernelArg(cnn->k_sgd_update, 3, sizeof(cl_mem), &l->grad_bias);
+        clSetKernelArg(cnn->k_sgd_update, 4, sizeof(float), &lr);
+        clSetKernelArg(cnn->k_sgd_update, 5, sizeof(int), &w_vec_size);
+        clSetKernelArg(cnn->k_sgd_update, 6, sizeof(int), &l->cout);
+        
+        size_t update_global = w_vec_size > l->cout ? w_vec_size : l->cout;
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_sgd_update, 1, NULL, &update_global, NULL, 0, NULL, NULL);
+    }
     
     clFinish(cnn->queue);
     return loss / out_size;
@@ -519,3 +616,24 @@ int cnn_inference_rgb(CNNDenoiser* cnn, const unsigned char* input_rgb,
     return 0;
 }
 
+void learning_rate_decay_init(LearningRateDecay* lr_decay, 
+                              float initial_lr, float decay_rate, int decay_steps) {
+    lr_decay->initial_lr = initial_lr;
+    lr_decay->decay_rate = decay_rate;
+    lr_decay->decay_steps = decay_steps;
+    lr_decay->step = 0;
+}
+
+float learning_rate_decay_get(LearningRateDecay* lr_decay, int current_step) {
+    lr_decay->step = current_step;
+    return lr_decay->initial_lr * powf(lr_decay->decay_rate, 
+                                       (float)(lr_decay->step) / lr_decay->decay_steps);
+}
+
+void cnn_set_learning_rate(CNNDenoiser* cnn, float learning_rate) {
+    cnn->config.learning_rate = learning_rate;
+}
+
+float cnn_get_learning_rate(CNNDenoiser* cnn) {
+    return cnn->config.learning_rate;
+}

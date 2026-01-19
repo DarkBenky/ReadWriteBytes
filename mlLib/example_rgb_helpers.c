@@ -13,7 +13,7 @@ int main() {
         .input_height = 600,
         .input_channels = 4,    /* RGB + Luminance for float4 optimization */
         .output_channels = 4,   /* RGB + Luminance output */
-        .learning_rate = 0.001f,
+        .learning_rate = 0.00001f,
         .use_profiling = 0
     };
     
@@ -65,18 +65,17 @@ int main() {
         return 1;
     }
     
-    printf("✓ RGB -> RGBA conversion done\n");
-    printf("✓ Gaussian noise added (sigma=%.3f)\n", noise_sigma);
-    printf("✓ Values clamped to [0,1]\n");
+    printf("RGB -> RGBA conversion done\n");
+    printf("Gaussian noise added (sigma=%.3f)\n", noise_sigma);
+    printf("Values clamped to [0,1]\n");
     printf("\n");
     
-    /* Step 5: Training loop example */
-    printf("Running %d training iterations...\n", 10);
-    for (int iter = 0; iter < 10; iter++) {
-        /* Note: cnn_train_step expects RGBA float data */
+    /* Step 5: Training loop */
+    printf("Running %d training iterations...\n", 100);
+    for (int iter = 0; iter < 100; iter++) {
         float loss = cnn_train_step(cnn, noisy_rgba, clean_rgba, 1);
         
-        if (iter % 2 == 0) {
+        if (iter % 10 == 0) {
             printf("  Iteration %d: Loss = %.6f\n", iter, loss);
         }
     }
@@ -92,8 +91,8 @@ int main() {
         return 1;
     }
     
-    printf("✓ Inference complete (RGB in, RGB out)\n");
-    printf("✓ Internal RGBA conversion handled automatically\n");
+    printf("Inference complete (RGB in, RGB out)\n");
+    printf("Internal RGBA conversion handled automatically\n");
     printf("\n");
     
     /* Step 7: Verify output */
