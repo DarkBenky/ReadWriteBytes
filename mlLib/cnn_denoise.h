@@ -77,6 +77,47 @@ void cnn_add_gaussian_noise(float* clean, float* noisy,
                             int size, float sigma);
 float cnn_compute_psnr(float* image1, float* image2, int size);
 
+/* ===== Easy-to-use RGB helper functions =====
+ * These handle conversion between RGB (3 channels) and RGBA (RGB + Luminance, 4 channels)
+ * Required because GPU uses float4 for optimal vectorization
+ */
+
+/* Convert RGB uint8 image to RGBA float (RGB + Luminance for 4-channel alignment)
+ * rgb: input RGB image [height][width][3], values 0-255
+ * rgba: output RGBA float [height][width][4], values 0.0-1.0, channel 3 = luminance
+ */
+void cnn_rgb_to_rgba_luminance(const unsigned char* rgb, float* rgba, 
+                                int width, int height);
+
+/* Convert RGBA float back to RGB uint8 image (discards luminance channel)
+ * rgba: input RGBA float [height][width][4], values 0.0-1.0
+ * rgb: output RGB image [height][width][3], values 0-255
+ */
+void cnn_rgba_luminance_to_rgb(const float* rgba, unsigned char* rgb, 
+                                int width, int height);
+
+/* Prepare training batch: RGB -> RGBA, add noise, clamp values
+ * clean_rgb: input clean RGB image 800x600x3 (uint8)
+ * noisy_rgb: output noisy RGB image 800x600x3 (uint8, optional - can be NULL)
+ * clean_rgba: output clean RGBA float 800x600x4 (for training target)
+ * noisy_rgba: output noisy RGBA float 800x600x4 (for training input)
+ * noise_sigma: Gaussian noise level (e.g., 0.05 for 5% noise)
+ * Returns: 0 on success, -1 on error
+ */
+int cnn_prepare_training_batch(const unsigned char* clean_rgb, 
+                                unsigned char* noisy_rgb,
+                                float* clean_rgba, float* noisy_rgba, 
+                                int width, int height, float noise_sigma);
+
+/* Easy inference: RGB image in, denoised RGB image out
+ * input_rgb: noisy RGB image 800x600x3 (uint8)
+ * output_rgb: denoised RGB image 800x600x3 (uint8)
+ * Returns: 0 on success, -1 on error
+ * Note: Internally converts to RGBA, runs network, converts back to RGB
+ */
+int cnn_inference_rgb(CNNDenoiser* cnn, const unsigned char* input_rgb, 
+                      unsigned char* output_rgb, int width, int height);
+
 #ifdef __cplusplus
 }
 #endif

@@ -40,44 +40,70 @@ struct CNNDenoiser {
     int finalized;
 };
 
-/* Optimized OpenCL kernels */
+/* Optimized OpenCL kernels - 4 outputs per thread */
 static const char *kernel_source = 
 "__kernel void conv3x3_forward_relu_f4(\n"
 "    __global const float4* input, __global float* output,\n"
 "    __global const float4* weights, __global const float* bias,\n"
-"    int Cin4, int H, int W)\n"
+"    int Cin4, int Cout, int H, int W)\n"
 "{\n"
-"    int x = get_global_id(0), y = get_global_id(1), oc = get_global_id(2);\n"
+"    int x = get_global_id(0), y = get_global_id(1), oc = get_global_id(2) * 4;\n"
 "    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1) return;\n"
 "    \n"
 "    int hw = H * W;\n"
-"    float sum = bias[oc];\n"
+"    \n"
+"    float sum0 = (oc < Cout) ? bias[oc] : 0.0f;\n"
+"    float sum1 = (oc + 1 < Cout) ? bias[oc + 1] : 0.0f;\n"
+"    float sum2 = (oc + 2 < Cout) ? bias[oc + 2] : 0.0f;\n"
+"    float sum3 = (oc + 3 < Cout) ? bias[oc + 3] : 0.0f;\n"
 "    \n"
 "    for (int ic4 = 0; ic4 < Cin4; ic4++) {\n"
 "        int base = ic4 * hw + y * W + x;\n"
-"        int w_base = (oc * Cin4 + ic4) * 9;\n"
 "        \n"
-"        float4 w0 = weights[w_base + 0];\n"
-"        float4 w1 = weights[w_base + 1];\n"
-"        float4 w2 = weights[w_base + 2];\n"
-"        float4 w3 = weights[w_base + 3];\n"
-"        float4 w4 = weights[w_base + 4];\n"
-"        float4 w5 = weights[w_base + 5];\n"
-"        float4 w6 = weights[w_base + 6];\n"
-"        float4 w7 = weights[w_base + 7];\n"
-"        float4 w8 = weights[w_base + 8];\n"
+"        float4 i0 = input[base - W - 1];\n"
+"        float4 i1 = input[base - W];\n"
+"        float4 i2 = input[base - W + 1];\n"
+"        float4 i3 = input[base - 1];\n"
+"        float4 i4 = input[base];\n"
+"        float4 i5 = input[base + 1];\n"
+"        float4 i6 = input[base + W - 1];\n"
+"        float4 i7 = input[base + W];\n"
+"        float4 i8 = input[base + W + 1];\n"
 "        \n"
-"        sum += dot(input[base - W - 1], w0);\n"
-"        sum += dot(input[base - W], w1);\n"
-"        sum += dot(input[base - W + 1], w2);\n"
-"        sum += dot(input[base - 1], w3);\n"
-"        sum += dot(input[base], w4);\n"
-"        sum += dot(input[base + 1], w5);\n"
-"        sum += dot(input[base + W - 1], w6);\n"
-"        sum += dot(input[base + W], w7);\n"
-"        sum += dot(input[base + W + 1], w8);\n"
+"        if (oc < Cout) {\n"
+"            int wb = (oc * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum0 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
+"        if (oc + 1 < Cout) {\n"
+"            int wb = ((oc+1) * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum1 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
+"        if (oc + 2 < Cout) {\n"
+"            int wb = ((oc+2) * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum2 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
+"        if (oc + 3 < Cout) {\n"
+"            int wb = ((oc+3) * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum3 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
 "    }\n"
-"    output[oc * hw + y * W + x] = fmax(sum, 0.0f);\n"
+"    \n"
+"    if (oc < Cout) output[oc * hw + y * W + x] = fmax(sum0, 0.0f);\n"
+"    if (oc + 1 < Cout) output[(oc + 1) * hw + y * W + x] = fmax(sum1, 0.0f);\n"
+"    if (oc + 2 < Cout) output[(oc + 2) * hw + y * W + x] = fmax(sum2, 0.0f);\n"
+"    if (oc + 3 < Cout) output[(oc + 3) * hw + y * W + x] = fmax(sum3, 0.0f);\n"
 "}\n"
 "\n"
 "__kernel void conv3x3_backward_input_f4(\n"
@@ -274,12 +300,14 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
         clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
         clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
-        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->h);
-        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->w);
+        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
+        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
+        clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
         
-        size_t global[3] = {l->w, l->h, l->cout};
+        size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
         size_t local[3] = {16, 8, 1};
         clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
+        
         current = l->output;
     }
     
@@ -375,3 +403,119 @@ void cnn_add_gaussian_noise(float* clean, float* noisy, int size, float sigma) {
         noisy[i] = clean[i] + noise;
     }
 }
+
+/* Helper: Convert RGB image to RGBA (RGB + Luminance) format for float4 processing */
+void cnn_rgb_to_rgba_luminance(const unsigned char* rgb, float* rgba, int width, int height) {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int rgb_idx = (y * width + x) * 3;
+            int rgba_idx = (y * width + x) * 4;
+            
+            float r = rgb[rgb_idx + 0] / 255.0f;
+            float g = rgb[rgb_idx + 1] / 255.0f;
+            float b = rgb[rgb_idx + 2] / 255.0f;
+            
+            rgba[rgba_idx + 0] = r;
+            rgba[rgba_idx + 1] = g;
+            rgba[rgba_idx + 2] = b;
+            rgba[rgba_idx + 3] = 0.299f * r + 0.587f * g + 0.114f * b;  /* Luminance */
+        }
+    }
+}
+
+/* Helper: Convert RGBA (RGB + Luminance) back to RGB image */
+void cnn_rgba_luminance_to_rgb(const float* rgba, unsigned char* rgb, int width, int height) {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int rgba_idx = (y * width + x) * 4;
+            int rgb_idx = (y * width + x) * 3;
+            
+            rgb[rgb_idx + 0] = (unsigned char)(fminf(fmaxf(rgba[rgba_idx + 0], 0.0f), 1.0f) * 255.0f);
+            rgb[rgb_idx + 1] = (unsigned char)(fminf(fmaxf(rgba[rgba_idx + 1], 0.0f), 1.0f) * 255.0f);
+            rgb[rgb_idx + 2] = (unsigned char)(fminf(fmaxf(rgba[rgba_idx + 2], 0.0f), 1.0f) * 255.0f);
+        }
+    }
+}
+
+/* Helper: Prepare training batch - converts RGB to RGBA and adds noise */
+int cnn_prepare_training_batch(const unsigned char* clean_rgb, unsigned char* noisy_rgb,
+                                float* clean_rgba, float* noisy_rgba, 
+                                int width, int height, float noise_sigma) {
+    if (width != 800 || height != 600) {
+        fprintf(stderr, "Error: Image must be 800x600 (got %dx%d)\n", width, height);
+        return -1;
+    }
+    
+    /* Convert clean RGB to RGBA */
+    cnn_rgb_to_rgba_luminance(clean_rgb, clean_rgba, width, height);
+    
+    /* Add noise to RGBA */
+    int rgba_size = width * height * 4;
+    cnn_add_gaussian_noise(clean_rgba, noisy_rgba, rgba_size, noise_sigma);
+    
+    /* Clamp noisy values */
+    for (int i = 0; i < rgba_size; i++) {
+        noisy_rgba[i] = fminf(fmaxf(noisy_rgba[i], 0.0f), 1.0f);
+    }
+    
+    /* Convert back to RGB for visualization if needed */
+    if (noisy_rgb) {
+        cnn_rgba_luminance_to_rgb(noisy_rgba, noisy_rgb, width, height);
+    }
+    
+    return 0;
+}
+
+/* Helper: Simple inference from RGB image */
+int cnn_inference_rgb(CNNDenoiser* cnn, const unsigned char* input_rgb, 
+                      unsigned char* output_rgb, int width, int height) {
+    if (!cnn || !cnn->finalized) return -1;
+    if (width != 800 || height != 600) {
+        fprintf(stderr, "Error: Image must be 800x600 (got %dx%d)\n", width, height);
+        return -1;
+    }
+    
+    int rgba_size = width * height * 4;
+    float *input_rgba = malloc(rgba_size * sizeof(float));
+    float *output_rgba = malloc(rgba_size * sizeof(float));
+    
+    /* Convert input RGB to RGBA */
+    cnn_rgb_to_rgba_luminance(input_rgb, input_rgba, width, height);
+    
+    /* Run inference through network */
+    clEnqueueWriteBuffer(cnn->queue, cnn->input_buf, CL_TRUE, 0, 
+                        rgba_size * sizeof(float), input_rgba, 0, NULL, NULL);
+    
+    cl_mem current = cnn->input_buf;
+    for (int i = 0; i < cnn->n_layers; i++) {
+        ConvLayer *l = &cnn->layers[i];
+        
+        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
+        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
+        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
+        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
+        clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
+        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
+        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
+        clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
+        
+        size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
+        size_t local[3] = {16, 8, 1};
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
+        
+        current = l->output;
+    }
+    
+    /* Read back result */
+    clEnqueueReadBuffer(cnn->queue, current, CL_TRUE, 0, 
+                       rgba_size * sizeof(float), output_rgba, 0, NULL, NULL);
+    
+    /* Convert output RGBA to RGB */
+    cnn_rgba_luminance_to_rgb(output_rgba, output_rgb, width, height);
+    
+    free(input_rgba);
+    free(output_rgba);
+    
+    return 0;
+}
+
