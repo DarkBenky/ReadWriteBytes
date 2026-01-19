@@ -16,25 +16,27 @@ double get_time_ms() {
     return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
-/* Multi-output channel kernel - 2 outputs per thread */
+/* Optimized: simplified output, 4 outputs per thread */
 const char *kernel_source = 
 "__kernel void conv3x3_2out(\n"
 "    __global const float4* input,\n"
-"    __global float4* output,\n"
+"    __global float* output,\n"
 "    __global const float4* weights,\n"
 "    __global const float* bias,\n"
 "    int Cin4, int Cout, int H, int W)\n"
 "{\n"
 "    int x = get_global_id(0);\n"
 "    int y = get_global_id(1);\n"
-"    int oc = get_global_id(2) * 2;\n"
+"    int oc = get_global_id(2) * 4;\n"
 "    \n"
-"    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1 || oc >= Cout) return;\n"
+"    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1) return;\n"
 "    \n"
 "    int hw = H * W;\n"
 "    \n"
-"    float sum0 = bias[oc];\n"
+"    float sum0 = (oc < Cout) ? bias[oc] : 0.0f;\n"
 "    float sum1 = (oc + 1 < Cout) ? bias[oc + 1] : 0.0f;\n"
+"    float sum2 = (oc + 2 < Cout) ? bias[oc + 2] : 0.0f;\n"
+"    float sum3 = (oc + 3 < Cout) ? bias[oc + 3] : 0.0f;\n"
 "    \n"
 "    for (int ic4 = 0; ic4 < Cin4; ic4++) {\n"
 "        int base = ic4 * hw + y * W + x;\n"
@@ -49,50 +51,36 @@ const char *kernel_source =
 "        float4 i7 = input[base + W];\n"
 "        float4 i8 = input[base + W + 1];\n"
 "        \n"
-"        int w_base0 = (oc * Cin4 + ic4) * 9;\n"
-"        sum0 += dot(i0, weights[w_base0 + 0]);\n"
-"        sum0 += dot(i1, weights[w_base0 + 1]);\n"
-"        sum0 += dot(i2, weights[w_base0 + 2]);\n"
-"        sum0 += dot(i3, weights[w_base0 + 3]);\n"
-"        sum0 += dot(i4, weights[w_base0 + 4]);\n"
-"        sum0 += dot(i5, weights[w_base0 + 5]);\n"
-"        sum0 += dot(i6, weights[w_base0 + 6]);\n"
-"        sum0 += dot(i7, weights[w_base0 + 7]);\n"
-"        sum0 += dot(i8, weights[w_base0 + 8]);\n"
-"        \n"
+"        if (oc < Cout) {\n"
+"            int w_base = (oc * Cin4 + ic4) * 9;\n"
+"            sum0 += dot(i0, weights[w_base + 0]) + dot(i1, weights[w_base + 1]) + dot(i2, weights[w_base + 2]);\n"
+"            sum0 += dot(i3, weights[w_base + 3]) + dot(i4, weights[w_base + 4]) + dot(i5, weights[w_base + 5]);\n"
+"            sum0 += dot(i6, weights[w_base + 6]) + dot(i7, weights[w_base + 7]) + dot(i8, weights[w_base + 8]);\n"
+"        }\n"
 "        if (oc + 1 < Cout) {\n"
-"            int w_base1 = ((oc + 1) * Cin4 + ic4) * 9;\n"
-"            sum1 += dot(i0, weights[w_base1 + 0]);\n"
-"            sum1 += dot(i1, weights[w_base1 + 1]);\n"
-"            sum1 += dot(i2, weights[w_base1 + 2]);\n"
-"            sum1 += dot(i3, weights[w_base1 + 3]);\n"
-"            sum1 += dot(i4, weights[w_base1 + 4]);\n"
-"            sum1 += dot(i5, weights[w_base1 + 5]);\n"
-"            sum1 += dot(i6, weights[w_base1 + 6]);\n"
-"            sum1 += dot(i7, weights[w_base1 + 7]);\n"
-"            sum1 += dot(i8, weights[w_base1 + 8]);\n"
+"            int w_base = ((oc + 1) * Cin4 + ic4) * 9;\n"
+"            sum1 += dot(i0, weights[w_base + 0]) + dot(i1, weights[w_base + 1]) + dot(i2, weights[w_base + 2]);\n"
+"            sum1 += dot(i3, weights[w_base + 3]) + dot(i4, weights[w_base + 4]) + dot(i5, weights[w_base + 5]);\n"
+"            sum1 += dot(i6, weights[w_base + 6]) + dot(i7, weights[w_base + 7]) + dot(i8, weights[w_base + 8]);\n"
+"        }\n"
+"        if (oc + 2 < Cout) {\n"
+"            int w_base = ((oc + 2) * Cin4 + ic4) * 9;\n"
+"            sum2 += dot(i0, weights[w_base + 0]) + dot(i1, weights[w_base + 1]) + dot(i2, weights[w_base + 2]);\n"
+"            sum2 += dot(i3, weights[w_base + 3]) + dot(i4, weights[w_base + 4]) + dot(i5, weights[w_base + 5]);\n"
+"            sum2 += dot(i6, weights[w_base + 6]) + dot(i7, weights[w_base + 7]) + dot(i8, weights[w_base + 8]);\n"
+"        }\n"
+"        if (oc + 3 < Cout) {\n"
+"            int w_base = ((oc + 3) * Cin4 + ic4) * 9;\n"
+"            sum3 += dot(i0, weights[w_base + 0]) + dot(i1, weights[w_base + 1]) + dot(i2, weights[w_base + 2]);\n"
+"            sum3 += dot(i3, weights[w_base + 3]) + dot(i4, weights[w_base + 4]) + dot(i5, weights[w_base + 5]);\n"
+"            sum3 += dot(i6, weights[w_base + 6]) + dot(i7, weights[w_base + 7]) + dot(i8, weights[w_base + 8]);\n"
 "        }\n"
 "    }\n"
 "    \n"
-"    int out_base = oc / 4 * hw + y * W + x;\n"
-"    int lane = oc % 4;\n"
-"    \n"
-"    float4 val = output[out_base];\n"
-"    if (lane == 0) val.x = fmax(sum0, 0.0f);\n"
-"    else if (lane == 1) val.y = fmax(sum0, 0.0f);\n"
-"    else if (lane == 2) val.z = fmax(sum0, 0.0f);\n"
-"    else val.w = fmax(sum0, 0.0f);\n"
-"    output[out_base] = val;\n"
-"    \n"
-"    if (oc + 1 < Cout) {\n"
-"        int lane1 = (oc + 1) % 4;\n"
-"        float4 val1 = output[out_base + (lane1 < lane ? hw : 0)];\n"
-"        if (lane1 == 0) val1.x = fmax(sum1, 0.0f);\n"
-"        else if (lane1 == 1) val1.y = fmax(sum1, 0.0f);\n"
-"        else if (lane1 == 2) val1.z = fmax(sum1, 0.0f);\n"
-"        else val1.w = fmax(sum1, 0.0f);\n"
-"        output[out_base + (lane1 < lane ? hw : 0)] = val1;\n"
-"    }\n"
+"    if (oc < Cout) output[oc * hw + y * W + x] = fmax(sum0, 0.0f);\n"
+"    if (oc + 1 < Cout) output[(oc + 1) * hw + y * W + x] = fmax(sum1, 0.0f);\n"
+"    if (oc + 2 < Cout) output[(oc + 2) * hw + y * W + x] = fmax(sum2, 0.0f);\n"
+"    if (oc + 3 < Cout) output[(oc + 3) * hw + y * W + x] = fmax(sum3, 0.0f);\n"
 "}\n";
 
 typedef struct {
@@ -145,7 +133,7 @@ void run_layer(NetworkCNN *net, cl_mem input, cl_mem output, cl_mem weights, cl_
     clSetKernelArg(net->kernel, 6, sizeof(int), &H);
     clSetKernelArg(net->kernel, 7, sizeof(int), &W);
     
-    size_t global[3] = {W, H, (cout + 1) / 2};
+    size_t global[3] = {W, H, (cout + 3) / 4};
     size_t local[3] = {16, 8, 1};
     
     clEnqueueNDRangeKernel(net->queue, net->kernel, 3, NULL, global, local, 0, NULL, event);
@@ -181,11 +169,11 @@ int main() {
     
     NetworkCNN *net = create_network();
     
-    /* Allocate all buffers */
+    /* Allocate all buffers - input as float4, output as float */
     cl_mem buffers[5];
-    for (int i = 0; i < 5; i++) {
-        int c4 = (layers[i] + 3) / 4;
-        buffers[i] = clCreateBuffer(net->ctx, CL_MEM_READ_WRITE, c4 * H * W * 16, NULL, NULL);
+    buffers[0] = clCreateBuffer(net->ctx, CL_MEM_READ_WRITE, ((layers[0] + 3) / 4) * H * W * 16, NULL, NULL);
+    for (int i = 1; i < 5; i++) {
+        buffers[i] = clCreateBuffer(net->ctx, CL_MEM_READ_WRITE, layers[i] * H * W * 4, NULL, NULL);
     }
     
     /* Allocate weights and biases for each layer */
@@ -204,6 +192,11 @@ int main() {
         h_input[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
     }
     clEnqueueWriteBuffer(net->queue, buffers[0], CL_TRUE, 0, c4_input * H * W * 16, h_input, 0, NULL, NULL);
+    
+    /* Convert first layer output to float format */
+    float *temp = calloc(layers[1] * H * W, sizeof(float));
+    clEnqueueWriteBuffer(net->queue, buffers[1], CL_TRUE, 0, layers[1] * H * W * 4, temp, 0, NULL, NULL);
+    free(temp);
     
     /* Warmup */
     printf("Warming up (10 iterations)...\n");
