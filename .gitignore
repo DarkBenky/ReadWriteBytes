@@ -2,3 +2,5 @@
 !fonts/fonts.bin
 .ccls*
 *.png
+*.log
+mlLib/wandb/
