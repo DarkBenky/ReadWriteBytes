@@ -16,7 +16,7 @@ double get_time_ms() {
     return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
-/* Optimized: Loop unrolling for single input channel (Cin4 = 1) */
+/* Optimized: Process 2 output channels per thread */
 const char *kernel_source = 
 "__kernel void conv3x3_inference(\n"
 "    __global const float4* input,\n"
@@ -27,15 +27,14 @@ const char *kernel_source =
 "{\n"
 "    int x = get_global_id(0);\n"
 "    int y = get_global_id(1);\n"
-"    int oc = get_global_id(2);\n"
+"    int oc = get_global_id(2) * 2;\n"
 "    \n"
 "    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1) return;\n"
 "    \n"
 "    int hw = H * W;\n"
 "    int base = y * W + x;\n"
-"    int w_base = oc * 9;\n"
 "    \n"
-"    /* Fully unrolled for single input channel */\n"
+"    /* Load inputs once */\n"
 "    float4 i0 = input[base - W - 1];\n"
 "    float4 i1 = input[base - W];\n"
 "    float4 i2 = input[base - W + 1];\n"
@@ -46,28 +45,33 @@ const char *kernel_source =
 "    float4 i7 = input[base + W];\n"
 "    float4 i8 = input[base + W + 1];\n"
 "    \n"
-"    float4 w0 = weights[w_base + 0];\n"
-"    float4 w1 = weights[w_base + 1];\n"
-"    float4 w2 = weights[w_base + 2];\n"
-"    float4 w3 = weights[w_base + 3];\n"
-"    float4 w4 = weights[w_base + 4];\n"
-"    float4 w5 = weights[w_base + 5];\n"
-"    float4 w6 = weights[w_base + 6];\n"
-"    float4 w7 = weights[w_base + 7];\n"
-"    float4 w8 = weights[w_base + 8];\n"
+"    /* Process first output channel */\n"
+"    int w_base0 = oc * 9;\n"
+"    float sum0 = bias[oc];\n"
+"    sum0 += dot(i0, weights[w_base0 + 0]);\n"
+"    sum0 += dot(i1, weights[w_base0 + 1]);\n"
+"    sum0 += dot(i2, weights[w_base0 + 2]);\n"
+"    sum0 += dot(i3, weights[w_base0 + 3]);\n"
+"    sum0 += dot(i4, weights[w_base0 + 4]);\n"
+"    sum0 += dot(i5, weights[w_base0 + 5]);\n"
+"    sum0 += dot(i6, weights[w_base0 + 6]);\n"
+"    sum0 += dot(i7, weights[w_base0 + 7]);\n"
+"    sum0 += dot(i8, weights[w_base0 + 8]);\n"
+"    output[oc * hw + y * W + x] = fmax(sum0, 0.0f);\n"
 "    \n"
-"    float sum = bias[oc];\n"
-"    sum += dot(i0, w0);\n"
-"    sum += dot(i1, w1);\n"
-"    sum += dot(i2, w2);\n"
-"    sum += dot(i3, w3);\n"
-"    sum += dot(i4, w4);\n"
-"    sum += dot(i5, w5);\n"
-"    sum += dot(i6, w6);\n"
-"    sum += dot(i7, w7);\n"
-"    sum += dot(i8, w8);\n"
-"    \n"
-"    output[oc * hw + y * W + x] = fmax(sum, 0.0f);\n"
+"    /* Process second output channel */\n"
+"    int w_base1 = (oc + 1) * 9;\n"
+"    float sum1 = bias[oc + 1];\n"
+"    sum1 += dot(i0, weights[w_base1 + 0]);\n"
+"    sum1 += dot(i1, weights[w_base1 + 1]);\n"
+"    sum1 += dot(i2, weights[w_base1 + 2]);\n"
+"    sum1 += dot(i3, weights[w_base1 + 3]);\n"
+"    sum1 += dot(i4, weights[w_base1 + 4]);\n"
+"    sum1 += dot(i5, weights[w_base1 + 5]);\n"
+"    sum1 += dot(i6, weights[w_base1 + 6]);\n"
+"    sum1 += dot(i7, weights[w_base1 + 7]);\n"
+"    sum1 += dot(i8, weights[w_base1 + 8]);\n"
+"    output[(oc + 1) * hw + y * W + x] = fmax(sum1, 0.0f);\n"
 "}\n";
 
 typedef struct {
@@ -168,7 +172,7 @@ int main() {
         clSetKernelArg(cnn->kernel, 5, sizeof(int), &H);
         clSetKernelArg(cnn->kernel, 6, sizeof(int), &W);
         
-        size_t global[3] = {W, H, FILTERS};
+        size_t global[3] = {W, H, FILTERS / 2};
         size_t local[3] = {16, 8, 1};
         clEnqueueNDRangeKernel(cnn->queue, cnn->kernel, 3, NULL, 
                               global, local, 0, NULL, NULL);
@@ -197,7 +201,7 @@ int main() {
         clSetKernelArg(cnn->kernel, 5, sizeof(int), &H);
         clSetKernelArg(cnn->kernel, 6, sizeof(int), &W);
         
-        size_t global[3] = {W, H, FILTERS};
+        size_t global[3] = {W, H, FILTERS / 2};
         size_t local[3] = {16, 8, 1};
         clEnqueueNDRangeKernel(cnn->queue, cnn->kernel, 3, NULL, 
                               global, local, 0, NULL, &event);
