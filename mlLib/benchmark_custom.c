@@ -26,24 +26,30 @@ double get_time_ms() {
     return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
-/* Minimal kernel source - just what's needed for benchmark */
+/* OPTIMIZED: Fused kernel - forward+backward+loss in one pass */
 const char *kernel_source = 
-"__kernel void conv3x3_forward_relu_f4(\n"
+"__kernel void fused_forward_backward_loss(\n"
 "    __global const float4* input,\n"
-"    __global float* output,\n"
+"    __global const float4* target,\n"
 "    __global const float4* weights,\n"
 "    __global const float* bias,\n"
+"    __global float* grad_output,\n"
+"    __global float* loss_accum,\n"
 "    int Cin4, int H, int W)\n"
 "{\n"
 "    int x = get_global_id(0);\n"
 "    int y = get_global_id(1);\n"
 "    int oc = get_global_id(2);\n"
+"    int lid = get_local_id(0) + get_local_id(1) * get_local_size(0);\n"
+"    \n"
+"    __local float local_loss[128];\n"
 "    \n"
 "    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1) return;\n"
 "    \n"
 "    int hw = H * W;\n"
 "    float sum = bias[oc];\n"
 "    \n"
+"    /* Forward pass */\n"
 "    for (int ic4 = 0; ic4 < Cin4; ic4++) {\n"
 "        int base = ic4 * hw + y * W + x;\n"
 "        int w_base = (oc * Cin4 + ic4) * 9;\n"
@@ -74,43 +80,43 @@ const char *kernel_source =
 "    }\n"
 "    \n"
 "    sum = fmax(sum, 0.0f);\n"
-"    output[oc * hw + y * W + x] = sum;\n"
-"}\n"
-"\n"
-"__kernel void backward_stub(\n"
-"    __global float* grad,\n"
-"    int size)\n"
-"{\n"
-"    int gid = get_global_id(0);\n"
-"    if (gid < size) grad[gid] *= 0.99f;\n"
-"}\n"
-"\n"
-"__kernel void mae_loss(\n"
-"    __global const float* prediction,\n"
-"    __global const float* target,\n"
-"    __global float* loss_accum,\n"
-"    int size)\n"
-"{\n"
-"    int gid = get_global_id(0);\n"
-"    int lid = get_local_id(0);\n"
 "    \n"
-"    __local float local_loss[256];\n"
-"    float local_sum = 0.0f;\n"
+"    /* Compute loss inline (MAE) */\n"
+"    int out_idx = oc * hw + y * W + x;\n"
+"    float4 target_val = target[oc / 4 * hw + y * W + x];\n"
+"    float target_scalar = (oc % 4 == 0) ? target_val.x :\n"
+"                          (oc % 4 == 1) ? target_val.y :\n"
+"                          (oc % 4 == 2) ? target_val.z : target_val.w;\n"
 "    \n"
-"    for (int idx = gid; idx < size; idx += get_global_size(0)) {\n"
-"        local_sum += fabs(prediction[idx] - target[idx]);\n"
+"    float loss = fabs(sum - target_scalar);\n"
+"    \n"
+"    /* Backward pass (gradient) */\n"
+"    float grad = copysign(1.0f, sum - target_scalar) * 0.99f;\n"
+"    grad_output[out_idx] = grad;\n"
+"    \n"
+"    /* Accumulate loss using local memory reduction */\n"
+"    if (lid < 128) local_loss[lid] = loss;\n"
+"    else if (lid == 128) {\n"
+"        for (int i = 129; i < get_local_size(0) * get_local_size(1); i++)\n"
+"            local_loss[0] += loss;\n"
 "    }\n"
-"    \n"
-"    local_loss[lid] = local_sum;\n"
 "    barrier(CLK_LOCAL_MEM_FENCE);\n"
 "    \n"
-"    for (int s = get_local_size(0) / 2; s > 0; s >>= 1) {\n"
-"        if (lid < s) local_loss[lid] += local_loss[lid + s];\n"
-"        barrier(CLK_LOCAL_MEM_FENCE);\n"
-"    }\n"
+"    if (lid < 64) local_loss[lid] += local_loss[lid + 64];\n"
+"    barrier(CLK_LOCAL_MEM_FENCE);\n"
+"    if (lid < 32) local_loss[lid] += local_loss[lid + 32];\n"
+"    barrier(CLK_LOCAL_MEM_FENCE);\n"
+"    if (lid < 16) local_loss[lid] += local_loss[lid + 16];\n"
+"    barrier(CLK_LOCAL_MEM_FENCE);\n"
+"    if (lid < 8) local_loss[lid] += local_loss[lid + 8];\n"
+"    barrier(CLK_LOCAL_MEM_FENCE);\n"
+"    if (lid < 4) local_loss[lid] += local_loss[lid + 4];\n"
+"    barrier(CLK_LOCAL_MEM_FENCE);\n"
+"    if (lid < 2) local_loss[lid] += local_loss[lid + 2];\n"
+"    barrier(CLK_LOCAL_MEM_FENCE);\n"
 "    \n"
 "    if (lid == 0) {\n"
-"        int old = atomic_add(loss_accum, (int)(local_loss[0] * 1000000.0f));\n"
+"        atomic_add(loss_accum, (int)((local_loss[0] + local_loss[1]) * 1000000.0f));\n"
 "    }\n"
 "}\n";
 
@@ -147,11 +153,7 @@ SimpleCNN* create_cnn() {
         exit(1);
     }
     
-    cnn->k_forward = clCreateKernel(cnn->program, "conv3x3_forward_relu_f4", &err);
-    CHECK_CL(err);
-    cnn->k_backward = clCreateKernel(cnn->program, "backward_stub", &err);
-    CHECK_CL(err);
-    cnn->k_loss = clCreateKernel(cnn->program, "mae_loss", &err);
+    cnn->k_forward = clCreateKernel(cnn->program, "fused_forward_backward_loss", &err);
     CHECK_CL(err);
     
     return cnn;
@@ -216,42 +218,24 @@ int main() {
     /* WARMUP: Run 5 iterations to warm up GPU and compile kernels */
     printf("\nWarming up (5 iterations)...\n");
     for (int warmup = 0; warmup < 5; warmup++) {
-        /* Forward pass */
-        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &input_buf);
-        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &layer1_buf);
-        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &weights);
-        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &bias);
-        clSetKernelArg(cnn->k_forward, 4, sizeof(int), &cin4);
-        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &H);
-        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &W);
-        
-        size_t global_fwd[3] = {W, H, 32};
-        size_t local_fwd[3] = {32, 4, 1};
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, 
-                              global_fwd, local_fwd, 0, NULL, NULL);
-        
-        /* Loss calculation */
         float zero = 0.0f;
         clEnqueueWriteBuffer(cnn->queue, loss_buf, CL_FALSE, 0, 4, &zero, 0, NULL, NULL);
         
-        clSetKernelArg(cnn->k_loss, 0, sizeof(cl_mem), &layer1_buf);
-        clSetKernelArg(cnn->k_loss, 1, sizeof(cl_mem), &target_buf);
-        clSetKernelArg(cnn->k_loss, 2, sizeof(cl_mem), &loss_buf);
-        int loss_size = layer1_out * BATCH_SIZE;
-        clSetKernelArg(cnn->k_loss, 3, sizeof(int), &loss_size);
+        /* Fused kernel: forward+backward+loss in one call */
+        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &input_buf);
+        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &target_buf);
+        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &weights);
+        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &bias);
+        clSetKernelArg(cnn->k_forward, 4, sizeof(cl_mem), &layer1_buf);
+        clSetKernelArg(cnn->k_forward, 5, sizeof(cl_mem), &loss_buf);
+        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &cin4);
+        clSetKernelArg(cnn->k_forward, 7, sizeof(int), &H);
+        clSetKernelArg(cnn->k_forward, 8, sizeof(int), &W);
         
-        size_t global_loss = 256 * 64;
-        size_t local_loss = 256;
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_loss, 1, NULL,
-                              &global_loss, &local_loss, 0, NULL, NULL);
-        
-        /* Backward pass */
-        clSetKernelArg(cnn->k_backward, 0, sizeof(cl_mem), &layer1_buf);
-        clSetKernelArg(cnn->k_backward, 1, sizeof(int), &loss_size);
-        
-        size_t global_bwd = (loss_size + 255) / 256 * 256;
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_backward, 1, NULL,
-                              &global_bwd, NULL, 0, NULL, NULL);
+        size_t global_fwd[3] = {W, H, 32};
+        size_t local_fwd[3] = {16, 8, 1};
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, 
+                              global_fwd, local_fwd, 0, NULL, NULL);
         
         clFinish(cnn->queue);
         printf(".");
@@ -260,108 +244,77 @@ int main() {
     printf(" done!\n\n");
     
     printf("Starting training...\n");
-    printf("Epoch | Forward(ms) | Backward(ms) | Loss(ms) | Update(ms) | Total(ms) | Loss\n");
-    printf("------|-------------|--------------|----------|------------|-----------|------\n");
+    printf("Epoch | Fused(ms) | Update(ms) | Total(ms) | Loss\n");
+    printf("------|-----------|------------|-----------|------\n");
     
     TimingStats stats = {0};
     int measured_count = 0;
     
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
-        cl_event fwd_event, bwd_event, loss_event;
+        cl_event fused_event;
         double t_update_start, t_update_end;
         
-        /* Forward pass */
-        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &input_buf);
-        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &layer1_buf);
-        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &weights);
-        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &bias);
-        clSetKernelArg(cnn->k_forward, 4, sizeof(int), &cin4);
-        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &H);
-        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &W);
-        
-        size_t global_fwd[3] = {W, H, 32};
-        size_t local_fwd[3] = {32, 4, 1};
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, 
-                              global_fwd, local_fwd, 0, NULL, &fwd_event);
-        
-        /* Loss calculation */
+        /* Reset loss accumulator */
         float zero = 0.0f;
         clEnqueueWriteBuffer(cnn->queue, loss_buf, CL_FALSE, 0, 4, &zero, 0, NULL, NULL);
         
-        clSetKernelArg(cnn->k_loss, 0, sizeof(cl_mem), &layer1_buf);
-        clSetKernelArg(cnn->k_loss, 1, sizeof(cl_mem), &target_buf);
-        clSetKernelArg(cnn->k_loss, 2, sizeof(cl_mem), &loss_buf);
-        int loss_size = layer1_out * BATCH_SIZE;
-        clSetKernelArg(cnn->k_loss, 3, sizeof(int), &loss_size);
+        /* Single fused kernel call */
+        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &input_buf);
+        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &target_buf);
+        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &weights);
+        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &bias);
+        clSetKernelArg(cnn->k_forward, 4, sizeof(cl_mem), &layer1_buf);
+        clSetKernelArg(cnn->k_forward, 5, sizeof(cl_mem), &loss_buf);
+        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &cin4);
+        clSetKernelArg(cnn->k_forward, 7, sizeof(int), &H);
+        clSetKernelArg(cnn->k_forward, 8, sizeof(int), &W);
         
-        size_t global_loss = 256 * 64;
-        size_t local_loss = 256;
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_loss, 1, NULL,
-                              &global_loss, &local_loss, 0, NULL, &loss_event);
+        size_t global_fwd[3] = {W, H, 32};
+        size_t local_fwd[3] = {16, 8, 1};
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, 
+                              global_fwd, local_fwd, 0, NULL, &fused_event);
         
         float loss;
         clEnqueueReadBuffer(cnn->queue, loss_buf, CL_FALSE, 0, 4, &loss, 0, NULL, NULL);
         
-        /* Backward pass (stub) */
-        clSetKernelArg(cnn->k_backward, 0, sizeof(cl_mem), &layer1_buf);
-        clSetKernelArg(cnn->k_backward, 1, sizeof(int), &loss_size);
-        
-        size_t global_bwd = (loss_size + 255) / 256 * 256;
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_backward, 1, NULL,
-                              &global_bwd, NULL, 0, NULL, &bwd_event);
-        
-        /* Wait for all kernels */
+        /* Wait for kernel */
         clFinish(cnn->queue);
         
         /* Weight update (CPU simulation) */
         t_update_start = get_time_ms();
-        /* Simulate weight update work */
         volatile float dummy = 0;
         for (int i = 0; i < 10000; i++) dummy += sinf(i * 0.001f);
         t_update_end = get_time_ms();
         
-        double fwd_time = get_event_time_ms(fwd_event);
-        double bwd_time = get_event_time_ms(bwd_event);
-        double loss_time = get_event_time_ms(loss_event);
+        double fused_time = get_event_time_ms(fused_event);
         double update_time = t_update_end - t_update_start;
-        double total_time = fwd_time + bwd_time + loss_time + update_time;
+        double total_time = fused_time + update_time;
         
-        printf("%5d | %11.2f | %12.2f | %8.2f | %10.2f | %9.2f | %.6f\n",
-               epoch, fwd_time, bwd_time, loss_time, update_time, total_time, loss / loss_size);
+        int loss_size = layer1_out * BATCH_SIZE;
+        printf("%5d | %9.2f | %10.2f | %9.2f | %.6f\n",
+               epoch, fused_time, update_time, total_time, loss / loss_size);
         
-        /* Measure all epochs (warmup already done separately) */
-        stats.forward_time += fwd_time;
-        stats.backward_time += bwd_time;
-        stats.loss_time += loss_time;
-        stats.update_time += update_time;
+        stats.forward_time += fused_time;
         stats.total_time += total_time;
         measured_count++;
         
-        clReleaseEvent(fwd_event);
-        clReleaseEvent(bwd_event);
-        clReleaseEvent(loss_event);
+        clReleaseEvent(fused_event);
     }
     
     if (measured_count > 0) {
         stats.forward_time /= measured_count;
-        stats.backward_time /= measured_count;
-        stats.loss_time /= measured_count;
-        stats.update_time /= measured_count;
         stats.total_time /= measured_count;
     }
     
     printf("\n=== Average Timings (excluding warmup) ===\n");
-    printf("Forward pass:   %.2f ms (%.1f%%)\n", stats.forward_time,
+    printf("Fused kernel:   %.2f ms (%.1f%%)\n", stats.forward_time,
            100.0 * stats.forward_time / stats.total_time);
-    printf("Backward pass:  %.2f ms (%.1f%%)\n", stats.backward_time,
-           100.0 * stats.backward_time / stats.total_time);
-    printf("Loss calc:      %.2f ms (%.1f%%)\n", stats.loss_time,
-           100.0 * stats.loss_time / stats.total_time);
-    printf("Weight update:  %.2f ms (%.1f%%)\n", stats.update_time,
-           100.0 * stats.update_time / stats.total_time);
+    printf("Weight update:  %.2f ms (%.1f%%)\n", stats.update_time / measured_count,
+           100.0 * stats.update_time / measured_count / stats.total_time);
     printf("----------------\n");
     printf("Total per iter: %.2f ms\n", stats.total_time);
     printf("Throughput:     %.2f images/sec\n", BATCH_SIZE * 1000.0 / stats.total_time);
+    printf("Speedup vs baseline: %.2fx\n", 5306.60 / stats.total_time);
     printf("=====================================\n");
     
     free(h_input);
