@@ -1,65 +1,71 @@
-# CNN Denoising Library & Examples Makefile
-DEEPCL_DIR = dist
-
-CXX = g++
+# CNN Denoising Library - Optimized Makefile
 CC = gcc
-CXXFLAGS = -std=c++11 -Wall -O2 \
-	-I$(DEEPCL_DIR)/include \
-	-I$(DEEPCL_DIR)/include/easycl \
-	-I$(DEEPCL_DIR)/include/deepcl
-
 CFLAGS = -O3 -Wall
-
-LDFLAGS = -L$(DEEPCL_DIR)/lib \
-	-lDeepCL -lEasyCL -lclBLAS -lclew \
-	-Wl,-rpath,$(PWD)/$(DEEPCL_DIR)/lib
-
 OPENCL_LIBS = -lOpenCL -lm
 
 # Main targets
-all: example libcnn_denoise.a
+all: libcnn_denoise.a example_rgb_helpers benchmark_network benchmark_inference
 
-# Library: Your custom CNN denoising library
+# Library: Optimized CNN denoising library
 libcnn_denoise.a: cnn_denoise.o
 	ar rcs libcnn_denoise.a cnn_denoise.o
 
 cnn_denoise.o: cnn_denoise.c cnn_denoise.h
 	$(CC) $(CFLAGS) -c cnn_denoise.c -o cnn_denoise.o
 
-# Example using DeepCL (default)
-example: example.cpp
-	$(CXX) $(CXXFLAGS) -o example example.cpp $(LDFLAGS)
-
-# Example using custom C library (commented out in example.cpp by default)
-example_custom: example.cpp libcnn_denoise.a
-	$(CC) $(CFLAGS) -o example_custom example.cpp -L. -lcnn_denoise $(OPENCL_LIBS)
-
-# Benchmarks
-benchmark_deepcl: benchmark_deepcl.cpp
-	$(CXX) $(CXXFLAGS) -o benchmark_deepcl benchmark_deepcl.cpp $(LDFLAGS)
+# Examples and benchmarks
+example_rgb_helpers: example_rgb_helpers.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o example_rgb_helpers example_rgb_helpers.c cnn_denoise.c $(OPENCL_LIBS)
 
 benchmark_custom: benchmark_custom.c
 	$(CC) $(CFLAGS) -o benchmark_custom benchmark_custom.c $(OPENCL_LIBS)
 
-# Test programs
+benchmark_inference: benchmark_inference.c
+	$(CC) $(CFLAGS) -o benchmark_inference benchmark_inference.c $(OPENCL_LIBS)
+
+benchmark_network: benchmark_network.c
+	$(CC) $(CFLAGS) -o benchmark_network benchmark_network.c $(OPENCL_LIBS)
+
 test_lib: test_lib.c libcnn_denoise.a
 	$(CC) $(CFLAGS) -o test_lib test_lib.c -L. -lcnn_denoise $(OPENCL_LIBS)
 
+# Utility targets
 clean:
-	rm -f *.o *.a example example_custom benchmark_deepcl benchmark_custom test_lib
+	rm -f *.o *.a example_rgb_helpers benchmark_* test_lib
+
+rebuild: clean all
 
 # Run examples
-run_example: example
-	./example
+run_example: example_rgb_helpers
+	@echo "=== RGB Helper Functions Example ==="
+	./example_rgb_helpers
 
-run_custom: example_custom
-	./example_custom
-
-run_benchmarks: benchmark_deepcl benchmark_custom
-	@echo "=== DeepCL Benchmark ==="
-	@./benchmark_deepcl 2>&1 | tail -20 || true
+run_benchmarks: benchmark_inference benchmark_network benchmark_custom
+	@echo "=== Single Layer Inference (optimized) ==="
+	@./benchmark_inference 2>&1 | tail -15 || true
 	@echo ""
-	@echo "=== Custom OpenCL Benchmark ==="
-	@./benchmark_custom 2>&1 | tail -20 || true
+	@echo "=== Multi-Layer Network (real-time) ==="
+	@./benchmark_network 2>&1 | tail -15 || true
+	@echo ""
+	@echo "=== Training Benchmark (kernel fusion) ==="
+	@./benchmark_custom 2>&1 | tail -15 || true
 
-.PHONY: all clean run_example run_custom run_benchmarks
+help:
+	@echo "CNN Denoising Library - Build Targets"
+	@echo ""
+	@echo "Main targets:"
+	@echo "  all                  - Build library and all examples"
+	@echo "  libcnn_denoise.a     - Build only the library"
+	@echo "  example_rgb_helpers  - RGB helper functions example"
+	@echo "  benchmark_inference  - Single layer inference benchmark"
+	@echo "  benchmark_network    - Multi-layer network benchmark"
+	@echo "  benchmark_custom     - Training benchmark with kernel fusion"
+	@echo ""
+	@echo "Utility targets:"
+	@echo "  clean                - Remove all built files"
+	@echo "  rebuild              - Clean and rebuild everything"
+	@echo "  run_example          - Run RGB helpers example"
+	@echo "  run_benchmarks       - Run all benchmarks"
+	@echo "  help                 - Show this message"
+
+.PHONY: all clean rebuild run_example run_benchmarks help
