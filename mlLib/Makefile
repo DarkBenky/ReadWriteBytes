@@ -6,45 +6,26 @@ LDFLAGS = -O3 -march=native -mtune=native -ffast-math
 OPENCL_LIBS = -lOpenCL -lm
 
 # Main targets
-all: libcnn_denoise.a example_rgb_helpers test_training test_residual test_features
+all: example_easy benchmark test_features
 
-# Library: Optimized CNN denoising library
+# Example: Comprehensive usage example showing all features
+example_easy: example_easy.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o example_easy example_easy.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
+# Benchmark: Performance testing for all components
+benchmark: benchmark.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o benchmark benchmark.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
+# Test: Correctness validation
+test_features: test_features.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o test_features test_features.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
+# Library (optional)
 libcnn_denoise.a: cnn_denoise.o
 	ar rcs libcnn_denoise.a cnn_denoise.o
 
 cnn_denoise.o: cnn_denoise.c cnn_denoise.h
 	$(CC) $(CFLAGS) -c cnn_denoise.c -o cnn_denoise.o
-
-# Examples and tests
-example_rgb_helpers: example_rgb_helpers.c cnn_denoise.c cnn_denoise.h
-	$(CC) $(CFLAGS) -o example_rgb_helpers example_rgb_helpers.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
-
-example_easy: example_easy.c cnn_denoise.c cnn_denoise.h
-	$(CC) $(CFLAGS) -o example_easy example_easy.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
-
-test_training: test_training.c cnn_denoise.c cnn_denoise.h
-	$(CC) $(CFLAGS) -o test_training test_training.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
-
-test_residual: test_residual.c cnn_denoise.c cnn_denoise.h
-	$(CC) $(CFLAGS) -o test_residual test_residual.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
-
-test_features: test_features.c cnn_denoise.c cnn_denoise.h
-	$(CC) $(CFLAGS) -o test_features test_features.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
-
-benchmark_custom: benchmark_custom.c
-	$(CC) $(CFLAGS) -o benchmark_custom benchmark_custom.c $(LDFLAGS) $(OPENCL_LIBS)
-
-benchmark_inference: benchmark_inference.c
-	$(CC) $(CFLAGS) -o benchmark_inference benchmark_inference.c $(LDFLAGS) $(OPENCL_LIBS)
-
-benchmark_network: benchmark_network.c
-	$(CC) $(CFLAGS) -o benchmark_network benchmark_network.c $(LDFLAGS) $(OPENCL_LIBS)
-
-benchmark_optimizations: benchmark_optimizations.c cnn_denoise.c cnn_denoise.h
-	$(CC) $(CFLAGS) -o benchmark_optimizations benchmark_optimizations.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
-
-test_lib: test_lib.c libcnn_denoise.a
-	$(CC) $(CFLAGS) -o test_lib test_lib.c -L. -lcnn_denoise $(LDFLAGS) $(OPENCL_LIBS)
 
 # Utility targets
 clean:
@@ -66,28 +47,36 @@ run_benchmarks: benchmark_inference benchmark_network benchmark_custom
 	@./benchmark_inference 2>&1 | tail -15 || true
 	@echo ""
 	@echo "=== Multi-Layer Network (real-time) ==="
-	@./benchmark_network 2>&1 | tail -15 || true
-	@echo ""
-	@echo "=== Training Benchmark (kernel fusion) ==="
-	@./benchmark_custom 2>&1 | tail -15 || true
+# Utility targets
+clean:
+	rm -f *.o *.a example_easy benchmark test_features
+
+rebuild: clean all
+
+run_example:
+	./example_easy
+
+run_benchmark:
+	./benchmark
+
+run_test:
+	./test_features
 
 help:
 	@echo "CNN Denoising Library - Build Targets"
 	@echo ""
 	@echo "Main targets:"
-	@echo "  all                  - Build library and examples"
-	@echo "  libcnn_denoise.a     - Build static library"
-	@echo "  example_rgb_helpers  - RGB helper example"
-	@echo "  test_training        - Training validation test"
-	@echo "  test_lib             - Library unit tests"
+	@echo "  all           - Build everything (example, benchmark, test)"
+	@echo "  example_easy  - Comprehensive usage example"
+	@echo "  benchmark     - Performance measurements"
+	@echo "  test_features - Correctness validation"
 	@echo ""
 	@echo "Utility targets:"
-	@echo "  clean                - Remove all build artifacts"
-	@echo "  rebuild              - Clean and rebuild"
-	@echo "  run_example          - Run RGB example"
-	@echo "  run_test             - Run training test"
-	@echo "  help                 - Show this message"
+	@echo "  clean         - Remove build artifacts"
+	@echo "  rebuild       - Clean and rebuild"
+	@echo "  run_example   - Run usage example"
+	@echo "  run_benchmark - Run performance tests"
+	@echo "  run_test      - Run correctness tests"
+	@echo "  help          - Show this message"
 
-.PHONY: all clean rebuild run_example run_test help
-
-.PHONY: all clean rebuild run_example run_benchmarks help
+.PHONY: all clean rebuild run_example run_benchmark run_test help
