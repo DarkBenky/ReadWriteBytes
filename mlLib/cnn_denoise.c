@@ -30,6 +30,7 @@ struct CNNDenoiser {
     cl_program program;
     cl_kernel k_forward, k_backward, k_weight_grad, k_mae_loss, k_sgd_update, k_adam_update;
     cl_kernel k_mse_loss, k_laplace_loss, k_add_weighted_grad, k_residual_subtract;
+    cl_kernel k_forward_residual;  /* Fused forward + residual for last layer */
     
     CNNConfig config;
     int n_layers;
@@ -316,6 +317,76 @@ static const char *kernel_source =
 "    if (gid < size) {\n"
 "        output[gid] = input[gid] - prediction[gid];\n"
 "    }\n"
+"}\n"
+"\n"
+"/* Fused final layer with residual: directly compute input - prediction */\n"
+"__kernel void conv3x3_forward_relu_residual_f4(\n"
+"    __global const float4* input, __global const float4* original_input,\n"
+"    __global float* output, __global const float4* weights,\n"
+"    __global const float* bias, int Cin4, int Cout, int H, int W)\n"
+"{\n"
+"    int x = get_global_id(0), y = get_global_id(1), oc = get_global_id(2) * 4;\n"
+"    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1) return;\n"
+"    \n"
+"    int hw = H * W;\n"
+"    int pixel_idx = y * W + x;\n"
+"    \n"
+"    float sum0 = (oc < Cout) ? bias[oc] : 0.0f;\n"
+"    float sum1 = (oc + 1 < Cout) ? bias[oc + 1] : 0.0f;\n"
+"    float sum2 = (oc + 2 < Cout) ? bias[oc + 2] : 0.0f;\n"
+"    float sum3 = (oc + 3 < Cout) ? bias[oc + 3] : 0.0f;\n"
+"    \n"
+"    for (int ic4 = 0; ic4 < Cin4; ic4++) {\n"
+"        int base = ic4 * hw + y * W + x;\n"
+"        \n"
+"        float4 i0 = input[base - W - 1];\n"
+"        float4 i1 = input[base - W];\n"
+"        float4 i2 = input[base - W + 1];\n"
+"        float4 i3 = input[base - 1];\n"
+"        float4 i4 = input[base];\n"
+"        float4 i5 = input[base + 1];\n"
+"        float4 i6 = input[base + W - 1];\n"
+"        float4 i7 = input[base + W];\n"
+"        float4 i8 = input[base + W + 1];\n"
+"        \n"
+"        if (oc < Cout) {\n"
+"            int wb = (oc * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum0 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
+"        if (oc + 1 < Cout) {\n"
+"            int wb = ((oc+1) * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum1 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
+"        if (oc + 2 < Cout) {\n"
+"            int wb = ((oc+2) * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum2 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
+"        if (oc + 3 < Cout) {\n"
+"            int wb = ((oc+3) * Cin4 + ic4) * 9;\n"
+"            float4 w0=weights[wb], w1=weights[wb+1], w2=weights[wb+2];\n"
+"            float4 w3=weights[wb+3], w4=weights[wb+4], w5=weights[wb+5];\n"
+"            float4 w6=weights[wb+6], w7=weights[wb+7], w8=weights[wb+8];\n"
+"            sum3 += dot(i0,w0) + dot(i1,w1) + dot(i2,w2) + dot(i3,w3) + dot(i4,w4) + dot(i5,w5) + dot(i6,w6) + dot(i7,w7) + dot(i8,w8);\n"
+"        }\n"
+"    }\n"
+"    \n"
+"    /* Apply ReLU and compute residual: original_input - prediction */\n"
+"    int oc4 = oc / 4;\n"
+"    float4 orig = original_input[oc4 * hw + pixel_idx];\n"
+"    \n"
+"    if (oc < Cout) output[oc * hw + pixel_idx] = orig.x - fmax(sum0, 0.0f);\n"
+"    if (oc + 1 < Cout) output[(oc + 1) * hw + pixel_idx] = orig.y - fmax(sum1, 0.0f);\n"
+"    if (oc + 2 < Cout) output[(oc + 2) * hw + pixel_idx] = orig.z - fmax(sum2, 0.0f);\n"
+"    if (oc + 3 < Cout) output[(oc + 3) * hw + pixel_idx] = orig.w - fmax(sum3, 0.0f);\n"
 "}\n";
 
 static void init_weights(float *w, int n) {
@@ -372,6 +443,7 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->k_adam_update = clCreateKernel(cnn->program, "adam_update", &err);
     cnn->k_add_weighted_grad = clCreateKernel(cnn->program, "add_weighted_grad", &err);
     cnn->k_residual_subtract = clCreateKernel(cnn->program, "residual_subtract", &err);
+    cnn->k_forward_residual = clCreateKernel(cnn->program, "conv3x3_forward_relu_residual_f4", &err);
     
     cnn->adam_t = 0;
     
@@ -934,36 +1006,49 @@ int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, in
     
     /* Forward pass */
     cl_mem current = cnn->input_buf;
+    int last_layer_idx = cnn->n_layers - 1;
+    
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
         
-        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
-        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
-        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
-        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
-        clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
-        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
-        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
-        clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
-        
-        size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
-        size_t local[3] = {16, 8, 1};
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
-        
-        current = l->output;
+        /* Use fused residual kernel for last layer if residual mode */
+        if (i == last_layer_idx && cnn->config.residual_mode) {
+            clSetKernelArg(cnn->k_forward_residual, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_forward_residual, 1, sizeof(cl_mem), &cnn->input_buf);
+            clSetKernelArg(cnn->k_forward_residual, 2, sizeof(cl_mem), &cnn->residual_buf);
+            clSetKernelArg(cnn->k_forward_residual, 3, sizeof(cl_mem), &l->weights);
+            clSetKernelArg(cnn->k_forward_residual, 4, sizeof(cl_mem), &l->bias);
+            clSetKernelArg(cnn->k_forward_residual, 5, sizeof(int), &l->cin4);
+            clSetKernelArg(cnn->k_forward_residual, 6, sizeof(int), &l->cout);
+            clSetKernelArg(cnn->k_forward_residual, 7, sizeof(int), &l->h);
+            clSetKernelArg(cnn->k_forward_residual, 8, sizeof(int), &l->w);
+            
+            size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
+            size_t local[3] = {16, 8, 1};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward_residual, 3, NULL, global, local, 0, NULL, NULL);
+            
+            /* Output is directly in residual_buf */
+            current = cnn->residual_buf;
+        } else {
+            clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
+            clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
+            clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
+            clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
+            clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
+            clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
+            
+            size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
+            size_t local[3] = {16, 8, 1};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
+            
+            current = l->output;
+        }
     }
     
-    /* If residual mode, compute: output = input - prediction */
+    /* Read output (residual already computed if in residual mode) */
     if (cnn->config.residual_mode) {
-        /* Use GPU kernel for residual subtraction */
-        clSetKernelArg(cnn->k_residual_subtract, 0, sizeof(cl_mem), &cnn->input_buf);
-        clSetKernelArg(cnn->k_residual_subtract, 1, sizeof(cl_mem), &current);
-        clSetKernelArg(cnn->k_residual_subtract, 2, sizeof(cl_mem), &cnn->residual_buf);
-        clSetKernelArg(cnn->k_residual_subtract, 3, sizeof(int), &input_size);
-        
-        size_t global_size = ((input_size + 255) / 256) * 256;
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_residual_subtract, 1, NULL, &global_size, NULL, 0, NULL, NULL);
-        
         clEnqueueReadBuffer(cnn->queue, cnn->residual_buf, CL_TRUE, 0, input_size * 4, denoised_output, 0, NULL, NULL);
     } else {
         clEnqueueReadBuffer(cnn->queue, current, CL_TRUE, 0, input_size * 4, denoised_output, 0, NULL, NULL);
