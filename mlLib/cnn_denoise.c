@@ -29,7 +29,7 @@ struct CNNDenoiser {
     cl_command_queue queue;
     cl_program program;
     cl_kernel k_forward, k_backward, k_weight_grad, k_mae_loss, k_sgd_update, k_adam_update;
-    cl_kernel k_mse_loss, k_laplace_loss, k_add_weighted_grad;
+    cl_kernel k_mse_loss, k_laplace_loss, k_add_weighted_grad, k_residual_subtract;
     
     CNNConfig config;
     int n_layers;
@@ -306,6 +306,16 @@ static const char *kernel_source =
 "{\n"
 "    int gid = get_global_id(0);\n"
 "    if (gid < size) grad_accum[gid] += weight * grad_new[gid];\n"
+"}\n"
+"\n"
+"__kernel void residual_subtract(\n"
+"    __global const float* input, __global const float* prediction,\n"
+"    __global float* output, int size)\n"
+"{\n"
+"    int gid = get_global_id(0);\n"
+"    if (gid < size) {\n"
+"        output[gid] = input[gid] - prediction[gid];\n"
+"    }\n"
 "}\n";
 
 static void init_weights(float *w, int n) {
@@ -361,6 +371,7 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->k_sgd_update = clCreateKernel(cnn->program, "sgd_update", &err);
     cnn->k_adam_update = clCreateKernel(cnn->program, "adam_update", &err);
     cnn->k_add_weighted_grad = clCreateKernel(cnn->program, "add_weighted_grad", &err);
+    cnn->k_residual_subtract = clCreateKernel(cnn->program, "residual_subtract", &err);
     
     cnn->adam_t = 0;
     
@@ -910,4 +921,53 @@ void cnn_set_learning_rate(CNNDenoiser* cnn, float learning_rate) {
 
 float cnn_get_learning_rate(CNNDenoiser* cnn) {
     return cnn->config.learning_rate;
+}
+
+int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, int batch_size) {
+    if (!cnn || !cnn->finalized) return -1;
+    
+    int input_size = cnn->config.input_height * cnn->config.input_width * cnn->config.input_channels;
+    
+    /* Upload input */
+    clEnqueueWriteBuffer(cnn->queue, cnn->input_buf, CL_FALSE, 0, input_size * 4, 
+                        noisy_input, 0, NULL, NULL);
+    
+    /* Forward pass */
+    cl_mem current = cnn->input_buf;
+    for (int i = 0; i < cnn->n_layers; i++) {
+        ConvLayer *l = &cnn->layers[i];
+        
+        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
+        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
+        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
+        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
+        clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
+        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
+        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
+        clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
+        
+        size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
+        size_t local[3] = {16, 8, 1};
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
+        
+        current = l->output;
+    }
+    
+    /* If residual mode, compute: output = input - prediction */
+    if (cnn->config.residual_mode) {
+        /* Use GPU kernel for residual subtraction */
+        clSetKernelArg(cnn->k_residual_subtract, 0, sizeof(cl_mem), &cnn->input_buf);
+        clSetKernelArg(cnn->k_residual_subtract, 1, sizeof(cl_mem), &current);
+        clSetKernelArg(cnn->k_residual_subtract, 2, sizeof(cl_mem), &cnn->residual_buf);
+        clSetKernelArg(cnn->k_residual_subtract, 3, sizeof(int), &input_size);
+        
+        size_t global_size = ((input_size + 255) / 256) * 256;
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_residual_subtract, 1, NULL, &global_size, NULL, 0, NULL, NULL);
+        
+        clEnqueueReadBuffer(cnn->queue, cnn->residual_buf, CL_TRUE, 0, input_size * 4, denoised_output, 0, NULL, NULL);
+    } else {
+        clEnqueueReadBuffer(cnn->queue, current, CL_TRUE, 0, input_size * 4, denoised_output, 0, NULL, NULL);
+    }
+    
+    return 0;
 }
