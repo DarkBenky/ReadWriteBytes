@@ -6,7 +6,7 @@ LDFLAGS = -O3 -march=native -mtune=native -ffast-math
 OPENCL_LIBS = -lOpenCL -lm
 
 # Main targets
-all: libcnn_denoise.a example_rgb_helpers test_training
+all: libcnn_denoise.a example_rgb_helpers test_training test_residual test_features
 
 # Library: Optimized CNN denoising library
 libcnn_denoise.a: cnn_denoise.o
@@ -19,8 +19,17 @@ cnn_denoise.o: cnn_denoise.c cnn_denoise.h
 example_rgb_helpers: example_rgb_helpers.c cnn_denoise.c cnn_denoise.h
 	$(CC) $(CFLAGS) -o example_rgb_helpers example_rgb_helpers.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
 
+example_easy: example_easy.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o example_easy example_easy.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
 test_training: test_training.c cnn_denoise.c cnn_denoise.h
 	$(CC) $(CFLAGS) -o test_training test_training.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
+test_residual: test_residual.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o test_residual test_residual.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
+test_features: test_features.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o test_features test_features.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
 
 benchmark_custom: benchmark_custom.c
 	$(CC) $(CFLAGS) -o benchmark_custom benchmark_custom.c $(LDFLAGS) $(OPENCL_LIBS)
@@ -31,12 +40,15 @@ benchmark_inference: benchmark_inference.c
 benchmark_network: benchmark_network.c
 	$(CC) $(CFLAGS) -o benchmark_network benchmark_network.c $(LDFLAGS) $(OPENCL_LIBS)
 
+benchmark_optimizations: benchmark_optimizations.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o benchmark_optimizations benchmark_optimizations.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
 test_lib: test_lib.c libcnn_denoise.a
 	$(CC) $(CFLAGS) -o test_lib test_lib.c -L. -lcnn_denoise $(LDFLAGS) $(OPENCL_LIBS)
 
 # Utility targets
 clean:
-	rm -f *.o *.a example_rgb_helpers benchmark_* test_lib test_training
+	rm -f *.o *.a example_rgb_helpers benchmark_* test_lib test_training test_residual test_features
 
 rebuild: clean all
 

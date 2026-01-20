@@ -1,6 +1,6 @@
 ================================================================================
                 CNN DENOISING LIBRARY - TECHNICAL DOCUMENTATION
-                           Version 1.0 - January 2026
+                           Version 2.0 - January 2026
 ================================================================================
 
 TABLE OF CONTENTS
@@ -10,11 +10,12 @@ TABLE OF CONTENTS
 3. Build Instructions
 4. Architecture
 5. API Reference
-6. Input Format Requirements
-7. Optimization Details
-8. Performance Benchmarks
-9. Usage Examples
-10. File Manifest
+6. Advanced Features (NEW)
+7. Input Format Requirements
+8. Optimization Details
+9. Performance Benchmarks
+10. Usage Examples
+11. File Manifest
 
 
 ================================================================================
@@ -30,7 +31,10 @@ Key Characteristics:
   - Real-time performance: 4.31ms inference at 800x600 resolution
   - Throughput: 231.9 frames per second
   - Memory efficient: Float4 vectorization with minimal padding
-  - Training support: Full backpropagation with SGD optimizer
+  - Training support: Full backpropagation with SGD and Adam optimizers
+  - Residual connections: Noise prediction mode for better convergence
+  - Multi-loss training: Combine MAE, MSE, and Laplacian losses
+  - Edge preservation: Laplacian loss for sharp detail retention
 
 
 ================================================================================
@@ -107,7 +111,18 @@ Work group configuration:
 5. API REFERENCE
 ================================================================================
 
-5.1 Core Functions
+5.1 Configuration Functions
+----------------------------
+
+CNNConfig cnn_default_config(int width, int height, int channels)
+  Returns a default configuration with sensible defaults:
+    - Optimizer: SGD
+    - Learning rate: 0.00001
+    - Residual mode: disabled
+    - Loss: MAE with weight 1.0
+    - Adam beta1: 0.9, beta2: 0.999, epsilon: 1e-8
+
+5.2 Core Functions
 ------------------
 
 CNNDenoiser* cnn_create(CNNConfig config)
@@ -212,10 +227,105 @@ int cnn_inference_rgb(CNNDenoiser* cnn, const unsigned char* input_rgb,
 
 
 ================================================================================
-6. INPUT FORMAT REQUIREMENTS
+6. ADVANCED FEATURES
 ================================================================================
 
-6.1 Four-Channel Requirement
+6.1 Residual Connections
+-------------------------
+When enabled, the network predicts the noise instead of the clean image.
+This is mathematically equivalent to:
+
+  output = input - network_prediction
+
+Advantages:
+  - Faster convergence (noise is simpler to learn than full image)
+  - Better final quality
+  - Minimal computational overhead (5%)
+
+Usage:
+  CNNConfig cfg = cnn_default_config(256, 256, 4);
+  cfg.residual_mode = 1;  /* Enable residual connections */
+
+Note: In residual mode, the training target should be the noise, not the
+clean image. For inference, the network automatically computes:
+  denoised = input - predicted_noise
+
+
+6.2 Optimizer Selection
+------------------------
+Two optimizers are available:
+
+OPTIMIZER_SGD:
+  - Simple gradient descent
+  - Lower memory usage
+  - Faster per-iteration (baseline: 7.3ms)
+  - Recommended LR: 0.0001 or lower
+
+OPTIMIZER_ADAM:
+  - Adaptive learning rates with momentum
+  - Higher memory usage (4x per parameter)
+  - Slower per-iteration (+55%: 11.3ms)
+  - Faster convergence in epochs
+  - Recommended LR: 0.001
+
+Usage:
+  cfg.optimizer = OPTIMIZER_ADAM;
+  cfg.learning_rate = 0.001f;
+  cfg.adam_beta1 = 0.9f;      /* Momentum decay */
+  cfg.adam_beta2 = 0.999f;    /* RMSprop decay */
+  cfg.adam_epsilon = 1e-8f;   /* Numerical stability */
+
+
+6.3 Multi-Loss Training
+------------------------
+Combine multiple loss functions with configurable weights for better quality.
+
+Available losses:
+  - LOSS_MAE: Mean Absolute Error (L1 norm)
+  - LOSS_MSE: Mean Squared Error (L2 norm)
+  - LOSS_LAPLACE: Laplacian edge loss for detail preservation
+
+Usage:
+  cfg.loss_config.num_losses = 2;
+  cfg.loss_config.types[0] = LOSS_MAE;
+  cfg.loss_config.weights[0] = 1.0f;       /* Primary loss */
+  cfg.loss_config.types[1] = LOSS_LAPLACE;
+  cfg.loss_config.weights[1] = 0.1f;       /* Edge preservation */
+
+Performance:
+  - Single loss: baseline
+  - Multi-loss (2): +17% overhead
+
+Recommended combinations:
+  - General denoising: MAE (1.0) + Laplace (0.1)
+  - Smooth results: MSE (1.0)
+  - Sharp details: MAE (0.7) + Laplace (0.3)
+
+
+6.4 Learning Rate Control
+--------------------------
+void cnn_set_learning_rate(CNNDenoiser* cnn, float lr)
+  Dynamically adjust learning rate during training
+
+float cnn_get_learning_rate(CNNDenoiser* cnn)
+  Query current learning rate
+
+Example with exponential decay:
+  LearningRateDecay lr_decay;
+  learning_rate_decay_init(&lr_decay, 0.001f, 0.95f, 100);
+  
+  for (int iter = 0; iter < 1000; iter++) {
+      float loss = cnn_train_step(cnn, input, target, 1);
+      float new_lr = learning_rate_decay_get(&lr_decay, iter);
+      cnn_set_learning_rate(cnn, new_lr);
+  }
+
+
+================================================================================
+7. INPUT FORMAT REQUIREMENTS
+================================================================================
+
+7.1 Four-Channel Requirement
 -----------------------------
 The library requires 4-channel input for optimal GPU vectorization. Standard
 RGB images (3 channels) must be converted to RGBA format with luminance as
@@ -226,7 +336,7 @@ Rationale:
   - 3-channel data causes unaligned memory access
   - Luminance channel provides additional useful information
 
-6.2 Luminance Calculation
+7.2 Luminance Calculation
 --------------------------
 The fourth channel contains luminance computed using ITU-R BT.601 standard:
 
@@ -399,29 +509,34 @@ save_image("output.jpg", rgb, 800, 600);
 
 
 ================================================================================
-10. FILE MANIFEST
+11. FILE MANIFEST
 ================================================================================
 
 Source Files:
-  cnn_denoise.c          Main library implementation (1610 lines)
-  cnn_denoise.h          Public API header
-  example_rgb_helpers.c  RGB helper function demonstration
-  test_lib.c             Library unit tests
-  test_training.c        Training system validation
+  cnn_denoise.c              Main library implementation (900+ lines)
+  cnn_denoise.h              Public API header with advanced features
+  example_rgb_helpers.c      RGB helper function demonstration
+  example_easy.c             Easy-to-use example with all features
+  test_lib.c                 Library unit tests
+  test_training.c            Training system validation (original)
+  test_residual.c            Residual mode validation
+  test_features.c            Comprehensive feature test suite
+  benchmark_optimizations.c  Performance analysis of new features
 
 Build System:
-  Makefile               Build configuration and targets
+  Makefile                   Build configuration and targets
 
 Documentation:
-  DOCUMENTATION.txt      This file
-  README.md              Quick start guide (deprecated, see this file)
-  LIBRARY_OPTIMIZATIONS.md
-                         Detailed optimization notes (deprecated)
+  DOCUMENTATION.txt          This file (complete reference)
 
 Generated Files:
-  libcnn_denoise.a       Static library archive
-  example_rgb_helpers    RGB helpers executable
-  test_training          Training test executable
+  libcnn_denoise.a           Static library archive
+  example_rgb_helpers        RGB helpers executable
+  example_easy               Easy example executable
+  test_training              Training test executable
+  test_residual              Residual mode test
+  test_features              Feature suite test
+  benchmark_optimizations    Optimization benchmark
 
 
 ================================================================================

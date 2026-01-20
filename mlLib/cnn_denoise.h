@@ -19,6 +19,26 @@ extern "C" {
 /* Opaque handle to CNN model */
 typedef struct CNNDenoiser CNNDenoiser;
 
+/* Optimizer type */
+typedef enum {
+    OPTIMIZER_SGD = 0,
+    OPTIMIZER_ADAM = 1
+} OptimizerType;
+
+/* Loss type */
+typedef enum {
+    LOSS_MAE = 0,
+    LOSS_MSE = 1,
+    LOSS_LAPLACE = 2
+} LossType;
+
+/* Loss configuration with multiple losses and weights */
+typedef struct {
+    LossType types[3];       /* Up to 3 loss types */
+    float weights[3];        /* Weight for each loss */
+    int num_losses;          /* Number of active losses */
+} LossConfig;
+
 /* Configuration for network architecture */
 typedef struct {
     int input_width;
@@ -27,6 +47,12 @@ typedef struct {
     int output_channels;     /* Must be multiple of 4 */
     float learning_rate;
     int use_profiling;       /* Enable timing profiling */
+    int residual_mode;       /* 1 = predict noise (output = input - prediction), 0 = direct */
+    OptimizerType optimizer; /* SGD or Adam */
+    LossConfig loss_config;  /* Loss function configuration */
+    float adam_beta1;        /* Adam: momentum decay (default 0.9) */
+    float adam_beta2;        /* Adam: RMSprop decay (default 0.999) */
+    float adam_epsilon;      /* Adam: numerical stability (default 1e-8) */
 } CNNConfig;
 
 typedef struct learning_rate_decay {
@@ -60,6 +86,9 @@ float learning_rate_decay_get(LearningRateDecay* lr_decay, int current_step);
 /* Create/destroy network */
 CNNDenoiser* cnn_create(CNNConfig config);
 void cnn_destroy(CNNDenoiser* cnn);
+
+/* Helper to create default config */
+CNNConfig cnn_default_config(int width, int height, int channels);
 
 /* Build network architecture */
 int cnn_add_layer(CNNDenoiser* cnn, LayerConfig layer);
