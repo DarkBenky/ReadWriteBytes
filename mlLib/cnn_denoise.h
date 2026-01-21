@@ -9,8 +9,10 @@
 
 #ifndef CNN_DENOISE_H
 #define CNN_DENOISE_H
-#define NUMBER_OF_IMAGES_IN_DATA_LOADER 4096
-#define IMAGE_SIZE (800 * 600 * 4) // RGB + Luminance
+#define NUMBER_OF_IMAGES_IN_DATA_LOADER 512
+#define HEIGHT 600
+#define WIDTH 800
+#define IMAGE_SIZE (WIDTH * HEIGHT * 4) // RGB + Luminance
 
 #ifdef __cplusplus
 extern "C" {
@@ -131,6 +133,10 @@ int cnn_get_num_parameters(CNNDenoiser* cnn);
 void cnn_get_timing_stats(CNNDenoiser* cnn, TimingStats* stats);
 void cnn_reset_timing_stats(CNNDenoiser* cnn);
 void cnn_print_architecture(CNNDenoiser* cnn);
+
+/* Save/Load network weights */
+int cnn_save_weights(CNNDenoiser* cnn, const char* filepath);
+int cnn_load_weights(CNNDenoiser* cnn, const char* filepath);
 
 /* Data helpers */
 void cnn_add_gaussian_noise(float* clean, float* noisy, 

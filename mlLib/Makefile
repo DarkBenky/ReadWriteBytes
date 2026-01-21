@@ -20,6 +20,9 @@ benchmark: benchmark.c cnn_denoise.c cnn_denoise.h
 test_features: test_features.c cnn_denoise.c cnn_denoise.h
 	$(CC) $(CFLAGS) -o test_features test_features.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
 
+train: train.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o train train.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
 # Library (optional)
 libcnn_denoise.a: cnn_denoise.o
 	ar rcs libcnn_denoise.a cnn_denoise.o
@@ -49,7 +52,7 @@ run_benchmarks: benchmark_inference benchmark_network benchmark_custom
 	@echo "=== Multi-Layer Network (real-time) ==="
 # Utility targets
 clean:
-	rm -f *.o *.a example_easy benchmark test_features
+	rm -f *.o *.a example_easy benchmark test_features train
 
 rebuild: clean all
 

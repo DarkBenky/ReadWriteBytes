@@ -550,6 +550,9 @@ int cnn_finalize(CNNDenoiser *cnn) {
 float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, int batch_size) {
     if (!cnn->finalized) return -1.0f;
     
+    struct timespec t_start, t_end, t_forward_start, t_backward_start, t_loss_start, t_update_start;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    
     int input_size = cnn->config.input_height * cnn->config.input_width * cnn->config.input_channels;
     int hw = cnn->config.input_height * cnn->config.input_width;
     
@@ -564,6 +567,7 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
                         clean_target, 0, NULL, NULL);
     
     /* ========== FORWARD PASS ========== */
+    clock_gettime(CLOCK_MONOTONIC, &t_forward_start);
     cl_mem current = cnn->input_buf;
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
@@ -578,11 +582,13 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
         
         size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
-        size_t local[3] = {16, 8, 1};
+        size_t local[3] = {16, 8, 1}; // TODO crete function to choose local size based on device capabilities based on benchmarking
         clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
         
         current = l->output;
     }
+    clFinish(cnn->queue);
+    clock_gettime(CLOCK_MONOTONIC, &t_loss_start);
     
     /* ========== COMPUTE LOSS & GRADIENT ========== */
     ConvLayer *last_layer = &cnn->layers[cnn->n_layers - 1];
@@ -688,6 +694,8 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     }
     
     clReleaseMemObject(temp_grad_loss);
+    clFinish(cnn->queue);
+    clock_gettime(CLOCK_MONOTONIC, &t_backward_start);
     
     /* ========== BACKWARD PASS ========== */
     cl_mem grad_current = cnn->grad_buf;
@@ -730,6 +738,8 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             grad_current = l->grad_input;
         }
     }
+    clFinish(cnn->queue);
+    clock_gettime(CLOCK_MONOTONIC, &t_update_start);
     
     /* ========== UPDATE WEIGHTS ========== */
     if (cnn->config.optimizer == OPTIMIZER_SGD) {
@@ -782,6 +792,27 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     }
     
     clFinish(cnn->queue);
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    
+    /* Accumulate timing stats */
+    double forward_time = (t_loss_start.tv_sec - t_forward_start.tv_sec) * 1000.0 + 
+                          (t_loss_start.tv_nsec - t_forward_start.tv_nsec) / 1e6;
+    double loss_time = (t_backward_start.tv_sec - t_loss_start.tv_sec) * 1000.0 + 
+                       (t_backward_start.tv_nsec - t_loss_start.tv_nsec) / 1e6;
+    double backward_time = (t_update_start.tv_sec - t_backward_start.tv_sec) * 1000.0 + 
+                           (t_update_start.tv_nsec - t_backward_start.tv_nsec) / 1e6;
+    double update_time = (t_end.tv_sec - t_update_start.tv_sec) * 1000.0 + 
+                         (t_end.tv_nsec - t_update_start.tv_nsec) / 1e6;
+    double total_time = (t_end.tv_sec - t_start.tv_sec) * 1000.0 + 
+                        (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
+    
+    cnn->stats.forward_time_ms = forward_time;
+    cnn->stats.backward_time_ms = backward_time;
+    cnn->stats.loss_time_ms = loss_time;
+    cnn->stats.update_time_ms = update_time;
+    cnn->stats.total_time_ms = total_time;
+    cnn->stats_count++;
+    
     return total_loss;
 }
 
@@ -807,6 +838,17 @@ void cnn_print_architecture(CNNDenoiser *cnn) {
     }
     printf("Total parameters: %d\n", cnn_get_num_parameters(cnn));
     printf("========================\n\n");
+}
+
+void cnn_get_timing_stats(CNNDenoiser* cnn, TimingStats* stats) {
+    if (!cnn || !stats) return;
+    *stats = cnn->stats;
+}
+
+void cnn_reset_timing_stats(CNNDenoiser* cnn) {
+    if (!cnn) return;
+    memset(&cnn->stats, 0, sizeof(TimingStats));
+    cnn->stats_count = 0;
 }
 
 void cnn_destroy(CNNDenoiser *cnn) {
@@ -848,6 +890,166 @@ void cnn_destroy(CNNDenoiser *cnn) {
     clReleaseContext(cnn->ctx);
     
     free(cnn);
+}
+
+int cnn_save_weights(CNNDenoiser* cnn, const char* filepath) {
+    if (!cnn || !cnn->finalized) return -1;
+    
+    FILE* f = fopen(filepath, "wb");
+    if (!f) {
+        fprintf(stderr, "Failed to open %s for writing\n", filepath);
+        return -1;
+    }
+    
+    /* Write header */
+    int magic = 0x434E4E57; /* "CNNW" */
+    fwrite(&magic, sizeof(int), 1, f);
+    fwrite(&cnn->n_layers, sizeof(int), 1, f);
+    fwrite(&cnn->config, sizeof(CNNConfig), 1, f);
+    
+    /* Write each layer's weights and biases */
+    for (int i = 0; i < cnn->n_layers; i++) {
+        ConvLayer *l = &cnn->layers[i];
+        
+        /* Write layer metadata */
+        fwrite(&l->cin, sizeof(int), 1, f);
+        fwrite(&l->cout, sizeof(int), 1, f);
+        fwrite(&l->use_relu, sizeof(int), 1, f);
+        fwrite(l->name, sizeof(char), 64, f);
+        
+        /* Download weights from GPU */
+        int w_size = l->cout * l->cin4 * 9;
+        clEnqueueReadBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
+                           w_size * 16, l->h_weights, 0, NULL, NULL);
+        clEnqueueReadBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
+                           l->cout * 4, l->h_bias, 0, NULL, NULL);
+        
+        /* Write weights and biases */
+        fwrite(l->h_weights, sizeof(float), w_size * 4, f);
+        fwrite(l->h_bias, sizeof(float), l->cout, f);
+        
+        /* Write Adam optimizer state if using Adam */
+        if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+            float *adam_m_w = malloc(w_size * 16);
+            float *adam_v_w = malloc(w_size * 16);
+            float *adam_m_b = malloc(l->cout * 4);
+            float *adam_v_b = malloc(l->cout * 4);
+            
+            clEnqueueReadBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
+            clEnqueueReadBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
+            clEnqueueReadBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
+            clEnqueueReadBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+            
+            fwrite(adam_m_w, sizeof(float), w_size * 4, f);
+            fwrite(adam_v_w, sizeof(float), w_size * 4, f);
+            fwrite(adam_m_b, sizeof(float), l->cout, f);
+            fwrite(adam_v_b, sizeof(float), l->cout, f);
+            
+            free(adam_m_w);
+            free(adam_v_w);
+            free(adam_m_b);
+            free(adam_v_b);
+        }
+    }
+    
+    /* Write Adam timestep */
+    fwrite(&cnn->adam_t, sizeof(int), 1, f);
+    
+    fclose(f);
+    printf("Saved network weights to %s\n", filepath);
+    return 0;
+}
+
+int cnn_load_weights(CNNDenoiser* cnn, const char* filepath) {
+    if (!cnn || !cnn->finalized) return -1;
+    
+    FILE* f = fopen(filepath, "rb");
+    if (!f) {
+        fprintf(stderr, "Failed to open %s for reading\n", filepath);
+        return -1;
+    }
+    
+    /* Read and verify header */
+    int magic, n_layers;
+    CNNConfig saved_config;
+    
+    fread(&magic, sizeof(int), 1, f);
+    if (magic != 0x434E4E57) {
+        fprintf(stderr, "Invalid file format\n");
+        fclose(f);
+        return -1;
+    }
+    
+    fread(&n_layers, sizeof(int), 1, f);
+    if (n_layers != cnn->n_layers) {
+        fprintf(stderr, "Layer count mismatch: file has %d, network has %d\n", n_layers, cnn->n_layers);
+        fclose(f);
+        return -1;
+    }
+    
+    fread(&saved_config, sizeof(CNNConfig), 1, f);
+    
+    /* Load each layer's weights */
+    for (int i = 0; i < cnn->n_layers; i++) {
+        ConvLayer *l = &cnn->layers[i];
+        
+        /* Read and verify layer metadata */
+        int cin, cout, use_relu;
+        char name[64];
+        fread(&cin, sizeof(int), 1, f);
+        fread(&cout, sizeof(int), 1, f);
+        fread(&use_relu, sizeof(int), 1, f);
+        fread(name, sizeof(char), 64, f);
+        
+        if (cin != l->cin || cout != l->cout) {
+            fprintf(stderr, "Layer %d dimension mismatch\n", i);
+            fclose(f);
+            return -1;
+        }
+        
+        /* Read weights and biases */
+        int w_size = l->cout * l->cin4 * 9;
+        fread(l->h_weights, sizeof(float), w_size * 4, f);
+        fread(l->h_bias, sizeof(float), l->cout, f);
+        
+        /* Upload to GPU */
+        clEnqueueWriteBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
+                            w_size * 16, l->h_weights, 0, NULL, NULL);
+        clEnqueueWriteBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
+                            l->cout * 4, l->h_bias, 0, NULL, NULL);
+        
+        /* Read Adam optimizer state if present */
+        if (saved_config.optimizer == OPTIMIZER_ADAM) {
+            float *adam_m_w = malloc(w_size * 16);
+            float *adam_v_w = malloc(w_size * 16);
+            float *adam_m_b = malloc(l->cout * 4);
+            float *adam_v_b = malloc(l->cout * 4);
+            
+            fread(adam_m_w, sizeof(float), w_size * 4, f);
+            fread(adam_v_w, sizeof(float), w_size * 4, f);
+            fread(adam_m_b, sizeof(float), l->cout, f);
+            fread(adam_v_b, sizeof(float), l->cout, f);
+            
+            if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                clEnqueueWriteBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
+                clEnqueueWriteBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
+                clEnqueueWriteBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
+                clEnqueueWriteBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+            }
+            
+            free(adam_m_w);
+            free(adam_v_w);
+            free(adam_m_b);
+            free(adam_v_b);
+        }
+    }
+    
+    /* Read Adam timestep */
+    fread(&cnn->adam_t, sizeof(int), 1, f);
+    
+    fclose(f);
+    printf("Loaded network weights from %s\n", filepath);
+    return 0;
 }
 
 void cnn_add_gaussian_noise(float* clean, float* noisy, int size, float sigma) {
