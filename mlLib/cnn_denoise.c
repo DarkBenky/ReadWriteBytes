@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <dirent.h>
 
 #define MAX_LAYERS 16
 #define CHECK_CL(err, msg) if(err != CL_SUCCESS) { \
@@ -1055,4 +1056,131 @@ int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, in
     }
     
     return 0;
+}
+
+void fillDataLoader(DataLoader* loader, char *folder_path) {
+    DIR *dir = opendir(folder_path);
+    if (!dir) {
+        fprintf(stderr, "Failed to open directory: %s\n", folder_path);
+        return;
+    }
+    
+    /* First pass: count total subdirectories */
+    struct dirent *entry;
+    int total_folders = 0;
+    
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            total_folders++;
+        }
+    }
+    rewinddir(dir);
+    
+    if (total_folders == 0) {
+        fprintf(stderr, "No subdirectories found in %s\n", folder_path);
+        closedir(dir);
+        return;
+    }
+    
+    printf("Found %d folders, selecting %d randomly...\n", total_folders, NUMBER_OF_IMAGES_IN_DATA_LOADER);
+    
+    /* Generate random indices to select (sorted for efficient iteration) */
+    int needed = NUMBER_OF_IMAGES_IN_DATA_LOADER < total_folders ? NUMBER_OF_IMAGES_IN_DATA_LOADER : total_folders;
+    int *selected_indices = malloc(needed * sizeof(int));
+    
+    /* Random sampling without replacement */
+    for (int i = 0; i < needed; i++) {
+        int idx;
+        int collision;
+        do {
+            idx = rand() % total_folders;
+            collision = 0;
+            for (int j = 0; j < i; j++) {
+                if (selected_indices[j] == idx) {
+                    collision = 1;
+                    break;
+                }
+            }
+        } while (collision);
+        selected_indices[i] = idx;
+    }
+    
+    /* Sort indices for sequential reading */
+    for (int i = 0; i < needed - 1; i++) {
+        for (int j = i + 1; j < needed; j++) {
+            if (selected_indices[i] > selected_indices[j]) {
+                int tmp = selected_indices[i];
+                selected_indices[i] = selected_indices[j];
+                selected_indices[j] = tmp;
+            }
+        }
+    }
+    
+    /* Second pass: load only selected folders */
+    int current_idx = 0;
+    int loaded = 0;
+    int next_target = 0;
+    char path_buffer[512];
+    char folder_name[256];
+    
+    while ((entry = readdir(dir)) != NULL && loaded < needed) {
+        if (entry->d_type != DT_DIR || strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        /* Check if this is a selected folder */
+        if (current_idx == selected_indices[next_target]) {
+            strncpy(folder_name, entry->d_name, 255);
+            folder_name[255] = '\0';
+            
+            /* Load noisy/low-res image */
+            snprintf(path_buffer, sizeof(path_buffer), "%s/%s/low_res.png", folder_path, folder_name);
+            FILE *test = fopen(path_buffer, "rb");
+            if (test) {
+                fclose(test);
+                
+                unsigned char *noisy_rgb = malloc(800 * 600 * 3);
+                /* TODO: Replace with actual image loading */
+                /* load_png_rgb(path_buffer, noisy_rgb, 800, 600); */
+                memset(noisy_rgb, 128, 800 * 600 * 3); /* Placeholder */
+                
+                cnn_rgb_to_rgba_luminance(noisy_rgb, loader->NoisyImg[loaded], 800, 600);
+                free(noisy_rgb);
+                
+                /* Load clean/high-res image */
+                snprintf(path_buffer, sizeof(path_buffer), "%s/%s/high_res.png", folder_path, folder_name);
+                unsigned char *clean_rgb = malloc(800 * 600 * 3);
+                /* load_png_rgb(path_buffer, clean_rgb, 800, 600); */
+                memset(clean_rgb, 128, 800 * 600 * 3); /* Placeholder */
+                
+                cnn_rgb_to_rgba_luminance(clean_rgb, loader->CleanImg[loaded], 800, 600);
+                free(clean_rgb);
+                
+                loaded++;
+                next_target++;
+            }
+        }
+        current_idx++;
+    }
+    
+    closedir(dir);
+    free(selected_indices);
+    
+    loader->current_index = 0;
+    strncpy(loader->folder_path, folder_path, 511);
+    loader->folder_path[511] = '\0';
+    printf("Loaded %d image pairs into DataLoader\n", loaded);
+}
+
+void getNextImagePair(DataLoader* loader, ImageSample* sample) {
+    /* Reload new random batch if we've exhausted current batch */
+    if (loader->current_index >= NUMBER_OF_IMAGES_IN_DATA_LOADER) {
+        printf("DataLoader exhausted, loading new random batch...\n");
+        fillDataLoader(loader, loader->folder_path);
+    }
+    
+    memcpy(sample->highRes, loader->CleanImg[loader->current_index], IMAGE_SIZE * sizeof(float));
+    memcpy(sample->lowRes, loader->NoisyImg[loader->current_index], IMAGE_SIZE * sizeof(float));
+    
+    loader->current_index++;
 }

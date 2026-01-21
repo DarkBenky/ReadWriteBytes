@@ -9,6 +9,8 @@
 
 #ifndef CNN_DENOISE_H
 #define CNN_DENOISE_H
+#define NUMBER_OF_IMAGES_IN_DATA_LOADER 4096
+#define IMAGE_SIZE (800 * 600 * 4) // RGB + Luminance
 
 #ifdef __cplusplus
 extern "C" {
@@ -78,6 +80,21 @@ typedef struct {
     double update_time_ms;
     double total_time_ms;
 } TimingStats;
+
+typedef struct {
+    float NoisyImg [NUMBER_OF_IMAGES_IN_DATA_LOADER][IMAGE_SIZE]; // RGB + Luminance
+    float CleanImg [NUMBER_OF_IMAGES_IN_DATA_LOADER][IMAGE_SIZE];
+    int current_index;
+    char folder_path[512];  /* Store path for automatic reloading */
+} DataLoader;
+
+typedef  struct {
+    float lowRes [IMAGE_SIZE];  // RGB + Luminance
+    float highRes [IMAGE_SIZE];  // RGB + Luminance
+} ImageSample;
+
+void fillDataLoader(DataLoader* loader, char *folder_path);
+void getNextImagePair(DataLoader* loader, ImageSample* sample);
 
 void learning_rate_decay_init(LearningRateDecay* lr_decay, 
                               float initial_lr, float decay_rate, int decay_steps);
