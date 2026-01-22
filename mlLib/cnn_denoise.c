@@ -33,6 +33,9 @@ struct CNNDenoiser {
     cl_kernel k_mse_loss, k_laplace_loss, k_add_weighted_grad, k_residual_subtract;
     cl_kernel k_forward_residual;  /* Fused forward + residual for last layer */
     
+    size_t optimal_local[3];
+    int tuning_done;
+    
     CNNConfig config;
     int n_layers;
     ConvLayer layers[MAX_LAYERS];
@@ -390,6 +393,73 @@ static const char *kernel_source =
 "    if (oc + 3 < Cout) output[(oc + 3) * hw + pixel_idx] = orig.w - fmax(sum3, 0.0f);\n"
 "}\n";
 
+static void cnn_auto_tune_workgroup(CNNDenoiser *cnn, int H, int W, int Cout) {
+    if (cnn->tuning_done) return;
+    
+    printf("Auto-tuning work group sizes...\n");
+    
+    size_t test_configs[][3] = {
+        {4, 4, 1}, {8, 8, 1}, {16, 16, 1}, {32, 32, 1},
+        {8, 4, 1}, {4, 8, 1}, {16, 8, 1}, {8, 16, 1},
+        {16, 4, 1}, {4, 16, 1}, {32, 16, 1}, {16, 32, 1}
+    };
+    int num_configs = sizeof(test_configs) / sizeof(test_configs[0]);
+    
+    double best_time = 1e9;
+    int best_idx = 1;
+    
+    size_t global[3] = {W, H, (Cout + 3) / 4};
+    int warmup_runs = 3;
+    int bench_runs = 20;
+    
+    cl_device_id device;
+    clGetCommandQueueInfo(cnn->queue, CL_QUEUE_DEVICE, sizeof(cl_device_id), &device, NULL);
+    
+    size_t max_wg_size;
+    clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &max_wg_size, NULL);
+    
+    for (int i = 0; i < num_configs; i++) {
+        size_t *local = test_configs[i];
+        
+        if (local[0] * local[1] * local[2] > max_wg_size) continue;
+        
+        for (int w = 0; w < warmup_runs; w++) {
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL,
+                                  global, local, 0, NULL, NULL);
+        }
+        clFinish(cnn->queue);
+        
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (int r = 0; r < bench_runs; r++) {
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL,
+                                  global, local, 0, NULL, NULL);
+        }
+        clFinish(cnn->queue);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        
+        double elapsed = (end.tv_sec - start.tv_sec) + 
+                        (end.tv_nsec - start.tv_nsec) * 1e-9;
+        double avg_time = elapsed / bench_runs;
+        
+        printf("  [%zux%zux%zu]: %.1f μs\n", local[0], local[1], local[2], avg_time * 1e6);
+        
+        if (avg_time < best_time) {
+            best_time = avg_time;
+            best_idx = i;
+        }
+    }
+    
+    cnn->optimal_local[0] = test_configs[best_idx][0];
+    cnn->optimal_local[1] = test_configs[best_idx][1];
+    cnn->optimal_local[2] = test_configs[best_idx][2];
+    cnn->tuning_done = 1;
+    
+    printf("Optimal: [%zux%zux%zu] (%.1f μs)\n",
+           cnn->optimal_local[0], cnn->optimal_local[1], cnn->optimal_local[2],
+           best_time * 1e6);
+}
+
 static void init_weights(float *w, int n) {
     float scale = sqrtf(2.0f / n);
     for (int i = 0; i < n; i++) {
@@ -447,6 +517,10 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->k_forward_residual = clCreateKernel(cnn->program, "conv3x3_forward_relu_residual_f4", &err);
     
     cnn->adam_t = 0;
+    cnn->tuning_done = 0;
+    cnn->optimal_local[0] = 16;
+    cnn->optimal_local[1] = 8;
+    cnn->optimal_local[2] = 1;
     
     return cnn;
 }
@@ -460,6 +534,7 @@ CNNConfig cnn_default_config(int width, int height, int channels) {
     cfg.learning_rate = 0.00001f;
     cfg.use_profiling = 0;
     cfg.residual_mode = 0;
+    cfg.auto_tune_workgroup = 1;
     cfg.optimizer = OPTIMIZER_SGD;
     cfg.loss_config.num_losses = 1;
     cfg.loss_config.types[0] = LOSS_MAE;
@@ -567,6 +642,11 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
                         clean_target, 0, NULL, NULL);
     
     /* ========== FORWARD PASS ========== */
+    if (!cnn->tuning_done && cnn->config.auto_tune_workgroup && cnn->n_layers > 0) {
+        ConvLayer *first = &cnn->layers[0];
+        cnn_auto_tune_workgroup(cnn, first->h, first->w, first->cout);
+    }
+    
     clock_gettime(CLOCK_MONOTONIC, &t_forward_start);
     cl_mem current = cnn->input_buf;
     for (int i = 0; i < cnn->n_layers; i++) {
@@ -582,8 +662,7 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
         
         size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
-        size_t local[3] = {16, 8, 1}; // TODO crete function to choose local size based on device capabilities based on benchmarking
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, cnn->optimal_local, 0, NULL, NULL);
         
         current = l->output;
     }
@@ -1062,6 +1141,21 @@ void cnn_add_gaussian_noise(float* clean, float* noisy, int size, float sigma) {
 }
 
 /* Helper: Convert RGB image to RGBA (RGB + Luminance) format for float4 processing */
+void cnn_load_rgba_luminance(const unsigned char* rgb, const unsigned char* lum, float* rgba, int width, int height) {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int rgb_idx = (y * width + x) * 3;
+            int lum_idx = y * width + x;
+            int rgba_idx = (y * width + x) * 4;
+            
+            rgba[rgba_idx + 0] = rgb[rgb_idx + 0] / 255.0f;
+            rgba[rgba_idx + 1] = rgb[rgb_idx + 1] / 255.0f;
+            rgba[rgba_idx + 2] = rgb[rgb_idx + 2] / 255.0f;
+            rgba[rgba_idx + 3] = lum[lum_idx] / 255.0f;
+        }
+    }
+}
+
 void cnn_rgb_to_rgba_luminance(const unsigned char* rgb, float* rgba, int width, int height) {
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
@@ -1075,7 +1169,7 @@ void cnn_rgb_to_rgba_luminance(const unsigned char* rgb, float* rgba, int width,
             rgba[rgba_idx + 0] = r;
             rgba[rgba_idx + 1] = g;
             rgba[rgba_idx + 2] = b;
-            rgba[rgba_idx + 3] = 0.299f * r + 0.587f * g + 0.114f * b;  /* Luminance */
+            rgba[rgba_idx + 3] = 0.299f * r + 0.587f * g + 0.114f * b;
         }
     }
 }
@@ -1095,7 +1189,8 @@ void cnn_rgba_luminance_to_rgb(const float* rgba, unsigned char* rgb, int width,
 }
 
 /* Helper: Prepare training batch - converts RGB to RGBA and adds noise */
-int cnn_prepare_training_batch(const unsigned char* clean_rgb, unsigned char* noisy_rgb,
+int cnn_prepare_training_batch(const unsigned char* clean_rgb, const unsigned char* clean_lum,
+                                unsigned char* noisy_rgb, unsigned char* noisy_lum,
                                 float* clean_rgba, float* noisy_rgba, 
                                 int width, int height, float noise_sigma) {
     if (width != 800 || height != 600) {
@@ -1103,8 +1198,8 @@ int cnn_prepare_training_batch(const unsigned char* clean_rgb, unsigned char* no
         return -1;
     }
     
-    /* Convert clean RGB to RGBA */
-    cnn_rgb_to_rgba_luminance(clean_rgb, clean_rgba, width, height);
+    /* Convert clean RGB+Luminance to RGBA */
+    cnn_load_rgba_luminance(clean_rgb, clean_lum, clean_rgba, width, height);
     
     /* Add noise to RGBA */
     int rgba_size = width * height * 4;
@@ -1260,6 +1355,7 @@ int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, in
     return 0;
 }
 
+
 void fillDataLoader(DataLoader* loader, char *folder_path) {
     DIR *dir = opendir(folder_path);
     if (!dir) {
@@ -1323,6 +1419,7 @@ void fillDataLoader(DataLoader* loader, char *folder_path) {
     int loaded = 0;
     int next_target = 0;
     char path_buffer[512];
+    char path_lum_buffer[512];
     char folder_name[256];
     
     while ((entry = readdir(dir)) != NULL && loaded < needed) {
@@ -1335,31 +1432,46 @@ void fillDataLoader(DataLoader* loader, char *folder_path) {
             strncpy(folder_name, entry->d_name, 255);
             folder_name[255] = '\0';
             
-            /* Load noisy/low-res image */
+            /* Load noisy images (low_res.png + low_res_luminance.png) */
             snprintf(path_buffer, sizeof(path_buffer), "%s/%s/low_res.png", folder_path, folder_name);
+            snprintf(path_lum_buffer, sizeof(path_lum_buffer), "%s/%s/low_res_luminance.png", folder_path, folder_name);
             FILE *test = fopen(path_buffer, "rb");
-            if (test) {
+            FILE *test_lum = fopen(path_lum_buffer, "rb");
+            if (test && test_lum) {
                 fclose(test);
+                fclose(test_lum);
                 
                 unsigned char *noisy_rgb = malloc(800 * 600 * 3);
+                unsigned char *noisy_lum = malloc(800 * 600);
                 /* TODO: Replace with actual image loading */
                 /* load_png_rgb(path_buffer, noisy_rgb, 800, 600); */
-                memset(noisy_rgb, 128, 800 * 600 * 3); /* Placeholder */
+                /* load_png_gray(path_lum_buffer, noisy_lum, 800, 600); */
+                memset(noisy_rgb, 128, 800 * 600 * 3);
+                memset(noisy_lum, 128, 800 * 600);
                 
-                cnn_rgb_to_rgba_luminance(noisy_rgb, loader->NoisyImg[loaded], 800, 600);
+                cnn_load_rgba_luminance(noisy_rgb, noisy_lum, loader->NoisyImg[loaded], 800, 600);
                 free(noisy_rgb);
+                free(noisy_lum);
                 
-                /* Load clean/high-res image */
+                /* Load clean images (high_res.png + high_res_luminance.png) */
                 snprintf(path_buffer, sizeof(path_buffer), "%s/%s/high_res.png", folder_path, folder_name);
+                snprintf(path_lum_buffer, sizeof(path_lum_buffer), "%s/%s/high_res_luminance.png", folder_path, folder_name);
                 unsigned char *clean_rgb = malloc(800 * 600 * 3);
+                unsigned char *clean_lum = malloc(800 * 600);
                 /* load_png_rgb(path_buffer, clean_rgb, 800, 600); */
-                memset(clean_rgb, 128, 800 * 600 * 3); /* Placeholder */
+                /* load_png_gray(path_lum_buffer, clean_lum, 800, 600); */
+                memset(clean_rgb, 128, 800 * 600 * 3);
+                memset(clean_lum, 128, 800 * 600);
                 
-                cnn_rgb_to_rgba_luminance(clean_rgb, loader->CleanImg[loaded], 800, 600);
+                cnn_load_rgba_luminance(clean_rgb, clean_lum, loader->CleanImg[loaded], 800, 600);
                 free(clean_rgb);
+                free(clean_lum);
                 
                 loaded++;
                 next_target++;
+            } else {
+                if (test) fclose(test);
+                if (test_lum) fclose(test_lum);
             }
         }
         current_idx++;

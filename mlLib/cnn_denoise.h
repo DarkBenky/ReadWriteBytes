@@ -52,6 +52,7 @@ typedef struct {
     float learning_rate;
     int use_profiling;       /* Enable timing profiling */
     int residual_mode;       /* 1 = predict noise (output = input - prediction), 0 = direct */
+    int auto_tune_workgroup; /* Auto-tune work group sizes on first run */
     OptimizerType optimizer; /* SGD or Adam */
     LossConfig loss_config;  /* Loss function configuration */
     float adam_beta1;        /* Adam: momentum decay (default 0.9) */
@@ -155,6 +156,14 @@ float cnn_compute_psnr(float* image1, float* image2, int size);
 void cnn_rgb_to_rgba_luminance(const unsigned char* rgb, float* rgba, 
                                 int width, int height);
 
+/* Load RGB + separate luminance images into RGBA float format
+ * rgb: input RGB image [height][width][3], values 0-255
+ * lum: input luminance image [height][width], values 0-255
+ * rgba: output RGBA float [height][width][4], values 0.0-1.0, channel 3 = luminance
+ */
+void cnn_load_rgba_luminance(const unsigned char* rgb, const unsigned char* lum,
+                              float* rgba, int width, int height);
+
 /* Convert RGBA float back to RGB uint8 image (discards luminance channel)
  * rgba: input RGBA float [height][width][4], values 0.0-1.0
  * rgb: output RGB image [height][width][3], values 0-255
@@ -162,16 +171,20 @@ void cnn_rgb_to_rgba_luminance(const unsigned char* rgb, float* rgba,
 void cnn_rgba_luminance_to_rgb(const float* rgba, unsigned char* rgb, 
                                 int width, int height);
 
-/* Prepare training batch: RGB -> RGBA, add noise, clamp values
+/* Prepare training batch: Load RGB+Luminance -> RGBA, add noise, clamp values
  * clean_rgb: input clean RGB image 800x600x3 (uint8)
+ * clean_lum: input clean luminance image 800x600 (uint8)
  * noisy_rgb: output noisy RGB image 800x600x3 (uint8, optional - can be NULL)
+ * noisy_lum: output noisy luminance image 800x600 (uint8, optional - can be NULL)
  * clean_rgba: output clean RGBA float 800x600x4 (for training target)
  * noisy_rgba: output noisy RGBA float 800x600x4 (for training input)
  * noise_sigma: Gaussian noise level (e.g., 0.05 for 5% noise)
  * Returns: 0 on success, -1 on error
  */
-int cnn_prepare_training_batch(const unsigned char* clean_rgb, 
+int cnn_prepare_training_batch(const unsigned char* clean_rgb,
+                                const unsigned char* clean_lum,
                                 unsigned char* noisy_rgb,
+                                unsigned char* noisy_lum,
                                 float* clean_rgba, float* noisy_rgba, 
                                 int width, int height, float noise_sigma);
 

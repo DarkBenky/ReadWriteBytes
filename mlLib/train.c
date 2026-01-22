@@ -27,14 +27,16 @@ int main() {
     
     /* Encoder (compress) */
     cnn_add_layer(cnn, (LayerConfig){4, 8, 1, "encoder_1"});
-    cnn_add_layer(cnn, (LayerConfig){8, 12, 1, "encoder_2"});
-    cnn_add_layer(cnn, (LayerConfig){12, 16, 1, "encoder_3"});
-    cnn_add_layer(cnn, (LayerConfig){16, 20, 1, "encoder_4"});
-    cnn_add_layer(cnn, (LayerConfig){20, 24, 1, "encoder_5"});
+    cnn_add_layer(cnn, (LayerConfig){8, 16, 1, "encoder_2"});
+    cnn_add_layer(cnn, (LayerConfig){16, 20, 1, "encoder_3"});
+    cnn_add_layer(cnn, (LayerConfig){20, 24, 1, "encoder_4"});
+    cnn_add_layer(cnn, (LayerConfig){24, 28, 1, "encoder_5"});
+    cnn_add_layer(cnn, (LayerConfig){28, 32, 1, "encoder_6"});
     /* Decoder (expand) */
-    cnn_add_layer(cnn, (LayerConfig){24, 20, 1, "decoder_1"});
-    cnn_add_layer(cnn, (LayerConfig){20, 12, 1, "decoder_2"});
-    cnn_add_layer(cnn, (LayerConfig){12, 4, 1, "decoder_3"});
+    cnn_add_layer(cnn, (LayerConfig){32, 28, 1, "decoder_1"});
+    cnn_add_layer(cnn, (LayerConfig){28, 24, 1, "decoder_2"});
+    cnn_add_layer(cnn, (LayerConfig){24, 16, 1, "decoder_3"});
+    cnn_add_layer(cnn, (LayerConfig){16, 4, 1, "decoder_4"});
     
     cnn_finalize(cnn);
     cnn_print_architecture(cnn);
