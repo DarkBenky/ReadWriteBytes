@@ -3,7 +3,7 @@ CC = clang
 CL_BUILD_FLAGS = -cl-fast-relaxed-math -cl-mad-enable -cl-no-signed-zeros -cl-unsafe-math-optimizations -cl-finite-math-only
 CFLAGS = -O3 -march=native -mtune=native -ffast-math -funroll-loops -Wall -DCL_BUILD_OPTIONS="\"$(CL_BUILD_FLAGS)\""
 LDFLAGS = -O3 -march=native -mtune=native -ffast-math
-OPENCL_LIBS = -lOpenCL -lm
+OPENCL_LIBS = -lOpenCL -lm -lcurl
 
 # Main targets
 all: example_easy benchmark test_features

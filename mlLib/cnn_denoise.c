@@ -7,6 +7,10 @@
 #include <math.h>
 #include <time.h>
 #include <dirent.h>
+#include <curl/curl.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #define MAX_LAYERS 16
 #define CHECK_CL(err, msg) if(err != CL_SUCCESS) { \
@@ -649,6 +653,9 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     
     clock_gettime(CLOCK_MONOTONIC, &t_forward_start);
     cl_mem current = cnn->input_buf;
+    cl_event forward_events[32];
+    memset(forward_events, 0, sizeof(forward_events));
+    
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
         
@@ -662,11 +669,36 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
         
         size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, cnn->optimal_local, 0, NULL, NULL);
+        /* Use NULL for local work size - let OpenCL choose optimal size per layer */
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, NULL, 0, NULL, &forward_events[i]);
         
         current = l->output;
     }
     clFinish(cnn->queue);
+    
+    /* Measure GPU execution time using OpenCL event profiling if enabled */
+    double gpu_forward_time_ms = 0.0;
+    if (cnn->config.use_profiling) {
+        cl_ulong first_start = 0, last_end = 0;
+        for (int i = 0; i < cnn->n_layers; i++) {
+            if (forward_events[i]) {
+                cl_ulong start, end;
+                clGetEventProfilingInfo(forward_events[i], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+                clGetEventProfilingInfo(forward_events[i], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+                if (i == 0) first_start = start;
+                if (i == cnn->n_layers - 1) last_end = end;
+                clReleaseEvent(forward_events[i]);
+            }
+        }
+        if (last_end > first_start) {
+            gpu_forward_time_ms = (last_end - first_start) / 1e6;
+        }
+    } else {
+        for (int i = 0; i < cnn->n_layers; i++) {
+            if (forward_events[i]) clReleaseEvent(forward_events[i]);
+        }
+    }
+    
     clock_gettime(CLOCK_MONOTONIC, &t_loss_start);
     
     /* ========== COMPUTE LOSS & GRADIENT ========== */
@@ -874,8 +906,14 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     clock_gettime(CLOCK_MONOTONIC, &t_end);
     
     /* Accumulate timing stats */
-    double forward_time = (t_loss_start.tv_sec - t_forward_start.tv_sec) * 1000.0 + 
-                          (t_loss_start.tv_nsec - t_forward_start.tv_nsec) / 1e6;
+    double forward_time;
+    if (cnn->config.use_profiling && gpu_forward_time_ms > 0.0) {
+        forward_time = gpu_forward_time_ms;  /* Use GPU-measured time for accuracy */
+    } else {
+        /* Fallback to wall-clock time */
+        forward_time = (t_loss_start.tv_sec - t_forward_start.tv_sec) * 1000.0 + 
+                       (t_loss_start.tv_nsec - t_forward_start.tv_nsec) / 1e6;
+    }
     double loss_time = (t_backward_start.tv_sec - t_loss_start.tv_sec) * 1000.0 + 
                        (t_backward_start.tv_nsec - t_loss_start.tv_nsec) / 1e6;
     double backward_time = (t_update_start.tv_sec - t_backward_start.tv_sec) * 1000.0 + 
@@ -1293,6 +1331,33 @@ float cnn_get_learning_rate(CNNDenoiser* cnn) {
     return cnn->config.learning_rate;
 }
 
+void cnn_get_output(CNNDenoiser* cnn, float* output) {
+    if (!cnn || !cnn->finalized) return;
+    
+    int input_size = cnn->config.input_height * cnn->config.input_width * cnn->config.input_channels;
+    ConvLayer *last_layer = &cnn->layers[cnn->n_layers - 1];
+    
+    /* In residual mode, need to compute: output = input - network_output */
+    if (cnn->config.residual_mode) {
+        /* Run residual_subtract kernel: residual_buf = input - last_layer->output */
+        clSetKernelArg(cnn->k_residual_subtract, 0, sizeof(cl_mem), &cnn->input_buf);
+        clSetKernelArg(cnn->k_residual_subtract, 1, sizeof(cl_mem), &last_layer->output);
+        clSetKernelArg(cnn->k_residual_subtract, 2, sizeof(cl_mem), &cnn->residual_buf);
+        clSetKernelArg(cnn->k_residual_subtract, 3, sizeof(int), &input_size);
+        
+        size_t global = (input_size + 255) / 256 * 256;
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_residual_subtract, 1, NULL, &global, NULL, 0, NULL, NULL);
+        
+        /* Read the computed residual output */
+        clEnqueueReadBuffer(cnn->queue, cnn->residual_buf, CL_TRUE, 0, 
+                           input_size * sizeof(float), output, 0, NULL, NULL);
+    } else {
+        /* Direct mode: just read the last layer output */
+        clEnqueueReadBuffer(cnn->queue, last_layer->output, CL_TRUE, 0, 
+                           input_size * sizeof(float), output, 0, NULL, NULL);
+    }
+}
+
 int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, int batch_size) {
     if (!cnn || !cnn->finalized) return -1;
     
@@ -1356,145 +1421,281 @@ int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, in
 }
 
 
+/* Build list of all folder names on initialization */
 void fillDataLoader(DataLoader* loader, char *folder_path) {
-    DIR *dir = opendir(folder_path);
+    strncpy(loader->folder_path, folder_path, 511);
+    loader->folder_path[511] = '\0';
+    loader->current_index = 0;
+    
+    printf("DataLoader initialized with path: %s\n", folder_path);
+    printf("Images will be loaded on-demand from random folders\n");
+}
+
+/* Load a random image pair from a random folder */
+void getNextImagePair(DataLoader* loader, ImageSample* sample) {
+    DIR *dir = opendir(loader->folder_path);
     if (!dir) {
-        fprintf(stderr, "Failed to open directory: %s\n", folder_path);
+        fprintf(stderr, "Failed to open directory: %s\n", loader->folder_path);
         return;
     }
     
-    /* First pass: count total subdirectories */
+    /* Count total folders */
     struct dirent *entry;
     int total_folders = 0;
-    
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
             total_folders++;
         }
     }
-    rewinddir(dir);
     
     if (total_folders == 0) {
-        fprintf(stderr, "No subdirectories found in %s\n", folder_path);
+        fprintf(stderr, "No subdirectories found\n");
         closedir(dir);
         return;
     }
     
-    printf("Found %d folders, selecting %d randomly...\n", total_folders, NUMBER_OF_IMAGES_IN_DATA_LOADER);
+    /* Pick a random folder index */
+    int target_idx = rand() % total_folders;
+    rewinddir(dir);
     
-    /* Generate random indices to select (sorted for efficient iteration) */
-    int needed = NUMBER_OF_IMAGES_IN_DATA_LOADER < total_folders ? NUMBER_OF_IMAGES_IN_DATA_LOADER : total_folders;
-    int *selected_indices = malloc(needed * sizeof(int));
-    
-    /* Random sampling without replacement */
-    for (int i = 0; i < needed; i++) {
-        int idx;
-        int collision;
-        do {
-            idx = rand() % total_folders;
-            collision = 0;
-            for (int j = 0; j < i; j++) {
-                if (selected_indices[j] == idx) {
-                    collision = 1;
-                    break;
-                }
-            }
-        } while (collision);
-        selected_indices[i] = idx;
-    }
-    
-    /* Sort indices for sequential reading */
-    for (int i = 0; i < needed - 1; i++) {
-        for (int j = i + 1; j < needed; j++) {
-            if (selected_indices[i] > selected_indices[j]) {
-                int tmp = selected_indices[i];
-                selected_indices[i] = selected_indices[j];
-                selected_indices[j] = tmp;
-            }
-        }
-    }
-    
-    /* Second pass: load only selected folders */
+    /* Find the selected folder */
     int current_idx = 0;
-    int loaded = 0;
-    int next_target = 0;
-    char path_buffer[512];
-    char path_lum_buffer[512];
-    char folder_name[256];
-    
-    while ((entry = readdir(dir)) != NULL && loaded < needed) {
+    char folder_name[256] = {0};
+    while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type != DT_DIR || strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
-        
-        /* Check if this is a selected folder */
-        if (current_idx == selected_indices[next_target]) {
+        if (current_idx == target_idx) {
             strncpy(folder_name, entry->d_name, 255);
-            folder_name[255] = '\0';
-            
-            /* Load noisy images (low_res.png + low_res_luminance.png) */
-            snprintf(path_buffer, sizeof(path_buffer), "%s/%s/low_res.png", folder_path, folder_name);
-            snprintf(path_lum_buffer, sizeof(path_lum_buffer), "%s/%s/low_res_luminance.png", folder_path, folder_name);
-            FILE *test = fopen(path_buffer, "rb");
-            FILE *test_lum = fopen(path_lum_buffer, "rb");
-            if (test && test_lum) {
-                fclose(test);
-                fclose(test_lum);
-                
-                unsigned char *noisy_rgb = malloc(800 * 600 * 3);
-                unsigned char *noisy_lum = malloc(800 * 600);
-                /* TODO: Replace with actual image loading */
-                /* load_png_rgb(path_buffer, noisy_rgb, 800, 600); */
-                /* load_png_gray(path_lum_buffer, noisy_lum, 800, 600); */
-                memset(noisy_rgb, 128, 800 * 600 * 3);
-                memset(noisy_lum, 128, 800 * 600);
-                
-                cnn_load_rgba_luminance(noisy_rgb, noisy_lum, loader->NoisyImg[loaded], 800, 600);
-                free(noisy_rgb);
-                free(noisy_lum);
-                
-                /* Load clean images (high_res.png + high_res_luminance.png) */
-                snprintf(path_buffer, sizeof(path_buffer), "%s/%s/high_res.png", folder_path, folder_name);
-                snprintf(path_lum_buffer, sizeof(path_lum_buffer), "%s/%s/high_res_luminance.png", folder_path, folder_name);
-                unsigned char *clean_rgb = malloc(800 * 600 * 3);
-                unsigned char *clean_lum = malloc(800 * 600);
-                /* load_png_rgb(path_buffer, clean_rgb, 800, 600); */
-                /* load_png_gray(path_lum_buffer, clean_lum, 800, 600); */
-                memset(clean_rgb, 128, 800 * 600 * 3);
-                memset(clean_lum, 128, 800 * 600);
-                
-                cnn_load_rgba_luminance(clean_rgb, clean_lum, loader->CleanImg[loaded], 800, 600);
-                free(clean_rgb);
-                free(clean_lum);
-                
-                loaded++;
-                next_target++;
-            } else {
-                if (test) fclose(test);
-                if (test_lum) fclose(test_lum);
-            }
+            break;
         }
         current_idx++;
     }
-    
     closedir(dir);
-    free(selected_indices);
     
-    loader->current_index = 0;
-    strncpy(loader->folder_path, folder_path, 511);
-    loader->folder_path[511] = '\0';
-    printf("Loaded %d image pairs into DataLoader\n", loaded);
-}
-
-void getNextImagePair(DataLoader* loader, ImageSample* sample) {
-    /* Reload new random batch if we've exhausted current batch */
-    if (loader->current_index >= NUMBER_OF_IMAGES_IN_DATA_LOADER) {
-        printf("DataLoader exhausted, loading new random batch...\n");
-        fillDataLoader(loader, loader->folder_path);
+    if (folder_name[0] == '\0') {
+        fprintf(stderr, "Failed to select random folder\n");
+        return;
     }
     
-    memcpy(sample->highRes, loader->CleanImg[loader->current_index], IMAGE_SIZE * sizeof(float));
-    memcpy(sample->lowRes, loader->NoisyImg[loader->current_index], IMAGE_SIZE * sizeof(float));
+    /* Load images from the selected folder */
+    char path_buffer[512];
+    char path_lum_buffer[512];
+    
+    /* Load noisy (low_res) images */
+    snprintf(path_buffer, sizeof(path_buffer), "%s/%s/low_res.png", loader->folder_path, folder_name);
+    snprintf(path_lum_buffer, sizeof(path_lum_buffer), "%s/%s/low_res_luminance.png", loader->folder_path, folder_name);
+    
+    int width, height, channels;
+    unsigned char *noisy_rgb = stbi_load(path_buffer, &width, &height, &channels, 3);
+    unsigned char *noisy_lum = stbi_load(path_lum_buffer, &width, &height, &channels, 1);
+    
+    static int first_load = 1;
+    if (first_load) {
+        if (noisy_rgb && noisy_lum) {
+            printf("  Successfully loaded images: %dx%d from folder '%s'\n", width, height, folder_name);
+            printf("  Sample RGB pixel values: R=%d G=%d B=%d\n", noisy_rgb[0], noisy_rgb[1], noisy_rgb[2]);
+            printf("  Sample Luminance value: %d\n", noisy_lum[0]);
+        } else {
+            printf("  Failed to load images from folder '%s', using dummy data\n", folder_name);
+        }
+        first_load = 0;
+    }
+    
+    if (!noisy_rgb || !noisy_lum) {
+        fprintf(stderr, "Failed to load noisy images from folder: %s\n", folder_name);
+        if (noisy_rgb) stbi_image_free(noisy_rgb);
+        if (noisy_lum) stbi_image_free(noisy_lum);
+        
+        /* Fallback to dummy data */
+        noisy_rgb = malloc(800 * 600 * 3);
+        noisy_lum = malloc(800 * 600);
+        memset(noisy_rgb, 128, 800 * 600 * 3);
+        memset(noisy_lum, 128, 800 * 600);
+        cnn_load_rgba_luminance(noisy_rgb, noisy_lum, sample->lowRes, 800, 600);
+        free(noisy_rgb);
+        free(noisy_lum);
+    } else {
+        cnn_load_rgba_luminance(noisy_rgb, noisy_lum, sample->lowRes, width, height);
+        stbi_image_free(noisy_rgb);
+        stbi_image_free(noisy_lum);
+    }
+    
+    /* Load clean (high_res) images */
+    snprintf(path_buffer, sizeof(path_buffer), "%s/%s/high_res.png", loader->folder_path, folder_name);
+    snprintf(path_lum_buffer, sizeof(path_lum_buffer), "%s/%s/high_res_luminance.png", loader->folder_path, folder_name);
+    
+    unsigned char *clean_rgb = stbi_load(path_buffer, &width, &height, &channels, 3);
+    unsigned char *clean_lum = stbi_load(path_lum_buffer, &width, &height, &channels, 1);
+    
+    if (!clean_rgb || !clean_lum) {
+        fprintf(stderr, "Failed to load clean images from folder: %s\n", folder_name);
+        if (clean_rgb) stbi_image_free(clean_rgb);
+        if (clean_lum) stbi_image_free(clean_lum);
+        
+        /* Fallback to dummy data */
+        clean_rgb = malloc(800 * 600 * 3);
+        clean_lum = malloc(800 * 600);
+        memset(clean_rgb, 128, 800 * 600 * 3);
+        memset(clean_lum, 128, 800 * 600);
+        cnn_load_rgba_luminance(clean_rgb, clean_lum, sample->highRes, 800, 600);
+        free(clean_rgb);
+        free(clean_lum);
+    } else {
+        cnn_load_rgba_luminance(clean_rgb, clean_lum, sample->highRes, width, height);
+        stbi_image_free(clean_rgb);
+        stbi_image_free(clean_lum);
+    }
     
     loader->current_index++;
+}
+
+static const char base64_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+size_t rgb_to_base64_noalloc(
+    const unsigned char *data,
+    size_t len,
+    char *out
+) {
+    size_t i = 0, j = 0;
+
+    while (i < len) {
+        uint32_t octet_a = i < len ? data[i++] : 0;
+        uint32_t octet_b = i < len ? data[i++] : 0;
+        uint32_t octet_c = i < len ? data[i++] : 0;
+
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+
+        out[j++] = base64_table[(triple >> 18) & 0x3F];
+        out[j++] = base64_table[(triple >> 12) & 0x3F];
+        out[j++] = (i > len + 1) ? '=' : base64_table[(triple >> 6) & 0x3F];
+        out[j++] = (i > len)     ? '=' : base64_table[triple & 0x3F];
+    }
+
+    out[j] = '\0';
+    return j;
+}
+
+void imageToBase64_noalloc(
+    const float *image,
+    int width,
+    int height,
+    unsigned char *rgb_buffer,
+    char *base64_buffer
+) {
+    int pixel_count = width * height;
+
+    for (int i = 0; i < pixel_count; i++) {
+        int rgba_idx = i * 4;
+        int rgb_idx  = i * 3;
+
+        rgb_buffer[rgb_idx + 0] =
+            (unsigned char)(fminf(fmaxf(image[rgba_idx + 0], 0.0f), 1.0f) * 255.0f);
+        rgb_buffer[rgb_idx + 1] =
+            (unsigned char)(fminf(fmaxf(image[rgba_idx + 1], 0.0f), 1.0f) * 255.0f);
+        rgb_buffer[rgb_idx + 2] =
+            (unsigned char)(fminf(fmaxf(image[rgba_idx + 2], 0.0f), 1.0f) * 255.0f);
+    }
+
+    rgb_to_base64_noalloc(
+        rgb_buffer,
+        (size_t)pixel_count * 3,
+        base64_buffer
+    );
+}
+
+int send_images_to_python(
+    const char *url,
+    const char *input_img_b64,
+    const char *original_img_b64,
+    const char *prediction_img_b64,
+    int step
+) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return 0;
+
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    /* Estimate JSON size once (no reallocs) */
+    size_t json_size =
+        strlen(input_img_b64) +
+        strlen(original_img_b64) +
+        strlen(prediction_img_b64) +
+        256;
+
+    char *json = malloc(json_size);
+    if (!json) {
+        curl_easy_cleanup(curl);
+        return 0;
+    }
+
+    snprintf(
+        json,
+        json_size,
+        "{"
+        "\"input_img\":\"%s\","
+        "\"original_img\":\"%s\","
+        "\"prediction_img\":\"%s\","
+        "\"step\":%d"
+        "}",
+        input_img_b64,
+        original_img_b64,
+        prediction_img_b64,
+        step
+    );
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json));
+
+    CURLcode res = curl_easy_perform(curl);
+
+    free(json);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    return res == CURLE_OK;
+}
+
+void send_metadata_to_python(
+    const char *url,
+    int step,
+    float loss,
+    float learning_rate,
+    float timeTookms
+) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return;
+
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    char json[256];
+    snprintf(
+        json,
+        sizeof(json),
+        "{"
+        "\"step\":%d,"
+        "\"loss\":%.6f,"
+        "\"learning_rate\":%.6f,"
+        "\"time\":%.6f"
+        "}",
+        step,
+        loss,
+        learning_rate,
+        timeTookms
+    );
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json));
+
+    curl_easy_perform(curl);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
 }

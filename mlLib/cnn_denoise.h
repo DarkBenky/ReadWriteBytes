@@ -9,7 +9,7 @@
 
 #ifndef CNN_DENOISE_H
 #define CNN_DENOISE_H
-#define NUMBER_OF_IMAGES_IN_DATA_LOADER 512
+#define NUMBER_OF_IMAGES_IN_DATA_LOADER 1024
 #define HEIGHT 600
 #define WIDTH 800
 #define IMAGE_SIZE (WIDTH * HEIGHT * 4) // RGB + Luminance
@@ -85,10 +85,8 @@ typedef struct {
 } TimingStats;
 
 typedef struct {
-    float NoisyImg [NUMBER_OF_IMAGES_IN_DATA_LOADER][IMAGE_SIZE]; // RGB + Luminance
-    float CleanImg [NUMBER_OF_IMAGES_IN_DATA_LOADER][IMAGE_SIZE];
-    int current_index;
-    char folder_path[512];  /* Store path for automatic reloading */
+    int current_index;      /* Counter for tracking iterations */
+    char folder_path[512];  /* Root path containing image folders */
 } DataLoader;
 
 typedef  struct {
@@ -122,6 +120,9 @@ float cnn_train_step(CNNDenoiser* cnn,
 
 void cnn_set_learning_rate(CNNDenoiser* cnn, float learning_rate);
 float cnn_get_learning_rate(CNNDenoiser* cnn);
+
+/* Get last forward pass output (after train step or denoise call) */
+void cnn_get_output(CNNDenoiser* cnn, float* output);
 
 /* Inference */
 int cnn_denoise(CNNDenoiser* cnn,
@@ -196,6 +197,42 @@ int cnn_prepare_training_batch(const unsigned char* clean_rgb,
  */
 int cnn_inference_rgb(CNNDenoiser* cnn, const unsigned char* input_rgb, 
                       unsigned char* output_rgb, int width, int height);
+
+/* ===== Logging Functions for wandb/logger.py ===== */
+
+/* Convert RGB data to base64 (no allocation, buffer must be pre-allocated) */
+size_t rgb_to_base64_noalloc(
+    const unsigned char *data,
+    size_t len,
+    char *out
+);
+
+/* Convert float RGBA image to base64 (buffers must be pre-allocated) */
+void imageToBase64_noalloc(
+    const float *image,
+    int width,
+    int height,
+    unsigned char *rgb_buffer,
+    char *base64_buffer
+);
+
+/* Send images to Python logger endpoint */
+int send_images_to_python(
+    const char *url,
+    const char *input_img_b64,
+    const char *original_img_b64,
+    const char *prediction_img_b64,
+    int step
+);
+
+/* Send training metadata to Python logger endpoint */
+void send_metadata_to_python(
+    const char *url,
+    int step,
+    float loss,
+    float learning_rate,
+    float timeTookms
+);
 
 #ifdef __cplusplus
 }
