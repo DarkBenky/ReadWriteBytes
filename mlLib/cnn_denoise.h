@@ -216,6 +216,24 @@ void imageToBase64_noalloc(
     char *base64_buffer
 );
 
+/* Convert planar RGBA layout to interleaved RGBA layout */
+void planarToInterleaved(
+    const float *planar,
+    float *interleaved,
+    int width,
+    int height,
+    int channels
+);
+
+/* Convert interleaved RGBA layout to planar RGBA layout */
+void interleavedToPlanar(
+    const float *interleaved,
+    float *planar,
+    int width,
+    int height,
+    int channels
+);
+
 /* Send images to Python logger endpoint */
 int send_images_to_python(
     const char *url,

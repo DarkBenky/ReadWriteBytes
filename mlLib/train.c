@@ -8,33 +8,30 @@ int main() {
     CNNConfig cfg = cnn_default_config(WIDTH, HEIGHT, 4);
     
     cfg.optimizer = OPTIMIZER_ADAM;
-    cfg.learning_rate = 0.002f;
+    cfg.learning_rate = 0.001f;
     cfg.use_profiling = 1;
 
     cfg.adam_beta1 = 0.95f;
     cfg.adam_beta2 = 0.999f;
     cfg.adam_epsilon = 1e-8f;
     
-    cfg.loss_config.num_losses = 2;
+    cfg.loss_config.num_losses = 1;
     cfg.loss_config.types[0] = LOSS_MAE;
     cfg.loss_config.weights[0] = 1.0f;
-    cfg.loss_config.types[1] = LOSS_LAPLACE;
-    cfg.loss_config.weights[1] = 0.1f;
     
-    cfg.residual_mode = 1;
+    cfg.residual_mode = 0;
 
     LearningRateDecay lr_decay;
-    learning_rate_decay_init(&lr_decay, cfg.learning_rate, 0.985f, MAX_STEPS);
+    learning_rate_decay_init(&lr_decay, cfg.learning_rate, 0.90f, MAX_STEPS);
     
     CNNDenoiser* cnn = cnn_create(cfg);
     
-    /* Medium model for testing scaling */
-    cnn_add_layer(cnn, (LayerConfig){4, 8, 1, "encoder_1"});
-    cnn_add_layer(cnn, (LayerConfig){8, 16, 1, "encoder_2"});
-    cnn_add_layer(cnn, (LayerConfig){16, 40, 1, "encoder_3"});
-    cnn_add_layer(cnn, (LayerConfig){40, 16, 1, "decoder_1"});
-    cnn_add_layer(cnn, (LayerConfig){16, 8, 1, "decoder_2"});
-    cnn_add_layer(cnn, (LayerConfig){8, 4, 1, "decoder_3"});
+    cnn_add_layer(cnn, (LayerConfig){4, 12, 1, "encoder_1"});
+    cnn_add_layer(cnn, (LayerConfig){12, 16, 1, "encoder_2"});
+    cnn_add_layer(cnn, (LayerConfig){16, 64, 1, "encoder_3"});
+    cnn_add_layer(cnn, (LayerConfig){64, 16, 1, "decoder_1"});
+    cnn_add_layer(cnn, (LayerConfig){16, 12, 1, "decoder_2"});
+    cnn_add_layer(cnn, (LayerConfig){12, 4, 1, "decoder_3"});
     
     cnn_finalize(cnn);
     cnn_print_architecture(cnn);
@@ -45,18 +42,28 @@ int main() {
 
     ImageSample *sample = malloc(sizeof(ImageSample));
     float *prediction = malloc(IMAGE_SIZE * sizeof(float));
+    float *prediction_interleaved = malloc(IMAGE_SIZE * sizeof(float));  /* For display */
     float *noise_target = malloc(IMAGE_SIZE * sizeof(float));  /* For residual mode: noise = noisy - clean */
+    
+    /* Buffers for converting interleaved input to planar format for GPU */
+    float *input_planar = malloc(IMAGE_SIZE * sizeof(float));
+    float *target_planar = malloc(IMAGE_SIZE * sizeof(float));
     
     printf("\nWarming up GPU (5 iterations)...\n");
     for (int i = 0; i < 5; i++) {
         getNextImagePair(loader, sample);
-        cnn_train_step(cnn, sample->lowRes, sample->highRes, 1);
+        /* Convert from interleaved to planar for GPU */
+        interleavedToPlanar(sample->lowRes, input_planar, WIDTH, HEIGHT, 4);
+        interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
+        cnn_train_step(cnn, input_planar, target_planar, 1);
     }
     printf("Warmup complete.\n\n");
     
     /* Run one more iteration to see profiling debug output */
     getNextImagePair(loader, sample);
-    cnn_train_step(cnn, sample->lowRes, sample->highRes, 1);    
+    interleavedToPlanar(sample->lowRes, input_planar, WIDTH, HEIGHT, 4);
+    interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
+    cnn_train_step(cnn, input_planar, target_planar, 1);    
 
     cnn_reset_timing_stats(cnn);
     
@@ -67,11 +74,21 @@ int main() {
     for (int step = 0; step < MAX_STEPS; step++) {
         getNextImagePair(loader, sample);
         
-        for (int i = 0; i < IMAGE_SIZE; i++) {
-            noise_target[i] = sample->lowRes[i] - sample->highRes[i];
+        /* Convert input from interleaved to planar format */
+        interleavedToPlanar(sample->lowRes, input_planar, WIDTH, HEIGHT, 4);
+        
+        /* In residual mode: train to predict noise (lowRes - highRes)
+         * In direct mode: train to predict clean image (highRes) */
+        if (cfg.residual_mode) {
+            for (int i = 0; i < IMAGE_SIZE; i++) {
+                noise_target[i] = sample->lowRes[i] - sample->highRes[i];
+            }
+            interleavedToPlanar(noise_target, target_planar, WIDTH, HEIGHT, 4);
+        } else {
+            interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
         }
         
-        accumulated_loss += cnn_train_step(cnn, sample->lowRes, noise_target, 1);
+        accumulated_loss += cnn_train_step(cnn, input_planar, target_planar, 1);
         
         TimingStats stats;
         cnn_get_timing_stats(cnn, &stats);
@@ -106,8 +123,9 @@ int main() {
             send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms);
             accumulated_loss = 0.0f;
             
-            /* Get prediction output and send all three images */
+            /* Get prediction output and convert from planar to interleaved for display */
             cnn_get_output(cnn, prediction);
+            planarToInterleaved(prediction, prediction_interleaved, WIDTH, HEIGHT, 4);
             
             size_t base64_size = ((WIDTH * HEIGHT * 3 + 2) / 3) * 4 + 1;
             size_t rgb_size = WIDTH * HEIGHT * 3;
@@ -122,7 +140,7 @@ int main() {
             
             imageToBase64_noalloc(sample->highRes, WIDTH, HEIGHT, clean_rgb, clean_b64);
             imageToBase64_noalloc(sample->lowRes, WIDTH, HEIGHT, noisy_rgb, noisy_b64);
-            imageToBase64_noalloc(prediction, WIDTH, HEIGHT, pred_rgb, pred_b64);
+            imageToBase64_noalloc(prediction_interleaved, WIDTH, HEIGHT, pred_rgb, pred_b64);
             
             send_images_to_python("http://127.0.0.1:5000/submitImage", noisy_b64, clean_b64, pred_b64, step);
             
@@ -148,6 +166,9 @@ int main() {
     
     printf("\nSaving weights...\n");
     free(noise_target);
+    free(prediction_interleaved);
+    free(input_planar);
+    free(target_planar);
     cnn_save_weights(cnn, "cnn_weights.bin");
 
     cnn_destroy(cnn);

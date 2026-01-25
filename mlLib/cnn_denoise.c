@@ -55,12 +55,12 @@ struct CNNDenoiser {
 /* Optimized OpenCL kernels - 4 outputs per thread */
 static const char *kernel_source = 
 "__kernel void conv3x3_forward_relu_f4(\n"
-"    __global const float4* input, __global float* output,\n"
+"    __global const float* input, __global float* output,\n"
 "    __global const float4* weights, __global const float* bias,\n"
 "    int Cin4, int Cout, int H, int W)\n"
 "{\n"
 "    int x = get_global_id(0), y = get_global_id(1), oc = get_global_id(2) * 4;\n"
-"    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1) return;\n"
+"    if (x >= W || y >= H) return;\n"
 "    \n"
 "    int hw = H * W;\n"
 "    \n"
@@ -70,17 +70,26 @@ static const char *kernel_source =
 "    float sum3 = (oc + 3 < Cout) ? bias[oc + 3] : 0.0f;\n"
 "    \n"
 "    for (int ic4 = 0; ic4 < Cin4; ic4++) {\n"
-"        int base = ic4 * hw + y * W + x;\n"
+"        /* Clamp coordinates for replicate padding */\n"
+"        int y0 = max(y - 1, 0), y1 = y, y2 = min(y + 1, H - 1);\n"
+"        int x0 = max(x - 1, 0), x1 = x, x2 = min(x + 1, W - 1);\n"
 "        \n"
-"        float4 i0 = input[base - W - 1];\n"
-"        float4 i1 = input[base - W];\n"
-"        float4 i2 = input[base - W + 1];\n"
-"        float4 i3 = input[base - 1];\n"
-"        float4 i4 = input[base];\n"
-"        float4 i5 = input[base + 1];\n"
-"        float4 i6 = input[base + W - 1];\n"
-"        float4 i7 = input[base + W];\n"
-"        float4 i8 = input[base + W + 1];\n"
+"        /* Read 4 channels at each position from planar layout */\n"
+"        #define READ_PIXEL(py, px) (float4)(input[(ic4*4+0)*hw + (py)*W + (px)], \\\n"
+"                                             input[(ic4*4+1)*hw + (py)*W + (px)], \\\n"
+"                                             input[(ic4*4+2)*hw + (py)*W + (px)], \\\n"
+"                                             input[(ic4*4+3)*hw + (py)*W + (px)])\n"
+"        \n"
+"        float4 i0 = READ_PIXEL(y0, x0);\n"
+"        float4 i1 = READ_PIXEL(y0, x1);\n"
+"        float4 i2 = READ_PIXEL(y0, x2);\n"
+"        float4 i3 = READ_PIXEL(y1, x0);\n"
+"        float4 i4 = READ_PIXEL(y1, x1);\n"
+"        float4 i5 = READ_PIXEL(y1, x2);\n"
+"        float4 i6 = READ_PIXEL(y2, x0);\n"
+"        float4 i7 = READ_PIXEL(y2, x1);\n"
+"        float4 i8 = READ_PIXEL(y2, x2);\n"
+"        #undef READ_PIXEL\n"
 "        \n"
 "        if (oc < Cout) {\n"
 "            int wb = (oc * Cin4 + ic4) * 9;\n"
@@ -120,11 +129,11 @@ static const char *kernel_source =
 "\n"
 "__kernel void conv3x3_backward_input_f4(\n"
 "    __global const float* grad_out, __global const float* output,\n"
-"    __global const float4* weights, __global float4* grad_in,\n"
+"    __global const float4* weights, __global float* grad_in,\n"
 "    int Cin4, int Cout, int H, int W, int use_relu)\n"
 "{\n"
 "    int x = get_global_id(0), y = get_global_id(1), ic4 = get_global_id(2);\n"
-"    if (x <= 0 || y <= 0 || x >= W-1 || y >= H-1) return;\n"
+"    if (x >= W || y >= H) return;\n"
 "    \n"
 "    int hw = H * W;\n"
 "    float4 acc = (float4)(0.0f);\n"
@@ -141,11 +150,16 @@ static const char *kernel_source =
 "                       weights[w_base+6] + weights[w_base+7] + weights[w_base+8];\n"
 "        acc += w_sum * g;\n"
 "    }\n"
-"    grad_in[ic4 * hw + y * W + x] = acc;\n"
+"    /* Write back to planar layout */\n"
+"    int pixel_idx = y * W + x;\n"
+"    grad_in[(ic4*4 + 0)*hw + pixel_idx] = acc.s0;\n"
+"    grad_in[(ic4*4 + 1)*hw + pixel_idx] = acc.s1;\n"
+"    grad_in[(ic4*4 + 2)*hw + pixel_idx] = acc.s2;\n"
+"    grad_in[(ic4*4 + 3)*hw + pixel_idx] = acc.s3;\n"
 "}\n"
 "\n"
 "__kernel void weight_grad_reduce(\n"
-"    __global const float4* input, __global const float* grad_out,\n"
+"    __global const float* input, __global const float* grad_out,\n"
 "    __global const float* output, __global float4* grad_w_vec,\n"
 "    __global float* grad_b, int Cin4, int H, int W, int use_relu)\n"
 "{\n"
@@ -155,13 +169,22 @@ static const char *kernel_source =
 "    float4 sum = (float4)(0.0f);\n"
 "    float bias_sum = 0.0f;\n"
 "    \n"
-"    for (int y = 1; y < H-1; y++) {\n"
-"        for (int x = 1; x < W-1; x++) {\n"
+"    for (int y = 0; y < H; y++) {\n"
+"        for (int x = 0; x < W; x++) {\n"
 "            int oidx = oc * hw + y * W + x;\n"
 "            float g = grad_out[oidx];\n"
 "            if (use_relu && output[oidx] <= 0.0f) g = 0.0f;\n"
 "            if (g != 0.0f) {\n"
-"                sum = fma(input[ic4 * hw + (y + dy) * W + (x + dx)], (float4)(g), sum);\n"
+"                /* Clamp input coordinates for padding */\n"
+"                int iy = clamp(y + dy, 0, H - 1);\n"
+"                int ix = clamp(x + dx, 0, W - 1);\n"
+"                int pixel_idx = iy * W + ix;\n"
+"                /* Read 4 channels from planar layout */\n"
+"                float4 input_val = (float4)(input[(ic4*4+0)*hw + pixel_idx],\n"
+"                                             input[(ic4*4+1)*hw + pixel_idx],\n"
+"                                             input[(ic4*4+2)*hw + pixel_idx],\n"
+"                                             input[(ic4*4+3)*hw + pixel_idx]);\n"
+"                sum = fma(input_val, (float4)(g), sum);\n"
 "                if (ic4 == 0 && k == 0) bias_sum += g;\n"
 "            }\n"
 "        }\n"
@@ -1603,6 +1626,42 @@ void imageToBase64_noalloc(
         (size_t)pixel_count * 3,
         base64_buffer
     );
+}
+
+void planarToInterleaved(
+    const float *planar,
+    float *interleaved,
+    int width,
+    int height,
+    int channels
+) {
+    int hw = height * width;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int pixel_idx = y * width + x;
+            for (int c = 0; c < channels; c++) {
+                interleaved[pixel_idx * channels + c] = planar[c * hw + pixel_idx];
+            }
+        }
+    }
+}
+
+void interleavedToPlanar(
+    const float *interleaved,
+    float *planar,
+    int width,
+    int height,
+    int channels
+) {
+    int hw = height * width;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int pixel_idx = y * width + x;
+            for (int c = 0; c < channels; c++) {
+                planar[c * hw + pixel_idx] = interleaved[pixel_idx * channels + c];
+            }
+        }
+    }
 }
 
 int send_images_to_python(
