@@ -1,41 +1,48 @@
 #include "cnn_denoise.h"
 #include <stdio.h>
 #include <stdlib.h>
-#define MAX_STEPS 100000000
-#define LOG_EVERY_N_STEPS 256
+#include <math.h>
+#define MAX_STEPS 100000
+#define LOG_EVERY_N_STEPS 512
+#define LOG_STEP 10
+
 
 int main() {
     CNNConfig cfg = cnn_default_config(WIDTH, HEIGHT, 4);
     
     cfg.optimizer = OPTIMIZER_ADAM;
-    cfg.learning_rate = 0.001f;
+    cfg.learning_rate = 0.0001f;  /* Higher LR for residual mode to escape zero-output trap */
     cfg.use_profiling = 1;
 
     cfg.adam_beta1 = 0.95f;
     cfg.adam_beta2 = 0.999f;
     cfg.adam_epsilon = 1e-8f;
     
-    cfg.loss_config.num_losses = 1;
+    cfg.loss_config.num_losses = 3;
     cfg.loss_config.types[0] = LOSS_MAE;
-    cfg.loss_config.weights[0] = 1.0f;
+    cfg.loss_config.weights[0] = 1.55f;
+    cfg.loss_config.types[1] = LOSS_MSE;
+    cfg.loss_config.weights[1] = 1.05f;
+    cfg.loss_config.types[2] = LOSS_COLOR_VARIANCE;
+    cfg.loss_config.weights[2] = 0.20f;
     
     cfg.residual_mode = 0;
 
     LearningRateDecay lr_decay;
-    learning_rate_decay_init(&lr_decay, cfg.learning_rate, 0.90f, MAX_STEPS);
+    learning_rate_decay_init(&lr_decay, cfg.learning_rate, 0.75f, MAX_STEPS);
     
     CNNDenoiser* cnn = cnn_create(cfg);
     
-    cnn_add_layer(cnn, (LayerConfig){4, 12, 1, "encoder_1"});
-    cnn_add_layer(cnn, (LayerConfig){12, 16, 1, "encoder_2"});
-    cnn_add_layer(cnn, (LayerConfig){16, 64, 1, "encoder_3"});
-    cnn_add_layer(cnn, (LayerConfig){64, 16, 1, "decoder_1"});
-    cnn_add_layer(cnn, (LayerConfig){16, 12, 1, "decoder_2"});
-    cnn_add_layer(cnn, (LayerConfig){12, 4, 1, "decoder_3"});
+    /* Architecture with skip connections */
+    cnn_add_layer(cnn, (LayerConfig){4, 16, 1, -1, "encode_1"});
+    cnn_add_layer(cnn, (LayerConfig){16, 20, 1, -1, "encode_2"});
+    cnn_add_layer(cnn, (LayerConfig){20, 24, 1, -1, "bottleneck"});
+    cnn_add_layer(cnn, (LayerConfig){24, 20, 1, 1, "decode_1_skip1"});
+    cnn_add_layer(cnn, (LayerConfig){20, 16, 1, 0, "decode_2_skip0"});
+    cnn_add_layer(cnn, (LayerConfig){16, 4, 0, -1, "output"});
     
     cnn_finalize(cnn);
-    cnn_print_architecture(cnn);
-    
+    cnn_print_architecture(cnn);      
 
     DataLoader *loader = malloc(sizeof(DataLoader));
     fillDataLoader(loader, "/media/user/2TB Clear/imageData");
@@ -52,17 +59,33 @@ int main() {
     printf("\nWarming up GPU (5 iterations)...\n");
     for (int i = 0; i < 5; i++) {
         getNextImagePair(loader, sample);
-        /* Convert from interleaved to planar for GPU */
         interleavedToPlanar(sample->lowRes, input_planar, WIDTH, HEIGHT, 4);
-        interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
+        
+        if (cfg.residual_mode) {
+            for (int j = 0; j < IMAGE_SIZE; j++) {
+                noise_target[j] = sample->lowRes[j] - sample->highRes[j];
+            }
+            interleavedToPlanar(noise_target, target_planar, WIDTH, HEIGHT, 4);
+        } else {
+            interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
+        }
+        
         cnn_train_step(cnn, input_planar, target_planar, 1);
     }
     printf("Warmup complete.\n\n");
     
-    /* Run one more iteration to see profiling debug output */
     getNextImagePair(loader, sample);
     interleavedToPlanar(sample->lowRes, input_planar, WIDTH, HEIGHT, 4);
-    interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
+    
+    if (cfg.residual_mode) {
+        for (int i = 0; i < IMAGE_SIZE; i++) {
+            noise_target[i] = sample->lowRes[i] - sample->highRes[i];
+        }
+        interleavedToPlanar(noise_target, target_planar, WIDTH, HEIGHT, 4);
+    } else {
+        interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
+    }
+    
     cnn_train_step(cnn, input_planar, target_planar, 1);    
 
     cnn_reset_timing_stats(cnn);
@@ -71,14 +94,14 @@ int main() {
     int timing_samples = 0;
     float accumulated_loss = 0.0f;
     float best_loss = 1e10f;
+    float mae_loss = 0.0f, mse_loss = 0.0f, laplace_loss = 0.0f, color_loss = 0.0f;
+    float best_mae = 1e10f, best_mse = 1e10f, best_laplace = 1e10f, best_color = 1e10f;
     for (int step = 0; step < MAX_STEPS; step++) {
         getNextImagePair(loader, sample);
         
         /* Convert input from interleaved to planar format */
         interleavedToPlanar(sample->lowRes, input_planar, WIDTH, HEIGHT, 4);
         
-        /* In residual mode: train to predict noise (lowRes - highRes)
-         * In direct mode: train to predict clean image (highRes) */
         if (cfg.residual_mode) {
             for (int i = 0; i < IMAGE_SIZE; i++) {
                 noise_target[i] = sample->lowRes[i] - sample->highRes[i];
@@ -99,7 +122,7 @@ int main() {
         cumulative_stats.total_time_ms += stats.total_time_ms;
         timing_samples++;
 
-        if (step % 10 == 0) {
+        if (step % LOG_STEP == 0) {
             printf("Step %d: Forward %.2f ms, Backward %.2f ms, Loss %.2f ms, Update %.2f ms, Total %.2f ms\n",
                    step,
                    stats.forward_time_ms,
@@ -108,6 +131,7 @@ int main() {
                    stats.update_time_ms,
                    stats.total_time_ms);
             printf("Current Loss: %.6f\n", accumulated_loss / (step + 1));
+            cnn_get_individual_losses(cnn, &mae_loss, &mse_loss, &laplace_loss, &color_loss);
         }
         
         if (step % LOG_EVERY_N_STEPS == 0 && step > 0) {
@@ -120,10 +144,11 @@ int main() {
                 cnn_save_weights(cnn, "cnn_weights_best.bin");
             }
             
-            send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms);
+            printf("   Individual losses: MAE=%.4f MSE=%.4f Color=%.4f\n", mae_loss / (LOG_EVERY_N_STEPS / LOG_STEP), mse_loss / (LOG_EVERY_N_STEPS / LOG_STEP), color_loss / (LOG_EVERY_N_STEPS / LOG_STEP));
+            
+            send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, mae_loss, mse_loss, color_loss);
             accumulated_loss = 0.0f;
             
-            /* Get prediction output and convert from planar to interleaved for display */
             cnn_get_output(cnn, prediction);
             planarToInterleaved(prediction, prediction_interleaved, WIDTH, HEIGHT, 4);
             

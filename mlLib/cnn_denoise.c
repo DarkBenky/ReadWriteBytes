@@ -26,6 +26,9 @@ typedef struct {
     float *h_weights, *h_bias, *h_grad_w, *h_grad_b;
     char name[64];
     int use_relu;
+    int skip_from;           /* Layer index to skip from, -1 = no skip */
+    cl_mem skip_input;       /* Input from skip connection */
+    cl_mem grad_output;      /* Gradient w.r.t this layer's output (for skip connections) */
 } ConvLayer;
 
 /* Main CNN structure */
@@ -34,8 +37,11 @@ struct CNNDenoiser {
     cl_command_queue queue;
     cl_program program;
     cl_kernel k_forward, k_backward, k_weight_grad, k_mae_loss, k_sgd_update, k_adam_update;
-    cl_kernel k_mse_loss, k_laplace_loss, k_add_weighted_grad, k_residual_subtract;
+    cl_kernel k_mse_loss, k_laplace_loss, k_add_weighted_grad, k_residual_subtract, k_negate;
+    cl_kernel k_color_variance_loss;
     cl_kernel k_forward_residual;  /* Fused forward + residual for last layer */
+    cl_kernel k_add_skip;  /* Add skip connection */
+    cl_kernel k_add_skip_grad;  /* Backprop through skip connection */
     
     size_t optimal_local[3];
     int tuning_done;
@@ -50,6 +56,12 @@ struct CNNDenoiser {
     TimingStats stats;
     int stats_count;
     int finalized;
+    
+    /* Individual loss tracking */
+    float last_mae_loss;
+    float last_mse_loss;
+    float last_laplace_loss;
+    float last_color_loss;
 };
 
 /* Optimized OpenCL kernels - 4 outputs per thread */
@@ -150,12 +162,12 @@ static const char *kernel_source =
 "                       weights[w_base+6] + weights[w_base+7] + weights[w_base+8];\n"
 "        acc += w_sum * g;\n"
 "    }\n"
-"    /* Write back to planar layout */\n"
+"    /* Accumulate to planar layout (use += for skip connections) */\n"
 "    int pixel_idx = y * W + x;\n"
-"    grad_in[(ic4*4 + 0)*hw + pixel_idx] = acc.s0;\n"
-"    grad_in[(ic4*4 + 1)*hw + pixel_idx] = acc.s1;\n"
-"    grad_in[(ic4*4 + 2)*hw + pixel_idx] = acc.s2;\n"
-"    grad_in[(ic4*4 + 3)*hw + pixel_idx] = acc.s3;\n"
+"    grad_in[(ic4*4 + 0)*hw + pixel_idx] += acc.s0;\n"
+"    grad_in[(ic4*4 + 1)*hw + pixel_idx] += acc.s1;\n"
+"    grad_in[(ic4*4 + 2)*hw + pixel_idx] += acc.s2;\n"
+"    grad_in[(ic4*4 + 3)*hw + pixel_idx] += acc.s3;\n"
 "}\n"
 "\n"
 "__kernel void weight_grad_reduce(\n"
@@ -200,11 +212,17 @@ static const char *kernel_source =
 "    int gid = get_global_id(0), lid = get_local_id(0);\n"
 "    __local float local_loss[256];\n"
 "    float local_sum = 0.0f;\n"
+"    int pixels_per_channel = size / 4;\n"
 "    \n"
 "    for (int idx = gid; idx < size; idx += get_global_size(0)) {\n"
-"        float diff = prediction[idx] - target[idx];\n"
-"        grad_out[idx] = copysign(1.0f, diff);\n"
-"        local_sum += fabs(diff);\n"
+"        int channel = idx / pixels_per_channel;\n"
+"        if (channel < 3) {\n"
+"            float diff = prediction[idx] - target[idx];\n"
+"            grad_out[idx] = copysign(1.0f, diff);\n"
+"            local_sum += fabs(diff);\n"
+"        } else {\n"
+"            grad_out[idx] = 0.0f;\n"
+"        }\n"
 "    }\n"
 "    \n"
 "    local_loss[lid] = local_sum;\n"
@@ -276,11 +294,17 @@ static const char *kernel_source =
 "{\n"
 "    int gid = get_global_id(0), lid = get_local_id(0);\n"
 "    local_loss[lid] = 0.0f;\n"
+"    int pixels_per_channel = size / 4;\n"
 "    \n"
 "    if (gid < size) {\n"
-"        float diff = output[gid] - target[gid];\n"
-"        grad[gid] = 2.0f * diff;\n"
-"        local_loss[lid] = diff * diff;\n"
+"        int channel = gid / pixels_per_channel;\n"
+"        if (channel < 3) {\n"
+"            float diff = output[gid] - target[gid];\n"
+"            grad[gid] = 2.0f * diff;\n"
+"            local_loss[lid] = diff * diff;\n"
+"        } else {\n"
+"            grad[gid] = 0.0f;\n"
+"        }\n"
 "    }\n"
 "    barrier(CLK_LOCAL_MEM_FENCE);\n"
 "    \n"
@@ -332,6 +356,101 @@ static const char *kernel_source =
 "    if (lid == 0) loss_accum[get_group_id(0)] = local_loss[0];\n"
 "}\n"
 "\n"
+"__kernel void color_variance_loss(\n"
+"    __global const float* output, __global const float* target,\n"
+"    __global float* grad, __global float* loss_accum,\n"
+"    int H, int W, __local float* local_loss)\n"
+"{\n"
+"    int gid = get_global_id(0), lid = get_local_id(0);\n"
+"    local_loss[lid] = 0.0f;\n"
+"    int pixels = H * W;\n"
+"    \n"
+"    if (gid < pixels) {\n"
+"        float out_r = output[gid];\n"
+"        float out_g = output[pixels + gid];\n"
+"        float out_b = output[2 * pixels + gid];\n"
+"        float tgt_r = target[gid];\n"
+"        float tgt_g = target[pixels + gid];\n"
+"        float tgt_b = target[2 * pixels + gid];\n"
+"        \n"
+"        /* Direction loss: 1 - dot(normalize(pred), normalize(target)) */\n"
+"        float pred_norm = sqrt(out_r*out_r + out_g*out_g + out_b*out_b) + 1e-6f;\n"
+"        float tgt_norm = sqrt(tgt_r*tgt_r + tgt_g*tgt_g + tgt_b*tgt_b) + 1e-6f;\n"
+"        \n"
+"        float pred_r_n = out_r / pred_norm;\n"
+"        float pred_g_n = out_g / pred_norm;\n"
+"        float pred_b_n = out_b / pred_norm;\n"
+"        float tgt_r_n = tgt_r / tgt_norm;\n"
+"        float tgt_g_n = tgt_g / tgt_norm;\n"
+"        float tgt_b_n = tgt_b / tgt_norm;\n"
+"        \n"
+"        float dot = pred_r_n * tgt_r_n + pred_g_n * tgt_g_n + pred_b_n * tgt_b_n;\n"
+"        float direction_loss = 1.0f - dot;\n"
+"        \n"
+"        /* Saturation loss: max(0, target_std - pred_std) */\n"
+"        float pred_mean = (out_r + out_g + out_b) / 3.0f;\n"
+"        float pred_var = ((out_r - pred_mean)*(out_r - pred_mean) +\n"
+"                         (out_g - pred_mean)*(out_g - pred_mean) +\n"
+"                         (out_b - pred_mean)*(out_b - pred_mean)) / 3.0f;\n"
+"        float pred_std = sqrt(pred_var + 1e-8f);\n"
+"        \n"
+"        float tgt_mean = (tgt_r + tgt_g + tgt_b) / 3.0f;\n"
+"        float tgt_var = ((tgt_r - tgt_mean)*(tgt_r - tgt_mean) +\n"
+"                        (tgt_g - tgt_mean)*(tgt_g - tgt_mean) +\n"
+"                        (tgt_b - tgt_mean)*(tgt_b - tgt_mean)) / 3.0f;\n"
+"        float tgt_std = sqrt(tgt_var + 1e-8f);\n"
+"        \n"
+"        float sat_diff = fmax(0.0f, tgt_std - pred_std);\n"
+"        float saturation_loss = sat_diff;\n"
+"        \n"
+"        /* Simplified color loss - stable gradients:\n"
+"         * Direction: penalize wrong color direction\n"
+"         * Saturation: penalize desaturation with moderate power */\n"
+"        float dir_term = direction_loss + 1.0f;\n"
+"        float dir_penalty = dir_term * dir_term;  /* squared */\n"
+"        \n"
+"        float sat_term = saturation_loss + 1.0f;\n"
+"        float sat_penalty = sat_term * sat_term * sat_term * sat_term;  /* ^4 */\n"
+"        \n"
+"        float total_loss = 2.0f * dir_penalty + 8.0f * sat_penalty;\n"
+"        local_loss[lid] = total_loss;\n"
+"        \n"
+"        /* Gradient computation */\n"
+"        /* d(direction_loss)/d(out_r) - moderate scaling */\n"
+"        float inv_pred_norm = 1.0f / pred_norm;\n"
+"        \n"
+"        float dir_grad_scale = 2.0f * 2.0f * dir_term;  /* 2 * 2 * (dir + 1) */\n"
+"        float grad_dir_r = dir_grad_scale * (-(tgt_r_n * inv_pred_norm - pred_r_n * dot * inv_pred_norm));\n"
+"        float grad_dir_g = dir_grad_scale * (-(tgt_g_n * inv_pred_norm - pred_g_n * dot * inv_pred_norm));\n"
+"        float grad_dir_b = dir_grad_scale * (-(tgt_b_n * inv_pred_norm - pred_b_n * dot * inv_pred_norm));\n"
+"        \n"
+"        /* d(saturation_loss)/d(out) - stable scaling */\n"
+"        float grad_sat_r = 0.0f, grad_sat_g = 0.0f, grad_sat_b = 0.0f;\n"
+"        \n"
+"        if (sat_diff > 0.0f) {\n"
+"            float sat_weight = 8.0f * 4.0f * sat_term * sat_term * sat_term;  /* 8 * 4 * (sat+1)^3 */\n"
+"            float inv_pred_std = -1.0f / (pred_std + 1e-8f);\n"
+"            float factor = inv_pred_std / 3.0f;\n"
+"            grad_sat_r = sat_weight * factor * (out_r - pred_mean);\n"
+"            grad_sat_g = sat_weight * factor * (out_g - pred_mean);\n"
+"            grad_sat_b = sat_weight * factor * (out_b - pred_mean);\n"
+"        }\n"
+"        \n"
+"        grad[gid] = grad_dir_r + grad_sat_r;\n"
+"        grad[pixels + gid] = grad_dir_g + grad_sat_g;\n"
+"        grad[2 * pixels + gid] = grad_dir_b + grad_sat_b;\n"
+"        grad[3 * pixels + gid] = 0.0f;\n"
+"    }\n"
+"    barrier(CLK_LOCAL_MEM_FENCE);\n"
+"    \n"
+"    for (int s = get_local_size(0) / 2; s > 0; s >>= 1) {\n"
+"        if (lid < s) local_loss[lid] += local_loss[lid + s];\n"
+"        barrier(CLK_LOCAL_MEM_FENCE);\n"
+"    }\n"
+"    \n"
+"    if (lid == 0) loss_accum[get_group_id(0)] = local_loss[0];\n"
+"}\n"
+"\n"
 "__kernel void add_weighted_grad(\n"
 "    __global float* grad_accum, __global const float* grad_new,\n"
 "    float weight, int size)\n"
@@ -347,6 +466,35 @@ static const char *kernel_source =
 "    int gid = get_global_id(0);\n"
 "    if (gid < size) {\n"
 "        output[gid] = input[gid] - prediction[gid];\n"
+"    }\n"
+"}\n"
+"\n"
+"__kernel void negate(\n"
+"    __global const float* input, __global float* output, int size)\n"
+"{\n"
+"    int gid = get_global_id(0);\n"
+"    if (gid < size) {\n"
+"        output[gid] = -input[gid];\n"
+"    }\n"
+"}\n"
+"\n"
+"/* Add skip connection: output = layer_output + skip_input */\n"
+"__kernel void add_skip(\n"
+"    __global float* output, __global const float* skip_input, int size)\n"
+"{\n"
+"    int gid = get_global_id(0);\n"
+"    if (gid < size) {\n"
+"        output[gid] += skip_input[gid];\n"
+"    }\n"
+"}\n"
+"\n"
+"/* Backprop through skip: accumulate gradient to skip source */\n"
+"__kernel void add_skip_grad(\n"
+"    __global float* skip_grad, __global const float* current_grad, int size)\n"
+"{\n"
+"    int gid = get_global_id(0);\n"
+"    if (gid < size) {\n"
+"        skip_grad[gid] += current_grad[gid];\n"
 "    }\n"
 "}\n"
 "\n"
@@ -494,6 +642,14 @@ static void init_weights(float *w, int n) {
     }
 }
 
+static void init_weights_linear(float *w, int n_in, int n_out) {
+    /* Xavier/Glorot initialization for linear layers */
+    float scale = sqrtf(6.0f / (n_in + n_out));
+    for (int i = 0; i < n_in * n_out * 9; i++) {
+        w[i] = ((float)rand() / RAND_MAX - 0.5f) * 2.0f * scale;
+    }
+}
+
 CNNDenoiser* cnn_create(CNNConfig config) {
     CNNDenoiser *cnn = calloc(1, sizeof(CNNDenoiser));
     if (!cnn) return NULL;
@@ -537,17 +693,26 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->k_mae_loss = clCreateKernel(cnn->program, "mae_loss_gradient", &err);
     cnn->k_mse_loss = clCreateKernel(cnn->program, "mse_loss_gradient", &err);
     cnn->k_laplace_loss = clCreateKernel(cnn->program, "laplace_loss_gradient", &err);
+    cnn->k_color_variance_loss = clCreateKernel(cnn->program, "color_variance_loss", &err);
     cnn->k_sgd_update = clCreateKernel(cnn->program, "sgd_update", &err);
     cnn->k_adam_update = clCreateKernel(cnn->program, "adam_update", &err);
     cnn->k_add_weighted_grad = clCreateKernel(cnn->program, "add_weighted_grad", &err);
     cnn->k_residual_subtract = clCreateKernel(cnn->program, "residual_subtract", &err);
+    cnn->k_negate = clCreateKernel(cnn->program, "negate", &err);
     cnn->k_forward_residual = clCreateKernel(cnn->program, "conv3x3_forward_relu_residual_f4", &err);
+    cnn->k_add_skip = clCreateKernel(cnn->program, "add_skip", &err);
+    cnn->k_add_skip_grad = clCreateKernel(cnn->program, "add_skip_grad", &err);
     
     cnn->adam_t = 0;
     cnn->tuning_done = 0;
     cnn->optimal_local[0] = 16;
     cnn->optimal_local[1] = 8;
     cnn->optimal_local[2] = 1;
+    
+    cnn->last_mae_loss = 0.0f;
+    cnn->last_mse_loss = 0.0f;
+    cnn->last_laplace_loss = 0.0f;
+    cnn->last_color_loss = 0.0f;
     
     return cnn;
 }
@@ -580,6 +745,7 @@ int cnn_add_layer(CNNDenoiser *cnn, LayerConfig layer) {
     l->cin = layer.cin;
     l->cout = layer.cout;
     l->use_relu = layer.use_relu;
+    l->skip_from = layer.skip_from;
     l->h = cnn->config.input_height;
     l->w = cnn->config.input_width;
     l->cin4 = layer.cin / 4;
@@ -605,6 +771,14 @@ int cnn_add_layer(CNNDenoiser *cnn, LayerConfig layer) {
     l->grad_bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cout * 4, NULL, &err);
     l->grad_weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, w_size * 16, NULL, &err);
     l->grad_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cin * l->h * l->w * 4, NULL, &err);
+    l->grad_output = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
+    
+    /* Allocate skip_input buffer if skip connection exists */
+    if (l->skip_from >= 0) {
+        l->skip_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
+    } else {
+        l->skip_input = NULL;
+    }
     
     return 0;
 }
@@ -642,6 +816,17 @@ int cnn_finalize(CNNDenoiser *cnn) {
             clEnqueueFillBuffer(cnn->queue, l->adam_v_w, &zero, sizeof(float), 0, w_size * 16, 0, NULL, NULL);
             clEnqueueFillBuffer(cnn->queue, l->adam_m_b, &zero, sizeof(float), 0, l->cout * 4, 0, NULL, NULL);
             clEnqueueFillBuffer(cnn->queue, l->adam_v_b, &zero, sizeof(float), 0, l->cout * 4, 0, NULL, NULL);
+        }
+    }
+    
+    /* Reinitialize output layer with Xavier init if linear and using residual mode */
+    if (cnn->config.residual_mode && cnn->n_layers > 0) {
+        ConvLayer *output_layer = &cnn->layers[cnn->n_layers - 1];
+        if (!output_layer->use_relu) {
+            int w_size = output_layer->cout * output_layer->cin4 * 9;
+            init_weights_linear(output_layer->h_weights, output_layer->cin, output_layer->cout);
+            clEnqueueWriteBuffer(cnn->queue, output_layer->weights, CL_TRUE, 0, 
+                               w_size * 16, output_layer->h_weights, 0, NULL, NULL);
         }
     }
     
@@ -695,6 +880,27 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         /* Use NULL for local work size - let OpenCL choose optimal size per layer */
         clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, NULL, 0, NULL, &forward_events[i]);
         
+        /* Add skip connection if specified */
+        if (l->skip_from >= 0 && l->skip_from < i) {
+            ConvLayer *skip_layer = &cnn->layers[l->skip_from];
+            
+            /* Validate channel compatibility */
+            if (l->cout != skip_layer->cout) {
+                fprintf(stderr, "Error: Skip connection channel mismatch! Layer %d has %d channels, skip source layer %d has %d channels\n",
+                        i, l->cout, l->skip_from, skip_layer->cout);
+                continue;
+            }
+            
+            int skip_size = l->cout * l->h * l->w;
+            
+            clSetKernelArg(cnn->k_add_skip, 0, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_add_skip, 1, sizeof(cl_mem), &skip_layer->output);
+            clSetKernelArg(cnn->k_add_skip, 2, sizeof(int), &skip_size);
+            
+            size_t skip_global = (skip_size + 255) / 256 * 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_add_skip, 1, NULL, &skip_global, NULL, 0, NULL, NULL);
+        }
+        
         current = l->output;
     }
     clFinish(cnn->queue);
@@ -729,6 +935,11 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     int out_size = last_layer->cout * hw;
     float total_loss = 0.0f;
     
+    /* In residual mode: network output is the predicted noise, compare directly to noise target
+     * In direct mode: network output is the denoised image, compare to clean target
+     * Either way, loss is computed on the network's raw output */
+    cl_mem loss_input = last_layer->output;
+    
     /* Zero out gradient buffer */
     float zero = 0.0f;
     clEnqueueFillBuffer(cnn->queue, cnn->grad_buf, &zero, sizeof(float), 0, out_size * 4, 0, NULL, NULL);
@@ -745,7 +956,7 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             int num_workgroups = 64;
             cl_mem loss_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, num_workgroups * 4, NULL, NULL);
             
-            clSetKernelArg(cnn->k_mae_loss, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_mae_loss, 0, sizeof(cl_mem), &loss_input);
             clSetKernelArg(cnn->k_mae_loss, 1, sizeof(cl_mem), &cnn->target_buf);
             clSetKernelArg(cnn->k_mae_loss, 2, sizeof(cl_mem), &temp_grad_loss);
             clSetKernelArg(cnn->k_mae_loss, 3, sizeof(cl_mem), &loss_buf);
@@ -760,14 +971,17 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             
             float loss = 0.0f;
             for (int i = 0; i < num_workgroups; i++) loss += loss_per_wg[i];
-            total_loss += weight * (loss / out_size);
+            int rgb_size = (out_size / 4) * 3;
+            float mae_loss_normalized = loss / rgb_size;
+            cnn->last_mae_loss = mae_loss_normalized;
+            total_loss += weight * mae_loss_normalized;
             
             clReleaseMemObject(loss_buf);
         } else if (loss_type == LOSS_MSE) {
             int num_workgroups = 64;
             cl_mem loss_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, num_workgroups * 4, NULL, NULL);
             
-            clSetKernelArg(cnn->k_mse_loss, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_mse_loss, 0, sizeof(cl_mem), &loss_input);
             clSetKernelArg(cnn->k_mse_loss, 1, sizeof(cl_mem), &cnn->target_buf);
             clSetKernelArg(cnn->k_mse_loss, 2, sizeof(cl_mem), &temp_grad_loss);
             clSetKernelArg(cnn->k_mse_loss, 3, sizeof(cl_mem), &loss_buf);
@@ -782,7 +996,10 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             
             float loss = 0.0f;
             for (int i = 0; i < num_workgroups; i++) loss += loss_per_wg[i];
-            total_loss += weight * (loss / out_size);
+            int rgb_size = (out_size / 4) * 3;
+            float mse_loss_normalized = loss / rgb_size;
+            cnn->last_mse_loss = mse_loss_normalized;
+            total_loss += weight * mse_loss_normalized;
             
             clReleaseMemObject(loss_buf);
         } else if (loss_type == LOSS_LAPLACE) {
@@ -812,7 +1029,41 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             
             float loss = 0.0f;
             for (int i = 0; i < num_workgroups; i++) loss += loss_per_wg[i];
-            total_loss += weight * (loss / out_size);
+            float laplace_loss_normalized = loss / out_size;
+            cnn->last_laplace_loss = laplace_loss_normalized;
+            total_loss += weight * laplace_loss_normalized;
+            
+            clReleaseMemObject(loss_buf);
+        } else if (loss_type == LOSS_COLOR_VARIANCE) {
+            int num_workgroups = 64;
+            cl_mem loss_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, num_workgroups * 4, NULL, NULL);
+            float zero_loss = 0.0f;
+            clEnqueueFillBuffer(cnn->queue, loss_buf, &zero_loss, sizeof(float), 0, num_workgroups * 4, 0, NULL, NULL);
+            
+            int H = cnn->config.input_height;
+            int W = cnn->config.input_width;
+            
+            clSetKernelArg(cnn->k_color_variance_loss, 0, sizeof(cl_mem), &loss_input);
+            clSetKernelArg(cnn->k_color_variance_loss, 1, sizeof(cl_mem), &cnn->target_buf);
+            clSetKernelArg(cnn->k_color_variance_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+            clSetKernelArg(cnn->k_color_variance_loss, 3, sizeof(cl_mem), &loss_buf);
+            clSetKernelArg(cnn->k_color_variance_loss, 4, sizeof(int), &H);
+            clSetKernelArg(cnn->k_color_variance_loss, 5, sizeof(int), &W);
+            clSetKernelArg(cnn->k_color_variance_loss, 6, 256 * sizeof(float), NULL);
+            
+            size_t global_loss = 256 * num_workgroups;
+            size_t local_loss = 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_color_variance_loss, 1, NULL, &global_loss, &local_loss, 0, NULL, NULL);
+            
+            float loss_per_wg[64];
+            clEnqueueReadBuffer(cnn->queue, loss_buf, CL_TRUE, 0, num_workgroups * 4, loss_per_wg, 0, NULL, NULL);
+            
+            float loss = 0.0f;
+            for (int i = 0; i < num_workgroups; i++) loss += loss_per_wg[i];
+            int pixels = H * W;
+            float color_loss_normalized = loss / pixels;
+            cnn->last_color_loss = color_loss_normalized;
+            total_loss += weight * color_loss_normalized;
             
             clReleaseMemObject(loss_buf);
         }
@@ -832,15 +1083,42 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     clock_gettime(CLOCK_MONOTONIC, &t_backward_start);
     
     /* ========== BACKWARD PASS ========== */
-    cl_mem grad_current = cnn->grad_buf;
     
-    /* First pass: Compute all gradients */
+    /* Initialize all layer output gradients to zero, then set last layer from loss */
+    float zero_grad = 0.0f;
+    for (int i = 0; i < cnn->n_layers; i++) {
+        int layer_out_size = cnn->layers[i].cout * hw;
+        clEnqueueFillBuffer(cnn->queue, cnn->layers[i].grad_output, &zero_grad, sizeof(float), 
+                           0, layer_out_size * 4, 0, NULL, NULL);
+    }
+    
+    /* Copy loss gradient to last layer's output gradient */
+    clEnqueueCopyBuffer(cnn->queue, cnn->grad_buf, last_layer->grad_output, 
+                       0, 0, out_size * 4, 0, NULL, NULL);
+    
+    /* Backward through layers */
     for (int i = cnn->n_layers - 1; i >= 0; i--) {
         ConvLayer *l = &cnn->layers[i];
         cl_mem layer_input = (i == 0) ? cnn->input_buf : cnn->layers[i-1].output;
         
+        /* STEP 1: Accumulate skip gradients if this layer is a skip source */
+        for (int j = i + 1; j < cnn->n_layers; j++) {
+            if (cnn->layers[j].skip_from == i && l->cout == cnn->layers[j].cout) {
+                /* Layer j skips from layer i, so gradient flows back to i's output */
+                int skip_size = l->cout * l->h * l->w;
+                
+                clSetKernelArg(cnn->k_add_skip_grad, 0, sizeof(cl_mem), &l->grad_output);
+                clSetKernelArg(cnn->k_add_skip_grad, 1, sizeof(cl_mem), &cnn->layers[j].grad_output);
+                clSetKernelArg(cnn->k_add_skip_grad, 2, sizeof(int), &skip_size);
+                
+                size_t skip_grad_global = (skip_size + 255) / 256 * 256;
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_add_skip_grad, 1, NULL, &skip_grad_global, NULL, 0, NULL, NULL);
+            }
+        }
+        
+        /* STEP 2: Compute weight and bias gradients using accumulated output gradient */
         clSetKernelArg(cnn->k_weight_grad, 0, sizeof(cl_mem), &layer_input);
-        clSetKernelArg(cnn->k_weight_grad, 1, sizeof(cl_mem), &grad_current);
+        clSetKernelArg(cnn->k_weight_grad, 1, sizeof(cl_mem), &l->grad_output);
         clSetKernelArg(cnn->k_weight_grad, 2, sizeof(cl_mem), &l->output);
         clSetKernelArg(cnn->k_weight_grad, 3, sizeof(cl_mem), &l->grad_weights);
         clSetKernelArg(cnn->k_weight_grad, 4, sizeof(cl_mem), &l->grad_bias);
@@ -852,13 +1130,14 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         size_t grad_global[3] = {(size_t)l->cout, (size_t)l->cin4, 9};
         clEnqueueNDRangeKernel(cnn->queue, cnn->k_weight_grad, 3, NULL, grad_global, NULL, 0, NULL, NULL);
         
+        /* STEP 3: Backprop gradient to previous layer */
         if (i > 0) {
             int prev_cin4 = cnn->layers[i-1].cout / 4;
             
-            clSetKernelArg(cnn->k_backward, 0, sizeof(cl_mem), &grad_current);
+            clSetKernelArg(cnn->k_backward, 0, sizeof(cl_mem), &l->grad_output);
             clSetKernelArg(cnn->k_backward, 1, sizeof(cl_mem), &l->output);
             clSetKernelArg(cnn->k_backward, 2, sizeof(cl_mem), &l->weights);
-            clSetKernelArg(cnn->k_backward, 3, sizeof(cl_mem), &l->grad_input);
+            clSetKernelArg(cnn->k_backward, 3, sizeof(cl_mem), &cnn->layers[i-1].grad_output);
             clSetKernelArg(cnn->k_backward, 4, sizeof(int), &prev_cin4);
             clSetKernelArg(cnn->k_backward, 5, sizeof(int), &l->cout);
             clSetKernelArg(cnn->k_backward, 6, sizeof(int), &l->h);
@@ -868,8 +1147,6 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             size_t back_global[3] = {(size_t)l->w, (size_t)l->h, (size_t)prev_cin4};
             size_t back_local[3] = {16, 8, 1};
             clEnqueueNDRangeKernel(cnn->queue, cnn->k_backward, 3, NULL, back_global, back_local, 0, NULL, NULL);
-            
-            grad_current = l->grad_input;
         }
     }
     clFinish(cnn->queue);
@@ -1362,6 +1639,11 @@ void cnn_get_output(CNNDenoiser* cnn, float* output) {
     
     /* In residual mode, need to compute: output = input - network_output */
     if (cnn->config.residual_mode) {
+        /* DEBUG: Read raw values to see what's happening */
+        float test_input[10], test_prediction[10], test_result[10];
+        clEnqueueReadBuffer(cnn->queue, cnn->input_buf, CL_TRUE, 0, 40, test_input, 0, NULL, NULL);
+        clEnqueueReadBuffer(cnn->queue, last_layer->output, CL_TRUE, 0, 40, test_prediction, 0, NULL, NULL);
+        
         /* Run residual_subtract kernel: residual_buf = input - last_layer->output */
         clSetKernelArg(cnn->k_residual_subtract, 0, sizeof(cl_mem), &cnn->input_buf);
         clSetKernelArg(cnn->k_residual_subtract, 1, sizeof(cl_mem), &last_layer->output);
@@ -1374,6 +1656,13 @@ void cnn_get_output(CNNDenoiser* cnn, float* output) {
         /* Read the computed residual output */
         clEnqueueReadBuffer(cnn->queue, cnn->residual_buf, CL_TRUE, 0, 
                            input_size * sizeof(float), output, 0, NULL, NULL);
+        
+        /* DEBUG: Check result */
+        clEnqueueReadBuffer(cnn->queue, cnn->residual_buf, CL_TRUE, 0, 40, test_result, 0, NULL, NULL);
+        printf("  [DEBUG cnn_get_output] input_buf[0:2]=%.3f,%.3f,%.3f prediction[0:2]=%.3f,%.3f,%.3f result[0:2]=%.3f,%.3f,%.3f\n",
+               test_input[0], test_input[1], test_input[2],
+               test_prediction[0], test_prediction[1], test_prediction[2],
+               test_result[0], test_result[1], test_result[2]);
     } else {
         /* Direct mode: just read the last layer output */
         clEnqueueReadBuffer(cnn->queue, last_layer->output, CL_TRUE, 0, 
@@ -1551,6 +1840,20 @@ void getNextImagePair(DataLoader* loader, ImageSample* sample) {
     unsigned char *clean_rgb = stbi_load(path_buffer, &width, &height, &channels, 3);
     unsigned char *clean_lum = stbi_load(path_lum_buffer, &width, &height, &channels, 1);
     
+    /* Debug: Check if loaded images have color */
+    static int debug_once = 1;
+    if (debug_once && clean_rgb) {
+        printf("\nDEBUG - Loaded clean image from: %s\n", path_buffer);
+        printf("  First pixel RGB values: R=%d G=%d B=%d\n", clean_rgb[0], clean_rgb[1], clean_rgb[2]);
+        printf("  Pixel 100 RGB values: R=%d G=%d B=%d\n", clean_rgb[300], clean_rgb[301], clean_rgb[302]);
+        if (clean_rgb[0] == clean_rgb[1] && clean_rgb[1] == clean_rgb[2]) {
+            printf("  WARNING: Clean image appears to be GRAYSCALE!\n");
+        } else {
+            printf("  Clean image has color variation.\n");
+        }
+        debug_once = 0;
+    }
+    
     if (!clean_rgb || !clean_lum) {
         fprintf(stderr, "Failed to load clean images from folder: %s\n", folder_name);
         if (clean_rgb) stbi_image_free(clean_rgb);
@@ -1719,12 +2022,28 @@ int send_images_to_python(
     return res == CURLE_OK;
 }
 
+void cnn_get_individual_losses(
+    CNNDenoiser *cnn,
+    float *mae_loss,
+    float *mse_loss,
+    float *laplace_loss,
+    float *color_loss
+) {
+    if (mae_loss) *mae_loss += cnn->last_mae_loss;
+    if (mse_loss) *mse_loss += cnn->last_mse_loss;
+    if (laplace_loss) *laplace_loss += cnn->last_laplace_loss;
+    if (color_loss) *color_loss += cnn->last_color_loss;
+}
+
 void send_metadata_to_python(
     const char *url,
     int step,
     float loss,
     float learning_rate,
-    float timeTookms
+    float timeTookms,
+    float mae_loss,
+    float mse_loss,
+    float color_loss
 ) {
     CURL *curl = curl_easy_init();
     if (!curl) return;
@@ -1732,7 +2051,7 @@ void send_metadata_to_python(
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
-    char json[256];
+    char json[512];
     snprintf(
         json,
         sizeof(json),
@@ -1740,12 +2059,18 @@ void send_metadata_to_python(
         "\"step\":%d,"
         "\"loss\":%.6f,"
         "\"learning_rate\":%.6f,"
-        "\"time\":%.6f"
+        "\"time\":%.6f,"
+        "\"mae_loss\":%.6f,"
+        "\"mse_loss\":%.6f,"
+        "\"color_loss\":%.6f"
         "}",
         step,
         loss,
         learning_rate,
-        timeTookms
+        timeTookms,
+        mae_loss,
+        mse_loss,
+        color_loss
     );
 
     curl_easy_setopt(curl, CURLOPT_URL, url);

@@ -33,13 +33,14 @@ typedef enum {
 typedef enum {
     LOSS_MAE = 0,
     LOSS_MSE = 1,
-    LOSS_LAPLACE = 2
+    LOSS_LAPLACE = 2,
+    LOSS_COLOR_VARIANCE = 3
 } LossType;
 
 /* Loss configuration with multiple losses and weights */
 typedef struct {
-    LossType types[3];       /* Up to 3 loss types */
-    float weights[3];        /* Weight for each loss */
+    LossType types[4];       /* Up to 4 loss types */
+    float weights[4];        /* Weight for each loss */
     int num_losses;          /* Number of active losses */
 } LossConfig;
 
@@ -72,6 +73,7 @@ typedef struct {
     int cin;                 /* Input channels */
     int cout;                /* Output channels */
     int use_relu;            /* 1 = ReLU activation, 0 = linear */
+    int skip_from;           /* Layer index to add as skip connection, -1 = no skip */
     char name[64];           /* Layer name for debugging */
 } LayerConfig;
 
@@ -249,7 +251,19 @@ void send_metadata_to_python(
     int step,
     float loss,
     float learning_rate,
-    float timeTookms
+    float timeTookms,
+    float mae_loss,
+    float mse_loss,
+    float color_loss
+);
+
+/* Get individual losses from last training step */
+void cnn_get_individual_losses(
+    CNNDenoiser *cnn,
+    float *mae_loss,
+    float *mse_loss,
+    float *laplace_loss,
+    float *color_loss
 );
 
 #ifdef __cplusplus

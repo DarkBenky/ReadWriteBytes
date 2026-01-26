@@ -23,6 +23,15 @@ test_features: test_features.c cnn_denoise.c cnn_denoise.h
 train: train.c cnn_denoise.c cnn_denoise.h
 	$(CC) $(CFLAGS) -o train train.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
 
+test_skip: test_skip.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o test_skip test_skip.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
+check_predictions: check_predictions.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o check_predictions check_predictions.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
+debug_residual: debug_residual.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o debug_residual debug_residual.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
 # Library (optional)
 libcnn_denoise.a: cnn_denoise.o
 	ar rcs libcnn_denoise.a cnn_denoise.o
