@@ -34,6 +34,10 @@ applyTo: '**'
 - Magic numbers or undocumented constants
 - Premature optimization without profiling
 - Hidden allocations or performance traps
+- At all costs, avoid using emojis other non-standard characters in code or comments and do not explain them
+- Generating tests unless explicitly requested
+- Generate Readme or other documentation files unless explicitly requested or are useful for your context
+- Avoid creating redundant comments that do not add value
 
 ## Context Awareness
 - Consider existing codebase patterns and match that style

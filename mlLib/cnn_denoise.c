@@ -22,6 +22,8 @@
 typedef struct {
     int cin, cout, h, w, cin4;
     cl_mem weights, bias, output, grad_bias, grad_weights, grad_input;
+    cl_mem batch_output;       /* Batch output buffer [max_batch][cout][h][w] */
+    cl_mem batch_grad_input;   /* Batch gradient input buffer [max_batch][cin][h][w] */
     cl_mem adam_m_w, adam_v_w, adam_m_b, adam_v_b;  /* Adam optimizer buffers */
     float *h_weights, *h_bias, *h_grad_w, *h_grad_b;
     char name[64];
@@ -43,6 +45,19 @@ struct CNNDenoiser {
     cl_kernel k_add_skip;  /* Add skip connection */
     cl_kernel k_add_skip_grad;  /* Backprop through skip connection */
     
+    /* Batch training kernels */
+    cl_kernel k_batch_forward;
+    cl_kernel k_batch_backward;
+    cl_kernel k_batch_weight_grad;
+    cl_kernel k_batch_mae_loss;
+    cl_kernel k_batch_mse_loss;
+    cl_kernel k_batch_laplace_loss;
+    cl_kernel k_batch_color_loss;
+    cl_kernel k_batch_clear_loss;
+    cl_kernel k_batch_add_weighted_grad;
+    cl_kernel k_batch_loss_reduce;
+    int batch_kernels_available;
+    
     size_t optimal_local[3];
     int tuning_done;
     
@@ -52,6 +67,12 @@ struct CNNDenoiser {
     int adam_t;  /* Adam timestep */
     
     cl_mem input_buf, target_buf, grad_buf, temp_grad, residual_buf;
+    
+    /* Batch buffers (allocated if max_batch_size > 1) */
+    cl_mem batch_input_buf;    /* [max_batch][channels][h][w] */
+    cl_mem batch_target_buf;   /* [max_batch][channels][h][w] */
+    cl_mem batch_loss_buf;     /* [max_batch] - per-sample loss */
+    cl_mem batch_grad_buf;     /* [max_batch][channels][h][w] */
     
     TimingStats stats;
     int stats_count;
@@ -703,6 +724,62 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->k_add_skip = clCreateKernel(cnn->program, "add_skip", &err);
     cnn->k_add_skip_grad = clCreateKernel(cnn->program, "add_skip_grad", &err);
     
+    /* Load batch training kernels if max_batch_size > 1 */
+    cnn->batch_kernels_available = 0;
+    if (config.max_batch_size > 1) {
+        FILE *batch_kernel_file = fopen("mlLib/batch_kernels.cl", "r");
+        if (!batch_kernel_file) {
+            batch_kernel_file = fopen("batch_kernels.cl", "r");
+        }
+        
+        if (batch_kernel_file) {
+            fseek(batch_kernel_file, 0, SEEK_END);
+            size_t batch_src_size = ftell(batch_kernel_file);
+            fseek(batch_kernel_file, 0, SEEK_SET);
+            char *batch_src = malloc(batch_src_size + 1);
+            fread(batch_src, 1, batch_src_size, batch_kernel_file);
+            batch_src[batch_src_size] = '\0';
+            fclose(batch_kernel_file);
+            
+            cl_program batch_program = clCreateProgramWithSource(cnn->ctx, 1, 
+                (const char**)&batch_src, NULL, &err);
+            free(batch_src);
+            
+            err = clBuildProgram(batch_program, 0, NULL, opts, NULL, NULL);
+            if (err == CL_SUCCESS) {
+                cnn->k_batch_forward = clCreateKernel(batch_program, "batch_conv3x3_forward_relu_f4", &err);
+                if (err != CL_SUCCESS) fprintf(stderr, "[WARN] Failed to create batch_forward kernel: %d\n", err);
+                
+                cnn->k_batch_backward = clCreateKernel(batch_program, "batch_conv3x3_backward_input_f4", &err);
+                if (err != CL_SUCCESS) fprintf(stderr, "[WARN] Failed to create batch_backward kernel: %d\n", err);
+                
+                cnn->k_batch_weight_grad = clCreateKernel(batch_program, "batch_weight_grad_reduce", &err);
+                if (err != CL_SUCCESS) fprintf(stderr, "[WARN] Failed to create batch_weight_grad kernel: %d\n", err);
+                
+                cnn->k_batch_mae_loss = clCreateKernel(batch_program, "batch_mae_loss_gradient", &err);
+                cnn->k_batch_mse_loss = clCreateKernel(batch_program, "batch_mse_loss_gradient", &err);
+                cnn->k_batch_laplace_loss = clCreateKernel(batch_program, "batch_laplace_loss_gradient", &err);
+                cnn->k_batch_color_loss = clCreateKernel(batch_program, "batch_color_variance_loss", &err);
+                cnn->k_batch_clear_loss = clCreateKernel(batch_program, "batch_clear_loss_buffer", &err);
+                cnn->k_batch_add_weighted_grad = clCreateKernel(batch_program, "batch_add_weighted_gradient", &err);
+                cnn->k_batch_loss_reduce = clCreateKernel(batch_program, "batch_loss_reduce", &err);
+                
+                cnn->batch_kernels_available = 1;
+                printf("Batch training enabled (max_batch_size=%d)\n", config.max_batch_size);
+            } else {
+                size_t log_size;
+                clGetProgramBuildInfo(batch_program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+                char *log = malloc(log_size);
+                clGetProgramBuildInfo(batch_program, device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+                fprintf(stderr, "Batch kernel build failed:\n%s\n", log);
+                free(log);
+                fprintf(stderr, "Batch training disabled, using single-image mode only\n");
+            }
+        } else {
+            fprintf(stderr, "Warning: batch_kernels.cl not found, batch training disabled\n");
+        }
+    }
+    
     cnn->adam_t = 0;
     cnn->tuning_done = 0;
     cnn->optimal_local[0] = 16;
@@ -734,6 +811,7 @@ CNNConfig cnn_default_config(int width, int height, int channels) {
     cfg.adam_beta1 = 0.9f;
     cfg.adam_beta2 = 0.999f;
     cfg.adam_epsilon = 1e-8f;
+    cfg.max_batch_size = 1;  /* Default to single-image mode */
     return cfg;
 }
 
@@ -793,6 +871,30 @@ int cnn_finalize(CNNDenoiser *cnn) {
     cnn->grad_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, max_size * 4, NULL, NULL);
     cnn->residual_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, max_size * 4, NULL, NULL);
     
+    /* Allocate batch buffers if batch training enabled */
+    if (cnn->config.max_batch_size > 1 && cnn->batch_kernels_available) {
+        int img_size = cnn->config.input_height * cnn->config.input_width * cnn->config.input_channels;
+        size_t batch_size_bytes = cnn->config.max_batch_size * img_size * sizeof(float);
+        
+        cl_int err;
+        cnn->batch_input_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, batch_size_bytes, NULL, &err);
+        cnn->batch_target_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, batch_size_bytes, NULL, &err);
+        cnn->batch_grad_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, batch_size_bytes, NULL, &err);
+        /* Loss buffer needs to store per-pixel loss values for reduction */
+        cnn->batch_loss_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, batch_size_bytes, NULL, &err);
+        
+        if (err != CL_SUCCESS) {
+            fprintf(stderr, "Failed to allocate batch buffers (batch_size=%d, %.1f MB each)\n",
+                cnn->config.max_batch_size, batch_size_bytes / (1024.0 * 1024.0));
+            cnn->batch_kernels_available = 0;
+        } else {
+            printf("Batch buffers allocated: %d images × %.1f MB = %.1f MB total\n",
+                cnn->config.max_batch_size, 
+                (img_size * sizeof(float)) / (1024.0 * 1024.0),
+                (batch_size_bytes * 4) / (1024.0 * 1024.0));  /* 4 = input+target+grad+loss */
+        }
+    }
+    
     int max_layer_params = 0;
     for (int i = 0; i < cnn->n_layers; i++) {
         int params = cnn->layers[i].cout * cnn->layers[i].cin4 * 9;
@@ -819,6 +921,19 @@ int cnn_finalize(CNNDenoiser *cnn) {
         }
     }
     
+    /* Allocate batch output buffers for each layer if batch training enabled */
+    if (cnn->config.max_batch_size > 1 && cnn->batch_kernels_available) {
+        for (int i = 0; i < cnn->n_layers; i++) {
+            ConvLayer *l = &cnn->layers[i];
+            size_t layer_output_size = cnn->config.max_batch_size * l->cout * l->h * l->w * sizeof(float);
+            l->batch_output = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer_output_size, NULL, NULL);
+            
+            /* Also allocate batch-sized gradient buffer for backprop */
+            size_t layer_input_size = cnn->config.max_batch_size * l->cin * l->h * l->w * sizeof(float);
+            l->batch_grad_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer_input_size, NULL, NULL);
+        }
+    }
+    
     /* Reinitialize output layer with Xavier init if linear and using residual mode */
     if (cnn->config.residual_mode && cnn->n_layers > 0) {
         ConvLayer *output_layer = &cnn->layers[cnn->n_layers - 1];
@@ -834,9 +949,384 @@ int cnn_finalize(CNNDenoiser *cnn) {
     return 0;
 }
 
+/* Batch training implementation - efficient GPU processing of multiple images */
+static float cnn_train_step_batch(CNNDenoiser *cnn, float* noisy_input, float* clean_target, int batch_size) {
+    struct timespec t_start, t_end, t_forward_start, t_loss_start, t_backward_start, t_update_start;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    
+    int img_size = cnn->config.input_height * cnn->config.input_width * cnn->config.input_channels;
+    int hw = cnn->config.input_height * cnn->config.input_width;
+    
+    /* Upload batch data */
+    clEnqueueWriteBuffer(cnn->queue, cnn->batch_input_buf, CL_FALSE, 0, 
+        batch_size * img_size * sizeof(float), noisy_input, 0, NULL, NULL);
+    clEnqueueWriteBuffer(cnn->queue, cnn->batch_target_buf, CL_FALSE, 0,
+        batch_size * img_size * sizeof(float), clean_target, 0, NULL, NULL);
+    
+    /* Clear loss buffer */
+    clSetKernelArg(cnn->k_batch_clear_loss, 0, sizeof(cl_mem), &cnn->batch_loss_buf);
+    clSetKernelArg(cnn->k_batch_clear_loss, 1, sizeof(int), &batch_size);
+    size_t clear_global = (batch_size + 255) / 256 * 256;
+    clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_clear_loss, 1, NULL, &clear_global, NULL, 0, NULL, NULL);
+    
+    clock_gettime(CLOCK_MONOTONIC, &t_forward_start);
+    
+    /* Batch forward pass - process all images in parallel */
+    cl_mem current = cnn->batch_input_buf;
+    for (int i = 0; i < cnn->n_layers; i++) {
+        ConvLayer *l = &cnn->layers[i];
+        
+        cl_int arg_err;
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 0, sizeof(cl_mem), &current);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 0: %d\n", i, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 1, sizeof(cl_mem), &l->batch_output);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 1: %d\n", i, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 2, sizeof(cl_mem), &l->weights);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 2: %d\n", i, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 3, sizeof(cl_mem), &l->bias);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 3: %d\n", i, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 4, sizeof(int), &batch_size);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 4 (batch_size=%d): %d\n", i, batch_size, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 5, sizeof(int), &l->cin4);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 5 (cin4=%d): %d\n", i, l->cin4, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 6, sizeof(int), &l->cout);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 6 (cout=%d): %d\n", i, l->cout, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 7, sizeof(int), &l->h);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 7 (h=%d): %d\n", i, l->h, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 8, sizeof(int), &l->w);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 8 (w=%d): %d\n", i, l->w, arg_err);
+        
+        arg_err = clSetKernelArg(cnn->k_batch_forward, 9, sizeof(int), &l->use_relu);
+        if (arg_err != CL_SUCCESS) fprintf(stderr, "[ERROR] Layer %d arg 9 (use_relu=%d): %d\n", i, l->use_relu, arg_err);
+        
+        /* OpenCL 1.2 only supports 3D work sizes, so flatten batch into 3rd dimension */
+        size_t global[3] = {l->w, l->h, (l->cout + 3) / 4 * batch_size};
+        cl_int err = clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_forward, 3, NULL, global, NULL, 0, NULL, NULL);
+        if (err != CL_SUCCESS) {
+            fprintf(stderr, "[ERROR] Batch forward layer %d failed: %d\n", i, err);
+        }
+        clFinish(cnn->queue);  /* Force sync to catch errors */
+        
+        current = l->batch_output;
+    }
+    
+    /* Batch loss computation - support multiple weighted loss functions */
+    ConvLayer *last = &cnn->layers[cnn->n_layers - 1];
+    int size_per_img = last->cout * hw;
+    int H = cnn->config.input_height;
+    int W = cnn->config.input_width;
+    int C = last->cout;
+    
+    /* Clear batch loss and gradient buffers */
+    float zero = 0.0f;
+    clEnqueueFillBuffer(cnn->queue, cnn->batch_loss_buf, &zero, sizeof(float), 
+        0, batch_size * sizeof(float), 0, NULL, NULL);
+    clEnqueueFillBuffer(cnn->queue, cnn->batch_grad_buf, &zero, sizeof(float), 
+        0, batch_size * size_per_img * sizeof(float), 0, NULL, NULL);
+    
+    clock_gettime(CLOCK_MONOTONIC, &t_loss_start);
+    
+    /* DEBUG counter for both loss sections */
+    static int debug_count = 0;
+    
+    /* Temporary gradient buffer for each loss component */
+    cl_mem temp_grad_loss = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, 
+        batch_size * size_per_img * sizeof(float), NULL, NULL);
+    
+    /* Per-batch loss output buffer for reduction */
+    cl_mem batch_loss_output = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, 
+        batch_size * sizeof(float), NULL, NULL);
+    
+    float total_loss = 0.0f;
+    
+    /* Iterate through configured loss functions */
+    for (int loss_idx = 0; loss_idx < cnn->config.loss_config.num_losses; loss_idx++) {
+        LossType loss_type = cnn->config.loss_config.types[loss_idx];
+        float weight = cnn->config.loss_config.weights[loss_idx];
+        
+        /* Clear temporary gradient buffer */
+        clEnqueueFillBuffer(cnn->queue, temp_grad_loss, &zero, sizeof(float), 
+            0, batch_size * size_per_img * sizeof(float), 0, NULL, NULL);
+        
+        /* Clear per-pixel loss buffer */
+        clEnqueueFillBuffer(cnn->queue, cnn->batch_loss_buf, &zero, sizeof(float), 
+            0, batch_size * size_per_img * sizeof(float), 0, NULL, NULL);
+        
+        /* Clear per-batch output buffer */
+        clEnqueueFillBuffer(cnn->queue, batch_loss_output, &zero, sizeof(float), 
+            0, batch_size * sizeof(float), 0, NULL, NULL);
+        
+        if (loss_type == LOSS_MAE) {
+            clSetKernelArg(cnn->k_batch_mae_loss, 0, sizeof(cl_mem), &last->batch_output);
+            clSetKernelArg(cnn->k_batch_mae_loss, 1, sizeof(cl_mem), &cnn->batch_target_buf);
+            clSetKernelArg(cnn->k_batch_mae_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+            clSetKernelArg(cnn->k_batch_mae_loss, 3, sizeof(cl_mem), &cnn->batch_loss_buf);
+            clSetKernelArg(cnn->k_batch_mae_loss, 4, sizeof(int), &batch_size);
+            clSetKernelArg(cnn->k_batch_mae_loss, 5, sizeof(int), &size_per_img);
+            
+            size_t mae_global[2] = {batch_size, size_per_img};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_mae_loss, 2, NULL, mae_global, NULL, 0, NULL, NULL);
+            
+        } else if (loss_type == LOSS_MSE) {
+            clSetKernelArg(cnn->k_batch_mse_loss, 0, sizeof(cl_mem), &last->batch_output);
+            clSetKernelArg(cnn->k_batch_mse_loss, 1, sizeof(cl_mem), &cnn->batch_target_buf);
+            clSetKernelArg(cnn->k_batch_mse_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+            clSetKernelArg(cnn->k_batch_mse_loss, 3, sizeof(cl_mem), &cnn->batch_loss_buf);
+            clSetKernelArg(cnn->k_batch_mse_loss, 4, sizeof(int), &batch_size);
+            clSetKernelArg(cnn->k_batch_mse_loss, 5, sizeof(int), &size_per_img);
+            
+            size_t mse_global[2] = {batch_size, size_per_img};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_mse_loss, 2, NULL, mse_global, NULL, 0, NULL, NULL);
+            
+        } else if (loss_type == LOSS_LAPLACE) {
+            clSetKernelArg(cnn->k_batch_laplace_loss, 0, sizeof(cl_mem), &last->batch_output);
+            clSetKernelArg(cnn->k_batch_laplace_loss, 1, sizeof(cl_mem), &cnn->batch_target_buf);
+            clSetKernelArg(cnn->k_batch_laplace_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+            clSetKernelArg(cnn->k_batch_laplace_loss, 3, sizeof(cl_mem), &cnn->batch_loss_buf);
+            clSetKernelArg(cnn->k_batch_laplace_loss, 4, sizeof(int), &batch_size);
+            clSetKernelArg(cnn->k_batch_laplace_loss, 5, sizeof(int), &H);
+            clSetKernelArg(cnn->k_batch_laplace_loss, 6, sizeof(int), &W);
+            clSetKernelArg(cnn->k_batch_laplace_loss, 7, sizeof(int), &C);
+            
+            size_t laplace_global[3] = {W, H, batch_size * C};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_laplace_loss, 3, NULL, laplace_global, NULL, 0, NULL, NULL);
+            
+        } else if (loss_type == LOSS_COLOR_VARIANCE) {
+            clSetKernelArg(cnn->k_batch_color_loss, 0, sizeof(cl_mem), &last->batch_output);
+            clSetKernelArg(cnn->k_batch_color_loss, 1, sizeof(cl_mem), &cnn->batch_target_buf);
+            clSetKernelArg(cnn->k_batch_color_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+            clSetKernelArg(cnn->k_batch_color_loss, 3, sizeof(cl_mem), &cnn->batch_loss_buf);
+            clSetKernelArg(cnn->k_batch_color_loss, 4, sizeof(int), &batch_size);
+            clSetKernelArg(cnn->k_batch_color_loss, 5, sizeof(int), &H);
+            clSetKernelArg(cnn->k_batch_color_loss, 6, sizeof(int), &W);
+            
+            size_t color_global[3] = {W, H, batch_size};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_color_loss, 3, NULL, color_global, NULL, 0, NULL, NULL);
+        }
+        
+        /* Reduce per-pixel losses to per-batch totals */
+        clSetKernelArg(cnn->k_batch_loss_reduce, 0, sizeof(cl_mem), &cnn->batch_loss_buf);
+        clSetKernelArg(cnn->k_batch_loss_reduce, 1, sizeof(cl_mem), &batch_loss_output);
+        clSetKernelArg(cnn->k_batch_loss_reduce, 2, sizeof(int), &batch_size);
+        clSetKernelArg(cnn->k_batch_loss_reduce, 3, sizeof(int), &size_per_img);
+        clSetKernelArg(cnn->k_batch_loss_reduce, 4, 256 * sizeof(float), NULL);  /* Local memory */
+        
+        size_t reduce_global = batch_size * 256;  /* 256 work-items per batch */
+        size_t reduce_local = 256;
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_loss_reduce, 1, NULL, 
+            &reduce_global, &reduce_local, 0, NULL, NULL);
+        
+        /* DEBUG: Check some loss buffer values */
+        if (debug_count < 2) {
+            float sample_losses[10];
+            clEnqueueReadBuffer(cnn->queue, cnn->batch_loss_buf, CL_TRUE, 0, 
+                10 * sizeof(float), sample_losses, 0, NULL, NULL);
+            printf("[DEBUG] First 10 loss_buffer values: ");
+            for (int i = 0; i < 10; i++) {
+                printf("%.4f ", sample_losses[i]);
+            }
+            printf("\n");
+        }
+        
+        /* Read back loss for this component */
+        float *batch_losses = malloc(batch_size * sizeof(float));
+        clEnqueueReadBuffer(cnn->queue, batch_loss_output, CL_TRUE, 0, 
+            batch_size * sizeof(float), batch_losses, 0, NULL, NULL);
+        
+        float component_loss = 0.0f;
+        for (int i = 0; i < batch_size; i++) {
+            component_loss += batch_losses[i];
+        }
+        free(batch_losses);
+        
+        /* DEBUG: Print raw values */
+        if (debug_count < 2) {
+            printf("[DEBUG] Loss computation:\n");
+            printf("  component_loss (sum): %.2f\n", component_loss);
+            printf("  batch_size: %d\n", batch_size);
+            printf("  size_per_img: %d\n", size_per_img);
+            if (loss_type == LOSS_MAE || loss_type == LOSS_MSE) {
+                int rgb_pixels = (size_per_img / 4) * 3;
+                printf("  rgb_pixels: %d\n", rgb_pixels);
+                printf("  divisor (batch*rgb): %d\n", batch_size * rgb_pixels);
+            }
+            debug_count++;
+        }
+        
+        /* Normalize loss based on type */
+        float normalized_loss;
+        if (loss_type == LOSS_COLOR_VARIANCE) {
+            normalized_loss = component_loss / (batch_size * H * W);
+        } else if (loss_type == LOSS_LAPLACE) {
+            /* Laplace computes loss per RGB channel, so divide by RGB pixels only */
+            int rgb_pixels = (size_per_img / 4) * 3;
+            normalized_loss = component_loss / (batch_size * rgb_pixels);
+        } else {
+            /* MAE, MSE - only RGB channels */
+            int rgb_pixels = (size_per_img / 4) * 3;
+            normalized_loss = component_loss / (batch_size * rgb_pixels);
+        }
+        
+        /* Store individual loss values for tracking */
+        if (loss_type == LOSS_MAE) {
+            cnn->last_mae_loss = normalized_loss;
+        } else if (loss_type == LOSS_MSE) {
+            cnn->last_mse_loss = normalized_loss;
+        } else if (loss_type == LOSS_LAPLACE) {
+            cnn->last_laplace_loss = normalized_loss;
+        } else if (loss_type == LOSS_COLOR_VARIANCE) {
+            cnn->last_color_loss = normalized_loss;
+        }
+        
+        total_loss += weight * normalized_loss;
+        
+        /* Add weighted gradient to accumulated gradient buffer */
+        clSetKernelArg(cnn->k_batch_add_weighted_grad, 0, sizeof(cl_mem), &cnn->batch_grad_buf);
+        clSetKernelArg(cnn->k_batch_add_weighted_grad, 1, sizeof(cl_mem), &temp_grad_loss);
+        clSetKernelArg(cnn->k_batch_add_weighted_grad, 2, sizeof(float), &weight);
+        int total_size = batch_size * size_per_img;
+        clSetKernelArg(cnn->k_batch_add_weighted_grad, 3, sizeof(int), &total_size);
+        
+        size_t add_global = ((total_size + 255) / 256) * 256;
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_add_weighted_grad, 1, NULL, &add_global, NULL, 0, NULL, NULL);
+    }
+    
+    clReleaseMemObject(temp_grad_loss);
+    clReleaseMemObject(batch_loss_output);
+    float avg_loss = total_loss / batch_size;
+    
+    clock_gettime(CLOCK_MONOTONIC, &t_backward_start);
+    
+    /* Batch backward pass */
+    for (int i = cnn->n_layers - 1; i >= 0; i--) {
+        ConvLayer *l = &cnn->layers[i];
+        cl_mem layer_input = (i == 0) ? cnn->batch_input_buf : cnn->layers[i-1].batch_output;
+        
+        /* Clear input gradient buffer */
+        int in_size = l->cin * hw;
+        float zero = 0.0f;
+        clEnqueueFillBuffer(cnn->queue, l->batch_grad_input, &zero, sizeof(float), 
+            0, batch_size * in_size * sizeof(float), 0, NULL, NULL);
+        
+        /* For last layer, use batch_grad_buf (from loss computation)
+         * For other layers, use the next layer's batch_grad_input */
+        cl_mem grad_source = (i == cnn->n_layers - 1) ? cnn->batch_grad_buf : cnn->layers[i+1].batch_grad_input;
+        
+        clSetKernelArg(cnn->k_batch_backward, 0, sizeof(cl_mem), &grad_source);
+        clSetKernelArg(cnn->k_batch_backward, 1, sizeof(cl_mem), &l->batch_output);
+        clSetKernelArg(cnn->k_batch_backward, 2, sizeof(cl_mem), &l->weights);
+        clSetKernelArg(cnn->k_batch_backward, 3, sizeof(cl_mem), &l->batch_grad_input);
+        clSetKernelArg(cnn->k_batch_backward, 4, sizeof(int), &batch_size);
+        clSetKernelArg(cnn->k_batch_backward, 5, sizeof(int), &l->cin4);
+        clSetKernelArg(cnn->k_batch_backward, 6, sizeof(int), &l->cout);
+        clSetKernelArg(cnn->k_batch_backward, 7, sizeof(int), &l->h);
+        clSetKernelArg(cnn->k_batch_backward, 8, sizeof(int), &l->w);
+        clSetKernelArg(cnn->k_batch_backward, 9, sizeof(int), &l->use_relu);
+        
+        /* Flatten batch and cin4 into 3rd dimension for OpenCL 1.2 compatibility */
+        size_t back_global[3] = {l->w, l->h, l->cin4 * batch_size};
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_backward, 3, NULL, back_global, NULL, 0, NULL, NULL);
+        
+        /* Weight gradients - accumulated across batch */
+        clSetKernelArg(cnn->k_batch_weight_grad, 0, sizeof(cl_mem), &layer_input);
+        clSetKernelArg(cnn->k_batch_weight_grad, 1, sizeof(cl_mem), &grad_source);
+        clSetKernelArg(cnn->k_batch_weight_grad, 2, sizeof(cl_mem), &l->batch_output);
+        clSetKernelArg(cnn->k_batch_weight_grad, 3, sizeof(cl_mem), &l->grad_weights);
+        clSetKernelArg(cnn->k_batch_weight_grad, 4, sizeof(cl_mem), &l->grad_bias);
+        clSetKernelArg(cnn->k_batch_weight_grad, 5, sizeof(int), &batch_size);
+        clSetKernelArg(cnn->k_batch_weight_grad, 6, sizeof(int), &l->cin4);
+        clSetKernelArg(cnn->k_batch_weight_grad, 7, sizeof(int), &l->cout);
+        clSetKernelArg(cnn->k_batch_weight_grad, 8, sizeof(int), &l->h);
+        clSetKernelArg(cnn->k_batch_weight_grad, 9, sizeof(int), &l->w);
+        clSetKernelArg(cnn->k_batch_weight_grad, 10, sizeof(int), &l->use_relu);
+        
+        size_t wgrad_global[3] = {l->cout, l->cin4, 9};
+        clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_weight_grad, 3, NULL, wgrad_global, NULL, 0, NULL, NULL);
+    }
+    
+    clock_gettime(CLOCK_MONOTONIC, &t_update_start);
+    
+    /* Weight updates - same as single-image */
+    cnn->adam_t++;
+    for (int i = 0; i < cnn->n_layers; i++) {
+        ConvLayer *l = &cnn->layers[i];
+        int w_size = l->cout * l->cin4 * 9;
+        
+        if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+            clSetKernelArg(cnn->k_adam_update, 0, sizeof(cl_mem), &l->weights);
+            clSetKernelArg(cnn->k_adam_update, 1, sizeof(cl_mem), &l->bias);
+            clSetKernelArg(cnn->k_adam_update, 2, sizeof(cl_mem), &l->grad_weights);
+            clSetKernelArg(cnn->k_adam_update, 3, sizeof(cl_mem), &l->grad_bias);
+            clSetKernelArg(cnn->k_adam_update, 4, sizeof(cl_mem), &l->adam_m_w);
+            clSetKernelArg(cnn->k_adam_update, 5, sizeof(cl_mem), &l->adam_m_b);
+            clSetKernelArg(cnn->k_adam_update, 6, sizeof(cl_mem), &l->adam_v_w);
+            clSetKernelArg(cnn->k_adam_update, 7, sizeof(cl_mem), &l->adam_v_b);
+            clSetKernelArg(cnn->k_adam_update, 8, sizeof(float), &cnn->config.learning_rate);
+            clSetKernelArg(cnn->k_adam_update, 9, sizeof(float), &cnn->config.adam_beta1);
+            clSetKernelArg(cnn->k_adam_update, 10, sizeof(float), &cnn->config.adam_beta2);
+            clSetKernelArg(cnn->k_adam_update, 11, sizeof(float), &cnn->config.adam_epsilon);
+            clSetKernelArg(cnn->k_adam_update, 12, sizeof(int), &cnn->adam_t);
+            clSetKernelArg(cnn->k_adam_update, 13, sizeof(int), &w_size);
+            clSetKernelArg(cnn->k_adam_update, 14, sizeof(int), &l->cout);
+            
+            size_t update_global = ((w_size > l->cout ? w_size : l->cout) + 255) / 256 * 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_adam_update, 1, NULL, &update_global, NULL, 0, NULL, NULL);
+        } else {
+            clSetKernelArg(cnn->k_sgd_update, 0, sizeof(cl_mem), &l->weights);
+            clSetKernelArg(cnn->k_sgd_update, 1, sizeof(cl_mem), &l->bias);
+            clSetKernelArg(cnn->k_sgd_update, 2, sizeof(cl_mem), &l->grad_weights);
+            clSetKernelArg(cnn->k_sgd_update, 3, sizeof(cl_mem), &l->grad_bias);
+            clSetKernelArg(cnn->k_sgd_update, 4, sizeof(float), &cnn->config.learning_rate);
+            clSetKernelArg(cnn->k_sgd_update, 5, sizeof(int), &w_size);
+            clSetKernelArg(cnn->k_sgd_update, 6, sizeof(int), &l->cout);
+            
+            size_t update_global = ((w_size > l->cout ? w_size : l->cout) + 255) / 256 * 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_sgd_update, 1, NULL, &update_global, NULL, 0, NULL, NULL);
+        }
+    }
+    
+    clFinish(cnn->queue);
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    
+    /* Record timing stats */
+    if (cnn->config.use_profiling) {
+        cnn->stats.forward_time_ms = (t_loss_start.tv_sec - t_start.tv_sec) * 1000.0 + 
+                                             (t_loss_start.tv_nsec - t_start.tv_nsec) / 1000000.0;
+        cnn->stats.loss_time_ms = (t_backward_start.tv_sec - t_loss_start.tv_sec) * 1000.0 + 
+                                          (t_backward_start.tv_nsec - t_loss_start.tv_nsec) / 1000000.0;
+        cnn->stats.backward_time_ms = (t_update_start.tv_sec - t_backward_start.tv_sec) * 1000.0 + 
+                                              (t_update_start.tv_nsec - t_backward_start.tv_nsec) / 1000000.0;
+        cnn->stats.update_time_ms = (t_end.tv_sec - t_update_start.tv_sec) * 1000.0 + 
+                                            (t_end.tv_nsec - t_update_start.tv_nsec) / 1000000.0;
+        cnn->stats.total_time_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0 + 
+                                           (t_end.tv_nsec - t_start.tv_nsec) / 1000000.0;
+    }
+    
+    return avg_loss;
+}
+
 float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, int batch_size) {
     if (!cnn->finalized) return -1.0f;
     
+    /* Dispatch to batch training if batch_size > 1 and batch kernels available */
+    if (batch_size > 1 && cnn->batch_kernels_available) {
+        if (batch_size > cnn->config.max_batch_size) {
+            fprintf(stderr, "Error: batch_size %d exceeds max_batch_size %d\n", 
+                batch_size, cnn->config.max_batch_size);
+            return -1.0f;
+        }
+        return cnn_train_step_batch(cnn, noisy_input, clean_target, batch_size);
+    }
+    
+    /* Single-image training path (original implementation) */
     struct timespec t_start, t_end, t_forward_start, t_backward_start, t_loss_start, t_update_start;
     clock_gettime(CLOCK_MONOTONIC, &t_start);
     
@@ -1668,6 +2158,19 @@ void cnn_get_output(CNNDenoiser* cnn, float* output) {
         clEnqueueReadBuffer(cnn->queue, last_layer->output, CL_TRUE, 0, 
                            input_size * sizeof(float), output, 0, NULL, NULL);
     }
+}
+
+/* Get batch output for first image in batch (for debugging batch training) */
+void cnn_get_batch_output(CNNDenoiser* cnn, float* output, int batch_index) {
+    if (!cnn || !cnn->finalized || batch_index < 0 || batch_index >= cnn->config.max_batch_size) return;
+    
+    int input_size = cnn->config.input_height * cnn->config.input_width * cnn->config.input_channels;
+    ConvLayer *last_layer = &cnn->layers[cnn->n_layers - 1];
+    
+    /* Read from batch_output buffer */
+    size_t offset = batch_index * input_size * sizeof(float);
+    clEnqueueReadBuffer(cnn->queue, last_layer->batch_output, CL_TRUE, offset,
+                       input_size * sizeof(float), output, 0, NULL, NULL);
 }
 
 int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, int batch_size) {

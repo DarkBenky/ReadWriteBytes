@@ -32,6 +32,9 @@ check_predictions: check_predictions.c cnn_denoise.c cnn_denoise.h
 debug_residual: debug_residual.c cnn_denoise.c cnn_denoise.h
 	$(CC) $(CFLAGS) -o debug_residual debug_residual.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
 
+debug_loss: debug_loss.c cnn_denoise.c cnn_denoise.h
+	$(CC) $(CFLAGS) -o debug_loss debug_loss.c cnn_denoise.c $(LDFLAGS) $(OPENCL_LIBS)
+
 # Library (optional)
 libcnn_denoise.a: cnn_denoise.o
 	ar rcs libcnn_denoise.a cnn_denoise.o

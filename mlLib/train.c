@@ -1,15 +1,17 @@
 #include "cnn_denoise.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #define MAX_STEPS 100000
-#define LOG_EVERY_N_STEPS 512
+#define LOG_EVERY_N_STEPS 100
 #define LOG_STEP 10
 
 
 int main() {
     CNNConfig cfg = cnn_default_config(WIDTH, HEIGHT, 4);
     
+    cfg.max_batch_size = 32;
     cfg.optimizer = OPTIMIZER_ADAM;
     cfg.learning_rate = 0.0001f;  /* Higher LR for residual mode to escape zero-output trap */
     cfg.use_profiling = 1;
@@ -18,14 +20,16 @@ int main() {
     cfg.adam_beta2 = 0.999f;
     cfg.adam_epsilon = 1e-8f;
     
-    cfg.loss_config.num_losses = 3;
+    cfg.loss_config.num_losses = 4;  /* Test with MAE only first */
     cfg.loss_config.types[0] = LOSS_MAE;
-    cfg.loss_config.weights[0] = 1.55f;
+    cfg.loss_config.weights[0] = 1.0f;    
     cfg.loss_config.types[1] = LOSS_MSE;
-    cfg.loss_config.weights[1] = 1.05f;
+    cfg.loss_config.weights[1] = 0.50f;
     cfg.loss_config.types[2] = LOSS_COLOR_VARIANCE;
-    cfg.loss_config.weights[2] = 0.20f;
-    
+    cfg.loss_config.weights[2] = 0.10f;
+    cfg.loss_config.types[3] = LOSS_LAPLACE;
+    cfg.loss_config.weights[3] = 0.10f;
+
     cfg.residual_mode = 0;
 
     LearningRateDecay lr_decay;
@@ -55,6 +59,14 @@ int main() {
     /* Buffers for converting interleaved input to planar format for GPU */
     float *input_planar = malloc(IMAGE_SIZE * sizeof(float));
     float *target_planar = malloc(IMAGE_SIZE * sizeof(float));
+    
+    /* Batch training buffers - contiguous memory layout */
+    const int BATCH_SIZE = 16;
+    float *batch_input = malloc(BATCH_SIZE * IMAGE_SIZE * sizeof(float));
+    float *batch_target = malloc(BATCH_SIZE * IMAGE_SIZE * sizeof(float));
+    
+    /* Save first sample in each batch for visualization */
+    ImageSample *display_sample = malloc(sizeof(ImageSample));
     
     printf("\nWarming up GPU (5 iterations)...\n");
     for (int i = 0; i < 5; i++) {
@@ -94,24 +106,33 @@ int main() {
     int timing_samples = 0;
     float accumulated_loss = 0.0f;
     float best_loss = 1e10f;
-    float mae_loss = 0.0f, mse_loss = 0.0f, laplace_loss = 0.0f, color_loss = 0.0f;
-    float best_mae = 1e10f, best_mse = 1e10f, best_laplace = 1e10f, best_color = 1e10f;
+    
     for (int step = 0; step < MAX_STEPS; step++) {
-        getNextImagePair(loader, sample);
-        
-        /* Convert input from interleaved to planar format */
-        interleavedToPlanar(sample->lowRes, input_planar, WIDTH, HEIGHT, 4);
-        
-        if (cfg.residual_mode) {
-            for (int i = 0; i < IMAGE_SIZE; i++) {
-                noise_target[i] = sample->lowRes[i] - sample->highRes[i];
+        /* Load batch of images */
+        for (int b = 0; b < BATCH_SIZE; b++) {
+            getNextImagePair(loader, sample);
+            
+            /* Save first sample for display */
+            if (b == 0) {
+                memcpy(display_sample, sample, sizeof(ImageSample));
             }
-            interleavedToPlanar(noise_target, target_planar, WIDTH, HEIGHT, 4);
-        } else {
-            interleavedToPlanar(sample->highRes, target_planar, WIDTH, HEIGHT, 4);
+            
+            /* Convert input from interleaved to planar format */
+            /* Each image in batch is at offset b * IMAGE_SIZE */
+            interleavedToPlanar(sample->lowRes, &batch_input[b * IMAGE_SIZE], WIDTH, HEIGHT, 4);
+            
+            if (cfg.residual_mode) {
+                for (int i = 0; i < IMAGE_SIZE; i++) {
+                    noise_target[i] = sample->lowRes[i] - sample->highRes[i];
+                }
+                interleavedToPlanar(noise_target, &batch_target[b * IMAGE_SIZE], WIDTH, HEIGHT, 4);
+            } else {
+                interleavedToPlanar(sample->highRes, &batch_target[b * IMAGE_SIZE], WIDTH, HEIGHT, 4);
+            }
         }
         
-        accumulated_loss += cnn_train_step(cnn, input_planar, target_planar, 1);
+        /* Train on batch */
+        accumulated_loss += cnn_train_step(cnn, batch_input, batch_target, BATCH_SIZE);
         
         TimingStats stats;
         cnn_get_timing_stats(cnn, &stats);
@@ -123,34 +144,99 @@ int main() {
         timing_samples++;
 
         if (step % LOG_STEP == 0) {
-            printf("Step %d: Forward %.2f ms, Backward %.2f ms, Loss %.2f ms, Update %.2f ms, Total %.2f ms\n",
+            printf("Step %d (Batch %d): Forward %.2f ms, Backward %.2f ms, Loss %.2f ms, Update %.2f ms, Total %.2f ms\n",
+                   step * BATCH_SIZE,
                    step,
                    stats.forward_time_ms,
                    stats.backward_time_ms,
                    stats.loss_time_ms,
                    stats.update_time_ms,
                    stats.total_time_ms);
-            printf("Current Loss: %.6f\n", accumulated_loss / (step + 1));
-            cnn_get_individual_losses(cnn, &mae_loss, &mse_loss, &laplace_loss, &color_loss);
+            printf("Current Loss: %.6f (%.2f img/s)\n", 
+                   accumulated_loss / (step + 1), 
+                   BATCH_SIZE * 1000.0 / stats.total_time_ms);
         }
         
         if (step % LOG_EVERY_N_STEPS == 0 && step > 0) {
-            float avg_loss = accumulated_loss / LOG_EVERY_N_STEPS;
-            printf("   Step %3d: Loss = %.6f, LR = %.6f, Time = %.2f ms\n, Step/s %.2f", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, 1000.0 / stats.total_time_ms);
+            /* Get individual losses only when we're about to log them */
+            float current_mae, current_mse, current_laplace, current_color;
+            cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color);
             
-            if (accumulated_loss < best_loss) {
-                best_loss = accumulated_loss;
-                printf("\n New best loss! \n");
+            float avg_loss = accumulated_loss / LOG_EVERY_N_STEPS;
+            printf("\n=== Batch %3d (Images %d) ===\n", 
+                   step, step * BATCH_SIZE);
+            printf("   Avg Loss: %.6f, LR: %.6f, Time: %.2f ms/batch, Throughput: %.1f img/s\n", 
+                   avg_loss, cnn_get_learning_rate(cnn), 
+                   stats.total_time_ms, 
+                   BATCH_SIZE * 1000.0 / stats.total_time_ms);
+            
+            /* DEBUG: Check input/target values for first image in last batch */
+            float input_min = 1e9, input_max = -1e9, target_min = 1e9, target_max = -1e9;
+            for (int i = 0; i < IMAGE_SIZE; i++) {
+                if (batch_input[i] < input_min) input_min = batch_input[i];
+                if (batch_input[i] > input_max) input_max = batch_input[i];
+                if (batch_target[i] < target_min) target_min = batch_target[i];
+                if (batch_target[i] > target_max) target_max = batch_target[i];
+            }
+            printf("[DEBUG] Input (noisy) range: [%.6f, %.6f]\n", input_min, input_max);
+            printf("[DEBUG] Target (clean) range: [%.6f, %.6f]\n", target_min, target_max);
+            
+            /* Display current individual loss values (not averaged) */
+            printf("   Individual losses: MAE=%.4f MSE=%.4f Laplace=%.4f Color=%.4f\n", 
+                   current_mae, current_mse, current_laplace, current_color);
+            
+            if (avg_loss < best_loss) {
+                best_loss = avg_loss;
+                printf("   *** New best loss! Saving weights... ***\n");
                 cnn_save_weights(cnn, "cnn_weights_best.bin");
             }
             
-            printf("   Individual losses: MAE=%.4f MSE=%.4f Color=%.4f\n", mae_loss / (LOG_EVERY_N_STEPS / LOG_STEP), mse_loss / (LOG_EVERY_N_STEPS / LOG_STEP), color_loss / (LOG_EVERY_N_STEPS / LOG_STEP));
-            
-            send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, mae_loss, mse_loss, color_loss);
+            send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, current_mae, current_mse, current_color);
             accumulated_loss = 0.0f;
             
-            cnn_get_output(cnn, prediction);
+            /* Get output from first image in batch (batch training stores outputs in batch_output buffer) */
+            cnn_get_batch_output(cnn, prediction, 0);
+            
+            /* DEBUG: Check prediction values (planar format) */
+            float pred_min = 1e9, pred_max = -1e9;
+            float pred_sum_r = 0, pred_sum_g = 0, pred_sum_b = 0, pred_sum_l = 0;
+            for (int i = 0; i < WIDTH * HEIGHT; i++) {
+                float r = prediction[i];
+                float g = prediction[WIDTH * HEIGHT + i];
+                float b = prediction[2 * WIDTH * HEIGHT + i];
+                float l = prediction[3 * WIDTH * HEIGHT + i];
+                
+                if (r < pred_min) pred_min = r;
+                if (r > pred_max) pred_max = r;
+                if (g < pred_min) pred_min = g;
+                if (g > pred_max) pred_max = g;
+                if (b < pred_min) pred_min = b;
+                if (b > pred_max) pred_max = b;
+                
+                pred_sum_r += r;
+                pred_sum_g += g;
+                pred_sum_b += b;
+                pred_sum_l += l;
+            }
+            int num_pixels = WIDTH * HEIGHT;
+            printf("[DEBUG] Prediction stats (planar): min=%.6f max=%.6f\n", pred_min, pred_max);
+            printf("  Avg: R=%.6f G=%.6f B=%.6f L=%.6f\n", 
+                   pred_sum_r/num_pixels, pred_sum_g/num_pixels, pred_sum_b/num_pixels, pred_sum_l/num_pixels);
+            printf("  First pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
+                   prediction[0], prediction[WIDTH*HEIGHT], prediction[2*WIDTH*HEIGHT], prediction[3*WIDTH*HEIGHT]);
+            
             planarToInterleaved(prediction, prediction_interleaved, WIDTH, HEIGHT, 4);
+            
+            /* DEBUG: Check after interleave */
+            printf("[DEBUG] After interleave: first pixel RGBL = %.6f %.6f %.6f %.6f\n",
+                   prediction_interleaved[0], prediction_interleaved[1], 
+                   prediction_interleaved[2], prediction_interleaved[3]);
+            
+            /* DEBUG: Check input sample too */
+            printf("[DEBUG] Input (noisy) first pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
+                   display_sample->lowRes[0], display_sample->lowRes[1], display_sample->lowRes[2], display_sample->lowRes[3]);
+            printf("[DEBUG] Target (clean) first pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
+                   display_sample->highRes[0], display_sample->highRes[1], display_sample->highRes[2], display_sample->highRes[3]);
             
             size_t base64_size = ((WIDTH * HEIGHT * 3 + 2) / 3) * 4 + 1;
             size_t rgb_size = WIDTH * HEIGHT * 3;
@@ -163,9 +249,37 @@ int main() {
             unsigned char *noisy_rgb = malloc(rgb_size);
             unsigned char *pred_rgb = malloc(rgb_size);
             
-            imageToBase64_noalloc(sample->highRes, WIDTH, HEIGHT, clean_rgb, clean_b64);
-            imageToBase64_noalloc(sample->lowRes, WIDTH, HEIGHT, noisy_rgb, noisy_b64);
+            imageToBase64_noalloc(display_sample->highRes, WIDTH, HEIGHT, clean_rgb, clean_b64);
+            imageToBase64_noalloc(display_sample->lowRes, WIDTH, HEIGHT, noisy_rgb, noisy_b64);
             imageToBase64_noalloc(prediction_interleaved, WIDTH, HEIGHT, pred_rgb, pred_b64);
+            
+            /* DEBUG: Check RGB conversion */
+            printf("[DEBUG] RGB conversion - first 10 bytes of pred_rgb: ");
+            for (int i = 0; i < 10; i++) printf("%d ", pred_rgb[i]);
+            printf("\n");
+            
+            /* Check if all bytes are zero */
+            int nonzero_count = 0;
+            for (int i = 0; i < rgb_size; i++) {
+                if (pred_rgb[i] != 0) nonzero_count++;
+            }
+            printf("[DEBUG] pred_rgb has %d/%zu non-zero bytes (%.1f%%)\n", 
+                   nonzero_count, rgb_size, 100.0 * nonzero_count / rgb_size);
+            
+            /* TEMPORARY: Scale prediction for visualization if values are too small */
+            float scale_factor = 1.0f;
+            if (pred_max < 0.1f && pred_max > 0.0f) {
+                scale_factor = 0.5f / pred_max;  /* Scale max to 0.5 */
+                printf("[VISUALIZATION] Scaling prediction by %.1fx for visibility (max=%.6f)\n", 
+                       scale_factor, pred_max);
+                
+                for (int i = 0; i < IMAGE_SIZE; i++) {
+                    prediction_interleaved[i] = fminf(prediction_interleaved[i] * scale_factor, 1.0f);
+                }
+                
+                /* Re-convert to RGB with scaling */
+                imageToBase64_noalloc(prediction_interleaved, WIDTH, HEIGHT, pred_rgb, pred_b64);
+            }
             
             send_images_to_python("http://127.0.0.1:5000/submitImage", noisy_b64, clean_b64, pred_b64, step);
             
@@ -181,15 +295,22 @@ int main() {
         cnn_set_learning_rate(cnn, new_lr);
     }
 
-    printf("\n=== Training Performance (Averaged over %d iterations) ===\n", timing_samples);
+    printf("\n=== Training Performance (Averaged over %d batches) ===\n", timing_samples);
     printf("Forward time:  %.3f ms (avg)\n", cumulative_stats.forward_time_ms / timing_samples);
     printf("Backward time: %.3f ms (avg)\n", cumulative_stats.backward_time_ms / timing_samples);
     printf("Loss time:     %.3f ms (avg)\n", cumulative_stats.loss_time_ms / timing_samples);
     printf("Update time:   %.3f ms (avg)\n", cumulative_stats.update_time_ms / timing_samples);
     printf("Total time:    %.3f ms (avg)\n", cumulative_stats.total_time_ms / timing_samples);
-    printf("Throughput:    %.2f images/sec\n", 1000.0 / (cumulative_stats.total_time_ms / timing_samples));
+    printf("Throughput:    %.2f images/sec (batch_size=%d)\n", 
+           BATCH_SIZE * 1000.0 / (cumulative_stats.total_time_ms / timing_samples), BATCH_SIZE);
     
     printf("\nSaving weights...\n");
+    
+    /* Cleanup batch buffers */
+    free(batch_input);
+    free(batch_target);
+    free(display_sample);
+    
     free(noise_target);
     free(prediction_interleaved);
     free(input_planar);

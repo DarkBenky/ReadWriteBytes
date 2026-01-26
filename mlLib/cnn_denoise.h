@@ -59,6 +59,7 @@ typedef struct {
     float adam_beta1;        /* Adam: momentum decay (default 0.9) */
     float adam_beta2;        /* Adam: RMSprop decay (default 0.999) */
     float adam_epsilon;      /* Adam: numerical stability (default 1e-8) */
+    int max_batch_size;      /* Maximum batch size (default 1, set at network creation) */
 } CNNConfig;
 
 typedef struct learning_rate_decay {
@@ -125,6 +126,7 @@ float cnn_get_learning_rate(CNNDenoiser* cnn);
 
 /* Get last forward pass output (after train step or denoise call) */
 void cnn_get_output(CNNDenoiser* cnn, float* output);
+void cnn_get_batch_output(CNNDenoiser* cnn, float* output, int batch_index);
 
 /* Inference */
 int cnn_denoise(CNNDenoiser* cnn,
