@@ -34,7 +34,8 @@ typedef enum {
     LOSS_MAE = 0,
     LOSS_MSE = 1,
     LOSS_LAPLACE = 2,
-    LOSS_COLOR_VARIANCE = 3
+    LOSS_COLOR_VARIANCE = 3,
+    LOSS_SSIM = 4
 } LossType;
 
 /* Loss configuration with multiple losses and weights */
@@ -256,7 +257,9 @@ void send_metadata_to_python(
     float timeTookms,
     float mae_loss,
     float mse_loss,
-    float color_loss
+    float color_loss,
+    float laplacian_loss,
+    float ssim_loss
 );
 
 /* Get individual losses from last training step */
@@ -265,7 +268,8 @@ void cnn_get_individual_losses(
     float *mae_loss,
     float *mse_loss,
     float *laplace_loss,
-    float *color_loss
+    float *color_loss,
+    float *ssim_loss
 );
 
 #ifdef __cplusplus

@@ -2664,6 +2664,203 @@ __kernel void compositeBuffers(
     vstore3(finalNormal, 0, &OutputNormals[colorIdx]);
 }
 
+// function to convert model data to triangle buffers useful for ray tracing
+// ray tracer kernel <= static data like map and dynamic data like missiles
+__kernel void convertModelToTriangles(
+    __global const float* model_v1,
+    __global const float* model_v2,
+    __global const float* model_v3,
+    __global const float* model_normals,
+    __global const float* model_colors,
+    __global const float* model_roughness,
+    __global const float* model_metallic,
+    __global const float* model_emission,
+    const int model_triangle_count,
+    const int offset_triangle_idx,
+    const int output_triangle_max_count,
+
+    // Output buffers
+    __global float* out_v1,
+    __global float* out_v2,
+    __global float* out_v3,
+    __global float* out_normals,
+    __global float* out_colors,
+    __global float* out_roughness,
+    __global float* out_metallic,
+    __global float* out_emission,
+    __global float* out_bbox_min,
+    __global float* out_bbox_max
+) {
+    int triangleId = get_global_id(0);
+    if (triangleId >= model_triangle_count) return;
+    if (triangleId < offset_triangle_idx) return;
+    int output_idx = triangleId - offset_triangle_idx;
+    if (output_idx >= output_triangle_max_count) return;
+
+    int idx = triangleId * 3;
+    
+    // Copy triangle vertices
+    out_v1[output_idx * 3 + 0] = model_v1[idx + 0];
+    out_v1[output_idx * 3 + 1] = model_v1[idx + 1];
+    out_v1[output_idx * 3 + 2] = model_v1[idx + 2];
+
+    out_v2[output_idx * 3 + 0] = model_v2[idx + 0];
+    out_v2[output_idx * 3 + 1] = model_v2[idx + 1];
+    out_v2[output_idx * 3 + 2] = model_v2[idx + 2];
+
+    out_v3[output_idx * 3 + 0] = model_v3[idx + 0];
+    out_v3[output_idx * 3 + 1] = model_v3[idx + 1];
+    out_v3[output_idx * 3 + 2] = model_v3[idx + 2];
+
+    // Copy normals
+    out_normals[output_idx * 3 + 0] = model_normals[idx + 0];
+    out_normals[output_idx * 3 + 1] = model_normals[idx + 1];
+    out_normals[output_idx * 3 + 2] = model_normals[idx + 2];
+
+    // Copy colors
+    out_colors[output_idx * 3 + 0] = model_colors[idx + 0];
+    out_colors[output_idx * 3 + 1] = model_colors[idx + 1];
+    out_colors[output_idx * 3 + 2] = model_colors[idx + 2];
+
+    // Copy material properties
+    out_roughness[output_idx] = model_roughness[triangleId];
+    out_metallic[output_idx] = model_metallic[triangleId];
+    out_emission[output_idx] = model_emission[triangleId];
+
+    // Update bounding box - unsafe
+    float3 v1 = (float3)(model_v1[idx + 0], model_v1[idx + 1], model_v1[idx + 2]);
+    float3 v2 = (float3)(model_v2[idx + 0], model_v2[idx + 1], model_v2[idx + 2]);
+    float3 v3 = (float3)(model_v3[idx + 0], model_v3[idx + 1], model_v3[idx + 2]);
+    
+    // Find min/max for this triangle
+    float3 tri_min = fmin(fmin(v1, v2), v3);
+    float3 tri_max = fmax(fmax(v1, v2), v3);
+    
+    // Direct writes - race conditions possible but much faster
+    for (int i = 0; i < 3; i++) {
+        if (tri_min[i] < out_bbox_min[i]) {
+            out_bbox_min[i] = tri_min[i];
+        }
+        if (tri_max[i] > out_bbox_max[i]) {
+            out_bbox_max[i] = tri_max[i];
+        }
+    }
+}
+
+__kernel void initializeBoundingBox(
+    __global float* out_bbox_min,
+    __global float* out_bbox_max
+) {
+    if (get_global_id(0) == 0) {
+        out_bbox_min[0] = INFINITY;
+        out_bbox_min[1] = INFINITY;
+        out_bbox_min[2] = INFINITY;
+        out_bbox_max[0] = -INFINITY;
+        out_bbox_max[1] = -INFINITY;
+        out_bbox_max[2] = -INFINITY;
+    }
+}
+
+inline void loadTriangleFromBuffers(
+    int triangle_idx,
+    __global const float* v1_buffer,
+    __global const float* v2_buffer,
+    __global const float* v3_buffer,
+    __global const float* normals_buffer,
+    __global const float* colors_buffer,
+    __global const float* roughness_buffer,
+    __global const float* metallic_buffer,
+    __global const float* emission_buffer,
+    float3* out_v1,
+    float3* out_v2,
+    float3* out_v3,
+    float3* out_normal,
+    float3* out_color,
+    float* out_roughness,
+    float* out_metallic,
+    float* out_emission
+) {
+    int idx = triangle_idx * 3;
+    
+    // Load vertices
+    *out_v1 = (float3)(v1_buffer[idx], v1_buffer[idx + 1], v1_buffer[idx + 2]);
+    *out_v2 = (float3)(v2_buffer[idx], v2_buffer[idx + 1], v2_buffer[idx + 2]);
+    *out_v3 = (float3)(v3_buffer[idx], v3_buffer[idx + 1], v3_buffer[idx + 2]);
+    
+    // Load normal
+    *out_normal = (float3)(normals_buffer[idx], normals_buffer[idx + 1], normals_buffer[idx + 2]);
+    
+    // Load color
+    *out_color = (float3)(colors_buffer[idx], colors_buffer[idx + 1], colors_buffer[idx + 2]);
+    
+    // Load material properties
+    *out_roughness = roughness_buffer[triangle_idx];
+    *out_metallic = metallic_buffer[triangle_idx];
+    *out_emission = emission_buffer[triangle_idx];
+}
+
+// =============================================================================
+// EXAMPLE: How to use the helper function in your ray tracing kernel
+// =============================================================================
+
+// __kernel void exampleRayTraceWithLoadedData(
+//     __global const float* v1_buffer,
+//     __global const float* v2_buffer,
+//     __global const float* v3_buffer,
+//     __global const float* normals_buffer,
+//     __global const float* colors_buffer,
+//     __global const float* roughness_buffer,
+//     __global const float* metallic_buffer,
+//     __global const float* emission_buffer,
+//     const int triangle_count,
+//     const float3 ray_origin,
+//     const float3 ray_direction,
+//     __global float* hit_distances
+// ) {
+//     int triangle_idx = get_global_id(0);
+//     if (triangle_idx >= triangle_count) return;
+    
+//     // Use the helper function to load triangle data
+//     float3 v1, v2, v3, normal, color;
+//     float roughness, metallic, emission;
+    
+//     loadTriangleFromBuffers(
+//         triangle_idx,
+//         v1_buffer, v2_buffer, v3_buffer,
+//         normals_buffer, colors_buffer,
+//         roughness_buffer, metallic_buffer, emission_buffer,
+//         &v1, &v2, &v3, &normal, &color,
+//         &roughness, &metallic, &emission
+//     );
+    
+//     // Now use the loaded data for ray tracing
+//     // Example: Moller-Trumbore ray-triangle intersection
+//     float3 edge1 = v2 - v1;
+//     float3 edge2 = v3 - v1;
+//     float3 h = cross(ray_direction, edge2);
+//     float a = dot(edge1, h);
+    
+//     if (fabs(a) < 0.00001f) return;
+    
+//     float f = 1.0f / a;
+//     float3 s = ray_origin - v1;
+//     float u = f * dot(s, h);
+    
+//     if (u < 0.0f || u > 1.0f) return;
+    
+//     float3 q = cross(s, edge1);
+//     float v = f * dot(ray_direction, q);
+    
+//     if (v < 0.0f || u + v > 1.0f) return;
+    
+//     float t = f * dot(edge2, q);
+    
+//     if (t > 0.00001f) {
+//         hit_distances[triangle_idx] = t;
+//         // You can also use: normal, color, roughness, metallic, emission
+//     }
+// }
+
 __kernel void renderMissile(
     // Missile model data
     __global const float* model_v1,

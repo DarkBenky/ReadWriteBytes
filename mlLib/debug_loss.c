@@ -4,8 +4,8 @@
 #include <string.h>
 #include <math.h>
 
-#define TEST_WIDTH 800
-#define TEST_HEIGHT 600
+#define TEST_WIDTH 16
+#define TEST_HEIGHT 16
 #define TEST_CHANNELS 4
 #define TEST_IMAGE_SIZE (TEST_WIDTH * TEST_HEIGHT * TEST_CHANNELS)
 
@@ -17,9 +17,18 @@ int main() {
     cfg.optimizer = OPTIMIZER_ADAM;
     cfg.learning_rate = 0.0001f;
     
-    cfg.loss_config.num_losses = 1;
+    /* Test all loss types */
+    cfg.loss_config.num_losses = 5;
     cfg.loss_config.types[0] = LOSS_MAE;
     cfg.loss_config.weights[0] = 1.0f;
+    cfg.loss_config.types[1] = LOSS_MSE;
+    cfg.loss_config.weights[1] = 0.5f;
+    cfg.loss_config.types[2] = LOSS_LAPLACE;
+    cfg.loss_config.weights[2] = 0.1f;
+    cfg.loss_config.types[3] = LOSS_COLOR_VARIANCE;
+    cfg.loss_config.weights[3] = 0.05f;
+    cfg.loss_config.types[4] = LOSS_SSIM;
+    cfg.loss_config.weights[4] = 0.2f;
     
     CNNDenoiser* cnn = cnn_create(cfg);
     
@@ -95,18 +104,19 @@ int main() {
     for (int i = 0; i < 1000; i++) avg_step1 += output[i];
     avg_step1 /= 1000.0f;
     printf("  Actual average of first 1000: %.6f\n", avg_step1);
-    free(output);
+    /* Keep output for later comparison - don't free yet */
     
     printf("\n=== Results ===\n");
     printf("Returned loss: %.10f\n", loss);
     
-    float mae, mse, laplace, color;
-    cnn_get_individual_losses(cnn, &mae, &mse, &laplace, &color);
+    float mae, mse, laplace, color, ssim;
+    cnn_get_individual_losses(cnn, &mae, &mse, &laplace, &color, &ssim);
     printf("Individual losses:\n");
     printf("  MAE: %.10f\n", mae);
     printf("  MSE: %.10f\n", mse);
     printf("  Laplace: %.10f\n", laplace);
     printf("  Color: %.10f\n", color);
+    printf("  SSIM: %.10f\n", ssim);
     
     /* Check if loss is reasonable */
     float expected_mae = 0.1f;  /* |0.5 - 0.6| */
@@ -123,7 +133,7 @@ int main() {
     
     printf("\n=== Training Step 2 ===\n");
     loss = cnn_train_step(cnn, batch_input, batch_target, cfg.max_batch_size);
-    cnn_get_individual_losses(cnn, &mae, &mse, &laplace, &color);
+    cnn_get_individual_losses(cnn, &mae, &mse, &laplace, &color, &ssim);
     printf("Loss after 2nd step: %.10f\n", loss);
     printf("MAE after 2nd step: %.10f\n", mae);
     
@@ -148,6 +158,7 @@ int main() {
     printf("Average of first 1000 pixels: %.6f\n", avg_step2);
     printf("Change in average from step 1: %.6f\n", avg_step2 - avg_step1);
     
+    free(output);  /* Free output from step 1 */
     free(output_step2);
     
     if (fabs(loss) > 1e10f) {
@@ -157,6 +168,8 @@ int main() {
     free(batch_input);
     free(batch_target);
     cnn_destroy(cnn);
+    
+    printf("\n=== Test completed successfully! ===\n");
     
     return 0;
 }

@@ -521,3 +521,82 @@ __kernel void batch_color_variance_loss(
     /* Zero gradient for luminance channel */
     grad_out[batch_offset + 3 * pixels + pixel_idx] = 0.0f;
 }
+
+/* Batch SSIM Loss - Structural Similarity Index Measure
+ * Computes SSIM in 7x7 windows, simplified gradient approximation
+ * Only processes RGB channels (0,1,2), skips luminance (3)
+ */
+__kernel void batch_ssim_loss_gradient(
+    __global const float* prediction,
+    __global const float* target,
+    __global float* grad_out,
+    __global float* loss_buffer,
+    int batch_size, int H, int W)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int batch = get_global_id(2);
+    
+    if (x >= W || y >= H || batch >= batch_size) return;
+    
+    int pixels = H * W;
+    int batch_offset = batch * 4 * pixels;
+    int pixel_idx = y * W + x;
+    
+    const int window = 3;
+    const float c1 = 0.0001f;
+    const float c2 = 0.0009f;
+    
+    float total_loss = 0.0f;
+    
+    for (int c = 0; c < 3; c++) {
+        int channel_offset = batch_offset + c * pixels;
+        
+        float sum_p = 0.0f, sum_t = 0.0f;
+        float sum_pp = 0.0f, sum_tt = 0.0f, sum_pt = 0.0f;
+        int count = 0;
+        
+        for (int dy = -window; dy <= window; dy++) {
+            for (int dx = -window; dx <= window; dx++) {
+                int nx = x + dx;
+                int ny = y + dy;
+                if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+                    int idx = ny * W + nx;
+                    float p = prediction[channel_offset + idx];
+                    float t = target[channel_offset + idx];
+                    sum_p += p;
+                    sum_t += t;
+                    sum_pp += p * p;
+                    sum_tt += t * t;
+                    sum_pt += p * t;
+                    count++;
+                }
+            }
+        }
+        
+        float mean_p = sum_p / count;
+        float mean_t = sum_t / count;
+        float var_p = sum_pp / count - mean_p * mean_p;
+        float var_t = sum_tt / count - mean_t * mean_t;
+        float cov_pt = sum_pt / count - mean_p * mean_t;
+        
+        float luminance = (2.0f * mean_p * mean_t + c1) / (mean_p * mean_p + mean_t * mean_t + c1);
+        float contrast = (2.0f * sqrt(fmax(var_p, 0.0f)) * sqrt(fmax(var_t, 0.0f)) + c2) / (var_p + var_t + c2);
+        float structure = (cov_pt + c2/2.0f) / (sqrt(fmax(var_p, 0.0f)) * sqrt(fmax(var_t, 0.0f)) + c2/2.0f);
+        
+        float ssim = luminance * contrast * structure;
+        float loss = 1.0f - ssim;
+        total_loss += loss;
+        
+        float p_val = prediction[channel_offset + pixel_idx];
+        float t_val = target[channel_offset + pixel_idx];
+        float grad_scale = 2.0f * (1.0f - ssim);
+        
+        grad_out[channel_offset + pixel_idx] = grad_scale * (p_val - t_val);
+    }
+    
+    int lum_offset = batch_offset + 3 * pixels;
+    grad_out[lum_offset + pixel_idx] = 0.0f;
+    
+    loss_buffer[batch_offset + pixel_idx] = total_loss / 3.0f;
+}

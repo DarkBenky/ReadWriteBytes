@@ -178,6 +178,7 @@ def submit_loss():
     mse_loss = data.get('mse_loss', 0.0)
     color_loss = data.get('color_loss', 0.0)
     laplacian_loss = data.get('laplacian_loss', 0.0)
+    ssim_loss = data.get('ssim_loss', 0.0)
 
     wandb.log({
         "epoch": epoch,
@@ -187,7 +188,8 @@ def submit_loss():
         "mae_loss": mae_loss,
         "mse_loss": mse_loss,
         "color_loss": color_loss,
-        "laplacian_loss": laplacian_loss
+        "laplacian_loss": laplacian_loss,
+        "ssim_loss": ssim_loss
     })
     return jsonify({"status": "success"}), 200
 

@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#define MAX_STEPS 100000
-#define LOG_EVERY_N_STEPS 100
+#define MAX_STEPS 10000
+#define LOG_EVERY_N_STEPS 10
 #define LOG_STEP 10
 
 
@@ -13,23 +13,24 @@ int main() {
     
     cfg.max_batch_size = 32;
     cfg.optimizer = OPTIMIZER_ADAM;
-    cfg.learning_rate = 0.0001f;  /* Higher LR for residual mode to escape zero-output trap */
+    cfg.learning_rate = 0.0001f;
     cfg.use_profiling = 1;
 
     cfg.adam_beta1 = 0.95f;
     cfg.adam_beta2 = 0.999f;
     cfg.adam_epsilon = 1e-8f;
     
-    cfg.loss_config.num_losses = 4;  /* Test with MAE only first */
+    cfg.loss_config.num_losses = 4;
     cfg.loss_config.types[0] = LOSS_MAE;
-    cfg.loss_config.weights[0] = 1.0f;    
-    cfg.loss_config.types[1] = LOSS_MSE;
-    cfg.loss_config.weights[1] = 0.50f;
-    cfg.loss_config.types[2] = LOSS_COLOR_VARIANCE;
-    cfg.loss_config.weights[2] = 0.10f;
+    cfg.loss_config.weights[0] = 2.25f;    
+    // cfg.loss_config.types[1] = LOSS_MSE;
+    // cfg.loss_config.weights[1] = 0.75f;
+    cfg.loss_config.types[1] = LOSS_COLOR_VARIANCE;
+    cfg.loss_config.weights[1] = 0.0035f;
     cfg.loss_config.types[3] = LOSS_LAPLACE;
-    cfg.loss_config.weights[3] = 0.10f;
-
+    cfg.loss_config.weights[3] = 0.5f;
+    cfg.loss_config.types[2] = LOSS_SSIM;
+    cfg.loss_config.weights[2] = 1.25f;
     cfg.residual_mode = 0;
 
     LearningRateDecay lr_decay;
@@ -46,7 +47,15 @@ int main() {
     cnn_add_layer(cnn, (LayerConfig){16, 4, 0, -1, "output"});
     
     cnn_finalize(cnn);
-    cnn_print_architecture(cnn);      
+    cnn_print_architecture(cnn);
+    
+    /* Load pretrained baseline weights */
+    printf("\nLoading pretrained weights from model/cnn_weights_baseline.bin...\n");
+    if (cnn_load_weights(cnn, "model/cnn_weights_baseline.bin") == 0) {
+        printf("Successfully loaded pretrained weights!\n");
+    } else {
+        printf("Warning: Could not load pretrained weights, starting from scratch\n");
+    }      
 
     DataLoader *loader = malloc(sizeof(DataLoader));
     fillDataLoader(loader, "/media/user/2TB Clear/imageData");
@@ -158,9 +167,25 @@ int main() {
         }
         
         if (step % LOG_EVERY_N_STEPS == 0 && step > 0) {
-            /* Get individual losses only when we're about to log them */
-            float current_mae, current_mse, current_laplace, current_color;
-            cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color);
+            float current_mae, current_mse, current_laplace, current_color, current_ssim;
+            cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color, &current_ssim);
+            
+            /* Library returns unweighted losses, compute weighted versions for display */
+            float weight_mae = 1.0f, weight_mse = 1.0f, weight_laplace = 1.0f, weight_color = 1.0f, weight_ssim = 1.0f;
+            for (int i = 0; i < cfg.loss_config.num_losses; i++) {
+                if (cfg.loss_config.types[i] == LOSS_MAE) weight_mae = cfg.loss_config.weights[i];
+                else if (cfg.loss_config.types[i] == LOSS_MSE) weight_mse = cfg.loss_config.weights[i];
+                else if (cfg.loss_config.types[i] == LOSS_LAPLACE) weight_laplace = cfg.loss_config.weights[i];
+                else if (cfg.loss_config.types[i] == LOSS_COLOR_VARIANCE) weight_color = cfg.loss_config.weights[i];
+                else if (cfg.loss_config.types[i] == LOSS_SSIM) weight_ssim = cfg.loss_config.weights[i];
+            }
+            
+            /* Multiply by weights to get weighted contribution to total loss */
+            float weighted_mae = current_mae * weight_mae;
+            float weighted_mse = current_mse * weight_mse;
+            float weighted_laplace = current_laplace * weight_laplace;
+            float weighted_color = current_color * weight_color;
+            float weighted_ssim = current_ssim * weight_ssim;
             
             float avg_loss = accumulated_loss / LOG_EVERY_N_STEPS;
             printf("\n=== Batch %3d (Images %d) ===\n", 
@@ -181,9 +206,11 @@ int main() {
             printf("[DEBUG] Input (noisy) range: [%.6f, %.6f]\n", input_min, input_max);
             printf("[DEBUG] Target (clean) range: [%.6f, %.6f]\n", target_min, target_max);
             
-            /* Display current individual loss values (not averaged) */
-            printf("   Individual losses: MAE=%.4f MSE=%.4f Laplace=%.4f Color=%.4f\n", 
-                   current_mae, current_mse, current_laplace, current_color);
+            /* Display: unweighted (weighted contribution) */
+            printf("   Losses: MAE=%.4f(%.4f) MSE=%.4f(%.4f) Laplace=%.4f(%.4f) Color=%.4f(%.4f) SSIM=%.4f(%.4f)\n", 
+                   current_mae, weighted_mae, current_mse, weighted_mse, 
+                   current_laplace, weighted_laplace, current_color, weighted_color, 
+                   current_ssim, weighted_ssim);
             
             if (avg_loss < best_loss) {
                 best_loss = avg_loss;
@@ -191,7 +218,8 @@ int main() {
                 cnn_save_weights(cnn, "cnn_weights_best.bin");
             }
             
-            send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, current_mae, current_mse, current_color);
+            /* Send unweighted losses to Python for better visualization */
+            send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, current_mae, current_mse, current_color, current_laplace, current_ssim);
             accumulated_loss = 0.0f;
             
             /* Get output from first image in batch (batch training stores outputs in batch_output buffer) */

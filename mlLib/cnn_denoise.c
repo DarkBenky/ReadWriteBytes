@@ -53,6 +53,7 @@ struct CNNDenoiser {
     cl_kernel k_batch_mse_loss;
     cl_kernel k_batch_laplace_loss;
     cl_kernel k_batch_color_loss;
+    cl_kernel k_batch_ssim_loss;
     cl_kernel k_batch_clear_loss;
     cl_kernel k_batch_add_weighted_grad;
     cl_kernel k_batch_loss_reduce;
@@ -83,6 +84,7 @@ struct CNNDenoiser {
     float last_mse_loss;
     float last_laplace_loss;
     float last_color_loss;
+    float last_ssim_loss;
 };
 
 /* Optimized OpenCL kernels - 4 outputs per thread */
@@ -760,6 +762,8 @@ CNNDenoiser* cnn_create(CNNConfig config) {
                 cnn->k_batch_mse_loss = clCreateKernel(batch_program, "batch_mse_loss_gradient", &err);
                 cnn->k_batch_laplace_loss = clCreateKernel(batch_program, "batch_laplace_loss_gradient", &err);
                 cnn->k_batch_color_loss = clCreateKernel(batch_program, "batch_color_variance_loss", &err);
+                cnn->k_batch_ssim_loss = clCreateKernel(batch_program, "batch_ssim_loss_gradient", &err);
+                if (err != CL_SUCCESS) fprintf(stderr, "[WARN] Failed to create batch_ssim_loss kernel: %d\n", err);
                 cnn->k_batch_clear_loss = clCreateKernel(batch_program, "batch_clear_loss_buffer", &err);
                 cnn->k_batch_add_weighted_grad = clCreateKernel(batch_program, "batch_add_weighted_gradient", &err);
                 cnn->k_batch_loss_reduce = clCreateKernel(batch_program, "batch_loss_reduce", &err);
@@ -790,6 +794,7 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->last_mse_loss = 0.0f;
     cnn->last_laplace_loss = 0.0f;
     cnn->last_color_loss = 0.0f;
+    cnn->last_ssim_loss = 0.0f;
     
     return cnn;
 }
@@ -1045,6 +1050,9 @@ static float cnn_train_step_batch(CNNDenoiser *cnn, float* noisy_input, float* c
     cl_mem batch_loss_output = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, 
         batch_size * sizeof(float), NULL, NULL);
     
+    /* Pre-allocate host buffer for loss readback (reuse across all loss types) */
+    float *batch_losses = malloc(batch_size * sizeof(float));
+    
     float total_loss = 0.0f;
     
     /* Iterate through configured loss functions */
@@ -1110,6 +1118,21 @@ static float cnn_train_step_batch(CNNDenoiser *cnn, float* noisy_input, float* c
             
             size_t color_global[3] = {W, H, batch_size};
             clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_color_loss, 3, NULL, color_global, NULL, 0, NULL, NULL);
+            
+        } else if (loss_type == LOSS_SSIM) {
+            clSetKernelArg(cnn->k_batch_ssim_loss, 0, sizeof(cl_mem), &last->batch_output);
+            clSetKernelArg(cnn->k_batch_ssim_loss, 1, sizeof(cl_mem), &cnn->batch_target_buf);
+            clSetKernelArg(cnn->k_batch_ssim_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+            clSetKernelArg(cnn->k_batch_ssim_loss, 3, sizeof(cl_mem), &cnn->batch_loss_buf);
+            clSetKernelArg(cnn->k_batch_ssim_loss, 4, sizeof(int), &batch_size);
+            clSetKernelArg(cnn->k_batch_ssim_loss, 5, sizeof(int), &H);
+            clSetKernelArg(cnn->k_batch_ssim_loss, 6, sizeof(int), &W);
+            
+            size_t ssim_global[3] = {W, H, batch_size};
+            cl_int ssim_err = clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_ssim_loss, 3, NULL, ssim_global, NULL, 0, NULL, NULL);
+            if (ssim_err != CL_SUCCESS) {
+                fprintf(stderr, "[ERROR] SSIM kernel execution failed: %d\n", ssim_err);
+            }
         }
         
         /* Reduce per-pixel losses to per-batch totals */
@@ -1124,71 +1147,13 @@ static float cnn_train_step_batch(CNNDenoiser *cnn, float* noisy_input, float* c
         clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_loss_reduce, 1, NULL, 
             &reduce_global, &reduce_local, 0, NULL, NULL);
         
-        /* DEBUG: Check some loss buffer values */
-        if (debug_count < 2) {
-            float sample_losses[10];
-            clEnqueueReadBuffer(cnn->queue, cnn->batch_loss_buf, CL_TRUE, 0, 
-                10 * sizeof(float), sample_losses, 0, NULL, NULL);
-            printf("[DEBUG] First 10 loss_buffer values: ");
-            for (int i = 0; i < 10; i++) {
-                printf("%.4f ", sample_losses[i]);
-            }
-            printf("\n");
-        }
-        
-        /* Read back loss for this component */
-        float *batch_losses = malloc(batch_size * sizeof(float));
-        clEnqueueReadBuffer(cnn->queue, batch_loss_output, CL_TRUE, 0, 
+        /* Read back loss for this component - NON-BLOCKING read for performance */
+        clEnqueueReadBuffer(cnn->queue, batch_loss_output, CL_FALSE, 0, 
+            batch_size * sizeof(float), batch_losses, 0, NULL, NULL);
+        clEnqueueReadBuffer(cnn->queue, batch_loss_output, CL_FALSE, 0, 
             batch_size * sizeof(float), batch_losses, 0, NULL, NULL);
         
-        float component_loss = 0.0f;
-        for (int i = 0; i < batch_size; i++) {
-            component_loss += batch_losses[i];
-        }
-        free(batch_losses);
-        
-        /* DEBUG: Print raw values */
-        if (debug_count < 2) {
-            printf("[DEBUG] Loss computation:\n");
-            printf("  component_loss (sum): %.2f\n", component_loss);
-            printf("  batch_size: %d\n", batch_size);
-            printf("  size_per_img: %d\n", size_per_img);
-            if (loss_type == LOSS_MAE || loss_type == LOSS_MSE) {
-                int rgb_pixels = (size_per_img / 4) * 3;
-                printf("  rgb_pixels: %d\n", rgb_pixels);
-                printf("  divisor (batch*rgb): %d\n", batch_size * rgb_pixels);
-            }
-            debug_count++;
-        }
-        
-        /* Normalize loss based on type */
-        float normalized_loss;
-        if (loss_type == LOSS_COLOR_VARIANCE) {
-            normalized_loss = component_loss / (batch_size * H * W);
-        } else if (loss_type == LOSS_LAPLACE) {
-            /* Laplace computes loss per RGB channel, so divide by RGB pixels only */
-            int rgb_pixels = (size_per_img / 4) * 3;
-            normalized_loss = component_loss / (batch_size * rgb_pixels);
-        } else {
-            /* MAE, MSE - only RGB channels */
-            int rgb_pixels = (size_per_img / 4) * 3;
-            normalized_loss = component_loss / (batch_size * rgb_pixels);
-        }
-        
-        /* Store individual loss values for tracking */
-        if (loss_type == LOSS_MAE) {
-            cnn->last_mae_loss = normalized_loss;
-        } else if (loss_type == LOSS_MSE) {
-            cnn->last_mse_loss = normalized_loss;
-        } else if (loss_type == LOSS_LAPLACE) {
-            cnn->last_laplace_loss = normalized_loss;
-        } else if (loss_type == LOSS_COLOR_VARIANCE) {
-            cnn->last_color_loss = normalized_loss;
-        }
-        
-        total_loss += weight * normalized_loss;
-        
-        /* Add weighted gradient to accumulated gradient buffer */
+        /* Add weighted gradient to accumulated gradient buffer (can run async) */
         clSetKernelArg(cnn->k_batch_add_weighted_grad, 0, sizeof(cl_mem), &cnn->batch_grad_buf);
         clSetKernelArg(cnn->k_batch_add_weighted_grad, 1, sizeof(cl_mem), &temp_grad_loss);
         clSetKernelArg(cnn->k_batch_add_weighted_grad, 2, sizeof(float), &weight);
@@ -1197,8 +1162,44 @@ static float cnn_train_step_batch(CNNDenoiser *cnn, float* noisy_input, float* c
         
         size_t add_global = ((total_size + 255) / 256) * 256;
         clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_add_weighted_grad, 1, NULL, &add_global, NULL, 0, NULL, NULL);
+        
+        /* Now sync to get loss value for accumulation */
+        clFinish(cnn->queue);
+        
+        float component_loss = 0.0f;
+        for (int i = 0; i < batch_size; i++) {
+            component_loss += batch_losses[i];
+        }
+        
+        /* Normalize loss based on type */
+        float normalized_loss;
+        if (loss_type == LOSS_COLOR_VARIANCE) {
+            normalized_loss = component_loss / (batch_size * H * W);
+        } else if (loss_type == LOSS_LAPLACE) {
+            int rgb_pixels = (size_per_img / 4) * 3;
+            normalized_loss = component_loss / (batch_size * rgb_pixels);
+        } else {
+            int rgb_pixels = (size_per_img / 4) * 3;
+            normalized_loss = component_loss / (batch_size * rgb_pixels);
+        }
+        
+        /* Store individual loss values */
+        if (loss_type == LOSS_MAE) {
+            cnn->last_mae_loss = normalized_loss;
+        } else if (loss_type == LOSS_MSE) {
+            cnn->last_mse_loss = normalized_loss;
+        } else if (loss_type == LOSS_LAPLACE) {
+            cnn->last_laplace_loss = normalized_loss;
+        } else if (loss_type == LOSS_COLOR_VARIANCE) {
+            cnn->last_color_loss = normalized_loss;
+        } else if (loss_type == LOSS_SSIM) {
+            cnn->last_ssim_loss = normalized_loss;
+        }
+        
+        total_loss += weight * normalized_loss;
     }
     
+    free(batch_losses);
     clReleaseMemObject(temp_grad_loss);
     clReleaseMemObject(batch_loss_output);
     float avg_loss = total_loss / batch_size;
@@ -1786,6 +1787,34 @@ void cnn_destroy(CNNDenoiser *cnn) {
         clReleaseMemObject(cnn->grad_buf);
         clReleaseMemObject(cnn->residual_buf);
         clReleaseMemObject(cnn->temp_grad);
+        
+        /* Release batch buffers if allocated */
+        if (cnn->config.max_batch_size > 1) {
+            if (cnn->batch_input_buf) clReleaseMemObject(cnn->batch_input_buf);
+            if (cnn->batch_target_buf) clReleaseMemObject(cnn->batch_target_buf);
+            if (cnn->batch_loss_buf) clReleaseMemObject(cnn->batch_loss_buf);
+            if (cnn->batch_grad_buf) clReleaseMemObject(cnn->batch_grad_buf);
+            
+            /* Release per-layer batch buffers */
+            for (int i = 0; i < cnn->n_layers; i++) {
+                ConvLayer *l = &cnn->layers[i];
+                if (l->batch_output) clReleaseMemObject(l->batch_output);
+                if (l->batch_grad_input) clReleaseMemObject(l->batch_grad_input);
+            }
+            
+            /* Release batch kernels */
+            if (cnn->k_batch_forward) clReleaseKernel(cnn->k_batch_forward);
+            if (cnn->k_batch_backward) clReleaseKernel(cnn->k_batch_backward);
+            if (cnn->k_batch_weight_grad) clReleaseKernel(cnn->k_batch_weight_grad);
+            if (cnn->k_batch_loss_reduce) clReleaseKernel(cnn->k_batch_loss_reduce);
+            if (cnn->k_batch_clear_loss) clReleaseKernel(cnn->k_batch_clear_loss);
+            if (cnn->k_batch_add_weighted_grad) clReleaseKernel(cnn->k_batch_add_weighted_grad);
+            if (cnn->k_batch_mae_loss) clReleaseKernel(cnn->k_batch_mae_loss);
+            if (cnn->k_batch_mse_loss) clReleaseKernel(cnn->k_batch_mse_loss);
+            if (cnn->k_batch_laplace_loss) clReleaseKernel(cnn->k_batch_laplace_loss);
+            if (cnn->k_batch_color_loss) clReleaseKernel(cnn->k_batch_color_loss);
+            if (cnn->k_batch_ssim_loss) clReleaseKernel(cnn->k_batch_ssim_loss);
+        }
     }
     
     clReleaseKernel(cnn->k_forward);
@@ -2530,12 +2559,14 @@ void cnn_get_individual_losses(
     float *mae_loss,
     float *mse_loss,
     float *laplace_loss,
-    float *color_loss
+    float *color_loss,
+    float *ssim_loss
 ) {
-    if (mae_loss) *mae_loss += cnn->last_mae_loss;
-    if (mse_loss) *mse_loss += cnn->last_mse_loss;
-    if (laplace_loss) *laplace_loss += cnn->last_laplace_loss;
-    if (color_loss) *color_loss += cnn->last_color_loss;
+    if (mae_loss) *mae_loss = cnn->last_mae_loss;
+    if (mse_loss) *mse_loss = cnn->last_mse_loss;
+    if (laplace_loss) *laplace_loss = cnn->last_laplace_loss;
+    if (color_loss) *color_loss = cnn->last_color_loss;
+    if (ssim_loss) *ssim_loss = cnn->last_ssim_loss;
 }
 
 void send_metadata_to_python(
@@ -2546,7 +2577,9 @@ void send_metadata_to_python(
     float timeTookms,
     float mae_loss,
     float mse_loss,
-    float color_loss
+    float color_loss,
+    float laplacian_loss,
+    float ssim_loss
 ) {
     CURL *curl = curl_easy_init();
     if (!curl) return;
@@ -2565,7 +2598,9 @@ void send_metadata_to_python(
         "\"time\":%.6f,"
         "\"mae_loss\":%.6f,"
         "\"mse_loss\":%.6f,"
-        "\"color_loss\":%.6f"
+        "\"color_loss\":%.6f,"
+        "\"laplacian_loss\":%.6f,"
+        "\"ssim_loss\":%.6f"
         "}",
         step,
         loss,
@@ -2573,7 +2608,9 @@ void send_metadata_to_python(
         timeTookms,
         mae_loss,
         mse_loss,
-        color_loss
+        color_loss,
+        laplacian_loss,
+        ssim_loss
     );
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
