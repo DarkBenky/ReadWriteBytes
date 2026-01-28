@@ -1967,6 +1967,13 @@ int cnn_load_weights(CNNDenoiser* cnn, const char* filepath) {
             fread(adam_v_b, sizeof(float), l->cout, f);
             
             if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                /* RESET Adam state for stable fine-tuning with new learning rate */
+                printf("Resetting Adam momentum buffers for layer %d to zero for stable fine-tuning\n", i);
+                memset(adam_m_w, 0, w_size * 16);
+                memset(adam_v_w, 0, w_size * 16);
+                memset(adam_m_b, 0, l->cout * 4);
+                memset(adam_v_b, 0, l->cout * 4);
+                
                 clEnqueueWriteBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
                 clEnqueueWriteBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
                 clEnqueueWriteBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
@@ -1981,7 +1988,11 @@ int cnn_load_weights(CNNDenoiser* cnn, const char* filepath) {
     }
     
     /* Read Adam timestep */
-    fread(&cnn->adam_t, sizeof(int), 1, f);
+    int saved_adam_t = 0;
+    fread(&saved_adam_t, sizeof(int), 1, f);
+    
+    printf("Loaded adam_t=%d from file, but RESETTING to 0 for stable fine-tuning\n", saved_adam_t);
+    cnn->adam_t = 0;
     
     fclose(f);
     printf("Loaded network weights from %s\n", filepath);
