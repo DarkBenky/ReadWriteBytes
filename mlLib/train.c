@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#define MAX_STEPS 1000
+#define MAX_STEPS 10000
 #define LOG_EVERY_N_STEPS 10
 #define LOG_STEP 10
 
@@ -13,24 +13,24 @@ int main() {
     
     cfg.max_batch_size = 32;
     cfg.optimizer = OPTIMIZER_ADAM;
-    cfg.learning_rate = 0.00025f;
+    cfg.learning_rate = 0.00035f;
     cfg.use_profiling = 1;
 
     cfg.adam_beta1 = 0.95f;
     cfg.adam_beta2 = 0.999f;
     cfg.adam_epsilon = 1e-8f;
     
-    cfg.loss_config.num_losses = 4;
+    cfg.loss_config.num_losses = 2;
     cfg.loss_config.types[0] = LOSS_MAE;
-    cfg.loss_config.weights[0] = 1.85f;    
+    cfg.loss_config.weights[0] = 1.5f;    
     // cfg.loss_config.types[1] = LOSS_MSE;
     // cfg.loss_config.weights[1] = 0.75f;
-    cfg.loss_config.types[1] = LOSS_COLOR_VARIANCE;
-    cfg.loss_config.weights[1] = 0.005f;
-    cfg.loss_config.types[3] = LOSS_LAPLACE;
-    cfg.loss_config.weights[3] = 0.55f;
-    cfg.loss_config.types[2] = LOSS_SSIM;
-    cfg.loss_config.weights[2] = 1.45f;
+    // cfg.loss_config.types[1] = LOSS_COLOR_VARIANCE;
+    // cfg.loss_config.weights[1] = 0.005f;
+    // cfg.loss_config.types[3] = LOSS_LAPLACE;
+    // cfg.loss_config.weights[3] = 0.55f;
+    cfg.loss_config.types[1] = LOSS_SSIM;
+    cfg.loss_config.weights[1] = 1.5f;
     cfg.residual_mode = 0;
 
     LearningRateDecay lr_decay;
@@ -50,8 +50,8 @@ int main() {
     cnn_print_architecture(cnn);
     
     /* Load pretrained baseline weights */
-    printf("\nLoading pretrained weights from model/cnn_weights_beseliveV2.bin...\n");
-    if (cnn_load_weights(cnn, "model/cnn_weights_beseliveV2.bin") == 0) {
+    printf("\nLoading pretrained weights from model/cnn_weights_beseliveV3.bin...\n");
+    if (cnn_load_weights(cnn, "model/cnn_weights_beseliveV3.bin") == 0) {
         printf("Successfully loaded pretrained weights!\n");
     } else {
         printf("Warning: Could not load pretrained weights, starting from scratch\n");
