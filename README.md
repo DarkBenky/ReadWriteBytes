@@ -1,40 +1,17 @@
-# Binary Frame Read/Write Performance Test
-
-This experiment tests the performance of writing and reading frame data as binary files using Go. The test simulates rendering a frame (800x600x3 bytes) and measures the read/write speeds and frame rates.
-
-## Test Specifications
-- Frame dimensions: 800x600 pixels
-- Color depth: 3 bytes per pixel (RGB)
-- Total frame size: 1,440,000 bytes (~1.44MB)
-
-## Performance Results
-
-### Write Performance
-- Speed: 636.30 MB/s
-- Frame write time: 2,263,080 ns (~2.26ms)
-- Write FPS: 441.88 frames/second
-
-### Read Performance
-- Speed: 388.02 MB/s
-- Frame read time: 3,711,145 ns (~3.71ms)
-- Read FPS: 269.46 frames/second
-
-## Conclusion
-The results show that writing frames is faster than reading them, with write operations capable of handling ~442 FPS while read operations can handle ~269 FPS. This suggests that the system could theoretically handle real-time frame processing for applications requiring up to 60 FPS.
-
-### 3. UI Overlay
-- Render text & charts into a temp buffer  
-- Copy buffer → GL texture → screen overlay  
-  
-## TODO - Base on prioritys in missile as in irst so it will need multiple successful lock to track target
+# TODO - Base on prioritys in missile as in irst so it will need multiple successful lock to track target
 
 - [ ] missile avoidance and collision on cpu based on triangle collision optimization check for collision only in correct chunk
   - [ ] compute triangle center and radius
     - [ ] create repulsion vector based on closest n triangles
+- [ ] Ray Tracer
+  - [ ] Structure => static geometry + dynamic populated on gpu
+    - [ ] render frame now we will implement 2 pipelines
+      - [ ] Option A: render ray-traced frame and rasterized frame -> mix them (user defined mix ratio) -> pass trough denoiser (step can be omitted by user) -> display
+      - [ ] Option B: render ray-traced frame and rasterized frame -> pass ray-traced image trough denoiser (step can be omitted by user) ->  mix them(based on user defined ration) -> display
 - [ ] render z buffer first then colors
 - [ ] make seaker work with flares
 - [ ] crt screen based shader
-- [ ] add render / add functionality to lunch flares 
+- [ ] add render / add functionality to lunch flares
 - [ ] scale everything to real life scale (1.0f = 1.0 meter)
 - [ ] Add planes and misiles
   - [X] render heat in separate buffer

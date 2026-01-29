@@ -883,11 +883,211 @@ void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, 
 	return;
 }
 
-void collideRayWithMapTile(struct MapTile *tile, struct Ray ray, float *hitDistance, float *hitPos[3], int *hitTriangleIndex) {
-	// Implement ray-triangle intersection tests for the given map tile
-	// This function should iterate through the triangles in the tile
-	// and check for intersections with the provided ray.
-	// If an intersection is found, handle it accordingly (e.g., store intersection data).
+inline bool rayIntersectsBoundingBox(struct Ray *ray, struct BoundingBox *bbox) {
+	float tmin = (bbox->min[0] - ray->origin[0]) / ray->direction[0];
+	float tmax = (bbox->max[0] - ray->origin[0]) / ray->direction[0];
+	if (tmin > tmax) {
+		float temp = tmin;
+		tmin = tmax;
+		tmax = temp;
+	}
+
+	float tymin = (bbox->min[1] - ray->origin[1]) / ray->direction[1];
+	float tymax = (bbox->max[1] - ray->origin[1]) / ray->direction[1];
+	if (tymin > tymax) {
+		float temp = tymin;
+		tymin = tymax;
+		tymax = temp;
+	}
+
+	if ((tmin > tymax) || (tymin > tmax)) {
+		return false;
+	}
+
+	if (tymin > tmin) {
+		tmin = tymin;
+	}
+	if (tymax < tmax) {
+		tmax = tymax;
+	}
+
+	float tzmin = (bbox->min[2] - ray->origin[2]) / ray->direction[2];
+	float tzmax = (bbox->max[2] - ray->origin[2]) / ray->direction[2];
+	if (tzmin > tzmax) {
+		float temp = tzmin;
+		tzmin = tzmax;
+		tzmax = temp;
+	}
+
+	if ((tmin > tzmax) || (tzmin > tmax)) {
+		return false;
+	}
+
+	return true;
 }
 
-void calculateClosesSurfaces
+inline void rayTriangleIntersection(struct Ray *ray, float v0[3], float v1[3], float v2[3], float *outDistance, float *outHitPos) {
+	// Möller–Trumbore ray-triangle intersection algorithm
+	const float EPSILON = 0.0000001f;
+	float edge1[3], edge2[3], h[3], s[3], q[3];
+	float a, f, u, v;
+
+	edge1[0] = v1[0] - v0[0];
+	edge1[1] = v1[1] - v0[1];
+	edge1[2] = v1[2] - v0[2];
+
+	edge2[0] = v2[0] - v0[0];
+	edge2[1] = v2[1] - v0[1];
+	edge2[2] = v2[2] - v0[2];
+
+	h[0] = ray->direction[1] * edge2[2] - ray->direction[2] * edge2[1];
+	h[1] = ray->direction[2] * edge2[0] - ray->direction[0] * edge2[2];
+	h[2] = ray->direction[0] * edge2[1] - ray->direction[1] * edge2[0];
+
+	a = edge1[0] * h[0] + edge1[1] * h[1] + edge1[2] * h[2];
+
+	if (a > -EPSILON && a < EPSILON) {
+		return; // Ray is parallel to triangle
+	}
+
+	f = 1.0f / a;
+	s[0] = ray->origin[0] - v0[0];
+	s[1] = ray->origin[1] - v0[1];
+	s[2] = ray->origin[2] - v0[2];
+
+	u = f * (s[0] * h[0] + s[1] * h[1] + s[2] * h[2]);
+	if (u < 0.0f || u > 1.0f) {
+		return;
+	}
+
+	q[0] = s[1] * edge1[2] - s[2] * edge1[1];
+	q[1] = s[2] * edge1[0] - s[0] * edge1[2];
+	q[2] = s[0] * edge1[1] - s[1] * edge1[0];
+	v = f * (ray->direction[0] * q[0] + ray->direction[1] * q[1] + ray->direction[2] * q[2]);
+	if (v < 0.0f || u + v > 1.0f) {
+		return;
+	}
+
+	float t = f * (edge2[0] * q[0] + edge2[1] * q[1] + edge2[2] * q[2]);
+	if (t > EPSILON) {
+		*outDistance = t;
+		outHitPos[0] = ray->origin[0] + ray->direction[0] * t;
+		outHitPos[1] = ray->origin[1] + ray->direction[1] * t;
+		outHitPos[2] = ray->origin[2] + ray->direction[2] * t;
+	}
+}
+
+void collideRayWithMapTile(struct MapTile *tile, struct Ray ray, float *hitDistance, float *hitPos[3], int *hitTriangleIndex) {
+	// Implement ray-triangle intersection tests for the given map tile
+	// check for bbox intersection with tile then iterate through bounding boxes return closest hit
+	float closestDist = FLT_MAX;
+	float closestPos[3] = {0.0f, 0.0f, 0.0f};
+	int closestIndex = -1;
+	
+	if (tile->current_lod == LOD_HIGH) {
+		for (int i = 0; i < tile->terrainHigh.count; i++) {
+			if (rayIntersectsBoundingBox(&ray, &tile->terrainHighBoundingBoxes[i])) {
+				rayTriangleIntersection(&ray,
+									   &tile->terrainHigh.v1[i * 3],
+									   &tile->terrainHigh.v2[i * 3],
+									   &tile->terrainHigh.v3[i * 3],
+									   &closestDist,
+									   closestPos);
+				if (closestDist < FLT_MAX) {
+					closestIndex = i;
+				}
+			}
+		}
+	} else if (tile->current_lod == LOD_MEDIUM) {
+		for (int i = 0; i < tile->terrainMed.count; i++) {
+			if (rayIntersectsBoundingBox(&ray, &tile->terrainMedBoundingBoxes[i])) {
+				rayTriangleIntersection(&ray,
+									   &tile->terrainMed.v1[i * 3],
+									   &tile->terrainMed.v2[i * 3],
+									   &tile->terrainMed.v3[i * 3],
+									   &closestDist,
+									   closestPos);
+				if (closestDist < FLT_MAX) {
+					closestIndex = i;
+				}
+			}
+		}
+	} else if (tile->current_lod == LOD_LOW) {
+		for (int i = 0; i < tile->terrainLow.count; i++) {
+			if (rayIntersectsBoundingBox(&ray, &tile->terrainLowBoundingBoxes[i])) {
+				rayTriangleIntersection(&ray,
+									   &tile->terrainLow.v1[i * 3],
+									   &tile->terrainLow.v2[i * 3],
+									   &tile->terrainLow.v3[i * 3],
+									   &closestDist,
+									   closestPos);
+				if (closestDist < FLT_MAX) {
+					closestIndex = i;
+				}
+			}
+		}
+	}
+}
+
+void calculateClosesSurfacesForWholeMap(struct Map *map, struct Ray *ray, float *hitDistance, float *hitPos[3], int *hitTriangleIndex) {
+	// Ray march through grid, only checking tiles that ray passes through (DDA-style traversal)
+	if (!map || !map->tiles) {
+		*hitDistance = FLT_MAX;
+		*hitTriangleIndex = -1;
+		return;
+	}
+
+	float closestDist = FLT_MAX;
+	float closestPos[3] = {0.0f, 0.0f, 0.0f};
+	int closestIndex = -1;
+
+	const float MAX_MARCH = 10000.0f;
+	const float STEP = map->tileSizeX > 0.1f ? map->tileSizeX : 1.0f;
+
+	// Step along ray from origin
+	for (float t = 0.0f; t < MAX_MARCH; t += STEP) {
+		float samplePos[3] = {
+			ray->origin[0] + ray->direction[0] * t,
+			ray->origin[1] + ray->direction[1] * t,
+			ray->origin[2] + ray->direction[2] * t
+		};
+
+		// Convert world position to tile coordinates
+		int tile_x = (int)((samplePos[0] - map->posX) / map->tileSizeX) + map->tilesX;
+		int tile_z = (int)((samplePos[2] - map->posZ) / map->tileSizeZ) + map->tilesY;
+
+		struct MapTile *tile = get_tile(map, tile_x, tile_z);
+		if (!tile || !tile->is_loaded) {
+			continue;
+		}
+
+		float tileHitDistance = FLT_MAX;
+		float tileHitPos[3] = {0.0f, 0.0f, 0.0f};
+		int tileHitTriangleIndex = -1;
+
+		collideRayWithMapTile(tile, *ray, &tileHitDistance, &tileHitPos, &tileHitTriangleIndex);
+
+		if (tileHitDistance < closestDist) {
+			closestDist = tileHitDistance;
+			closestPos[0] = tileHitPos[0];
+			closestPos[1] = tileHitPos[1];
+			closestPos[2] = tileHitPos[2];
+			closestIndex = tileHitTriangleIndex;
+			// Stop early if we hit something
+			if (closestDist < MAX_MARCH) {
+				break;
+			}
+		}
+	}
+
+	if (closestIndex != -1) {
+		*hitDistance = closestDist;
+		*hitPos[0] = closestPos[0];
+		*hitPos[1] = closestPos[1];
+		*hitPos[2] = closestPos[2];
+		*hitTriangleIndex = closestIndex;
+	} else {
+		*hitDistance = FLT_MAX;
+		*hitTriangleIndex = -1;
+	}
+}
