@@ -50,8 +50,8 @@ int main() {
     cnn_print_architecture(cnn);
     
     /* Load pretrained baseline weights */
-    printf("\nLoading pretrained weights from model/cnn_weights_beseliveV3.bin...\n");
-    if (cnn_load_weights(cnn, "model/cnn_weights_beseliveV3.bin") == 0) {
+    printf("\nLoading pretrained weights from model/cnn_weights_beselineV3.bin...\n");
+    if (cnn_load_weights(cnn, "model/cnn_weights_beselineV3.bin") == 0) {
         printf("Successfully loaded pretrained weights!\n");
     } else {
         printf("Warning: Could not load pretrained weights, starting from scratch\n");
