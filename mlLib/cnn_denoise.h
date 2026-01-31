@@ -35,7 +35,8 @@ typedef enum {
     LOSS_MSE = 1,
     LOSS_LAPLACE = 2,
     LOSS_COLOR_VARIANCE = 3,
-    LOSS_SSIM = 4
+    LOSS_SSIM = 4,
+    LOSS_SOBEL = 5
 } LossType;
 
 /* Loss configuration with multiple losses and weights */
@@ -269,7 +270,8 @@ void cnn_get_individual_losses(
     float *mse_loss,
     float *laplace_loss,
     float *color_loss,
-    float *ssim_loss
+    float *ssim_loss,
+    float *sobel_loss
 );
 
 #ifdef __cplusplus

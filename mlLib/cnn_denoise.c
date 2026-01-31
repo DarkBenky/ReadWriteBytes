@@ -54,6 +54,7 @@ struct CNNDenoiser {
     cl_kernel k_batch_laplace_loss;
     cl_kernel k_batch_color_loss;
     cl_kernel k_batch_ssim_loss;
+    cl_kernel k_batch_sobel_loss;
     cl_kernel k_batch_clear_loss;
     cl_kernel k_batch_add_weighted_grad;
     cl_kernel k_batch_loss_reduce;
@@ -85,6 +86,7 @@ struct CNNDenoiser {
     float last_laplace_loss;
     float last_color_loss;
     float last_ssim_loss;
+    float last_sobel_loss;
 };
 
 /* Optimized OpenCL kernels - 4 outputs per thread */
@@ -764,6 +766,8 @@ CNNDenoiser* cnn_create(CNNConfig config) {
                 cnn->k_batch_color_loss = clCreateKernel(batch_program, "batch_color_variance_loss", &err);
                 cnn->k_batch_ssim_loss = clCreateKernel(batch_program, "batch_ssim_loss_gradient", &err);
                 if (err != CL_SUCCESS) fprintf(stderr, "[WARN] Failed to create batch_ssim_loss kernel: %d\n", err);
+                cnn->k_batch_sobel_loss = clCreateKernel(batch_program, "batch_sobel_loss_gradient", &err);
+                if (err != CL_SUCCESS) fprintf(stderr, "[WARN] Failed to create batch_sobel_loss kernel: %d\n", err);
                 cnn->k_batch_clear_loss = clCreateKernel(batch_program, "batch_clear_loss_buffer", &err);
                 cnn->k_batch_add_weighted_grad = clCreateKernel(batch_program, "batch_add_weighted_gradient", &err);
                 cnn->k_batch_loss_reduce = clCreateKernel(batch_program, "batch_loss_reduce", &err);
@@ -795,6 +799,7 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->last_laplace_loss = 0.0f;
     cnn->last_color_loss = 0.0f;
     cnn->last_ssim_loss = 0.0f;
+    cnn->last_sobel_loss = 0.0f;
     
     return cnn;
 }
@@ -1133,6 +1138,26 @@ static float cnn_train_step_batch(CNNDenoiser *cnn, float* noisy_input, float* c
             if (ssim_err != CL_SUCCESS) {
                 fprintf(stderr, "[ERROR] SSIM kernel execution failed: %d\n", ssim_err);
             }
+            
+        } else if (loss_type == LOSS_SOBEL) {
+            if (!cnn->k_batch_sobel_loss) {
+                fprintf(stderr, "[ERROR] Sobel kernel is NULL!\n");
+                continue;
+            }
+            clSetKernelArg(cnn->k_batch_sobel_loss, 0, sizeof(cl_mem), &last->batch_output);
+            clSetKernelArg(cnn->k_batch_sobel_loss, 1, sizeof(cl_mem), &cnn->batch_target_buf);
+            clSetKernelArg(cnn->k_batch_sobel_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+            clSetKernelArg(cnn->k_batch_sobel_loss, 3, sizeof(cl_mem), &cnn->batch_loss_buf);
+            clSetKernelArg(cnn->k_batch_sobel_loss, 4, sizeof(int), &batch_size);
+            clSetKernelArg(cnn->k_batch_sobel_loss, 5, sizeof(int), &H);
+            clSetKernelArg(cnn->k_batch_sobel_loss, 6, sizeof(int), &W);
+            clSetKernelArg(cnn->k_batch_sobel_loss, 7, sizeof(int), &C);
+            
+            size_t sobel_global[3] = {W, H, batch_size * C};
+            cl_int sobel_err = clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_sobel_loss, 3, NULL, sobel_global, NULL, 0, NULL, NULL);
+            if (sobel_err != CL_SUCCESS) {
+                fprintf(stderr, "[ERROR] Sobel kernel execution failed: %d\n", sobel_err);
+            }
         }
         
         /* Reduce per-pixel losses to per-batch totals */
@@ -1194,6 +1219,8 @@ static float cnn_train_step_batch(CNNDenoiser *cnn, float* noisy_input, float* c
             cnn->last_color_loss = normalized_loss;
         } else if (loss_type == LOSS_SSIM) {
             cnn->last_ssim_loss = normalized_loss;
+        } else if (loss_type == LOSS_SOBEL) {
+            cnn->last_sobel_loss = normalized_loss;
         }
         
         total_loss += weight * normalized_loss;
@@ -1814,6 +1841,7 @@ void cnn_destroy(CNNDenoiser *cnn) {
             if (cnn->k_batch_laplace_loss) clReleaseKernel(cnn->k_batch_laplace_loss);
             if (cnn->k_batch_color_loss) clReleaseKernel(cnn->k_batch_color_loss);
             if (cnn->k_batch_ssim_loss) clReleaseKernel(cnn->k_batch_ssim_loss);
+            if (cnn->k_batch_sobel_loss) clReleaseKernel(cnn->k_batch_sobel_loss);
         }
     }
     
@@ -2571,13 +2599,15 @@ void cnn_get_individual_losses(
     float *mse_loss,
     float *laplace_loss,
     float *color_loss,
-    float *ssim_loss
+    float *ssim_loss,
+    float *sobel_loss
 ) {
     if (mae_loss) *mae_loss = cnn->last_mae_loss;
     if (mse_loss) *mse_loss = cnn->last_mse_loss;
     if (laplace_loss) *laplace_loss = cnn->last_laplace_loss;
     if (color_loss) *color_loss = cnn->last_color_loss;
     if (ssim_loss) *ssim_loss = cnn->last_ssim_loss;
+    if (sobel_loss) *sobel_loss = cnn->last_sobel_loss;
 }
 
 void send_metadata_to_python(

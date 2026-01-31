@@ -526,6 +526,76 @@ __kernel void batch_color_variance_loss(
  * Computes SSIM in 7x7 windows, simplified gradient approximation
  * Only processes RGB channels (0,1,2), skips luminance (3)
  */
+/* Batch Sobel Gradient loss - edge-preserving loss for sharp reconstructions
+ * Computes Sobel gradients in X and Y directions and compares with target
+ * Only operates on RGB channels (first 3), skips luminance
+ */
+__kernel void batch_sobel_loss_gradient(
+    __global const float* output,        /* [batch][C][H][W] */
+    __global const float* target,        /* [batch][C][H][W] */
+    __global float* grad_out,            /* [batch][C][H][W] */
+    __global float* loss_per_batch,      /* [batch] accumulator */
+    int batch_size,
+    int H, int W, int C)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int batch = get_global_id(2) / C;
+    int c = get_global_id(2) % C;
+    
+    if (x >= W || y >= H || batch >= batch_size) return;
+    
+    /* Skip luminance channel (channel 3), only process RGB (0,1,2) */
+    if (c >= 3) {
+        int img_size = C * H * W;
+        int channel_size = H * W;
+        int global_idx = batch * img_size + c * channel_size + y * W + x;
+        grad_out[global_idx] = 0.0f;
+        return;
+    }
+    
+    /* Sobel only computed for interior pixels (need 1-pixel border) */
+    if (x > 0 && y > 0 && x < W-1 && y < H-1) {
+        int img_size = C * H * W;
+        int channel_size = H * W;
+        int idx = batch * img_size + c * channel_size + y * W + x;
+        
+        /* Sobel X kernel: [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]] */
+        float sobel_x_out = -output[idx - W - 1] - 2.0f * output[idx - 1] - output[idx + W - 1]
+                          + output[idx - W + 1] + 2.0f * output[idx + 1] + output[idx + W + 1];
+        
+        float sobel_x_tgt = -target[idx - W - 1] - 2.0f * target[idx - 1] - target[idx + W - 1]
+                          + target[idx - W + 1] + 2.0f * target[idx + 1] + target[idx + W + 1];
+        
+        /* Sobel Y kernel: [[-1,-2,-1], [ 0, 0, 0], [ 1, 2, 1]] */
+        float sobel_y_out = -output[idx - W - 1] - 2.0f * output[idx - W] - output[idx - W + 1]
+                          + output[idx + W - 1] + 2.0f * output[idx + W] + output[idx + W + 1];
+        
+        float sobel_y_tgt = -target[idx - W - 1] - 2.0f * target[idx - W] - target[idx - W + 1]
+                          + target[idx + W - 1] + 2.0f * target[idx + W] + target[idx + W + 1];
+        
+        float diff_x = sobel_x_out - sobel_x_tgt;
+        float diff_y = sobel_y_out - sobel_y_tgt;
+        
+        /* MAE-style gradient for both directions */
+        float grad_x = (diff_x > 0.0f) ? 1.0f : -1.0f;
+        float grad_y = (diff_y > 0.0f) ? 1.0f : -1.0f;
+        
+        /* Combine gradients (simplified - derivatives affect multiple neighbors) */
+        grad_out[idx] = grad_x + grad_y;
+        
+        /* Accumulate L1 loss from both gradient directions */
+        loss_per_batch[idx] = fabs(diff_x) + fabs(diff_y);
+    } else {
+        /* Zero gradient and loss for border pixels */
+        int img_size = C * H * W;
+        int channel_size = H * W;
+        int global_idx = batch * img_size + c * channel_size + y * W + x;
+        grad_out[global_idx] = 0.0f;
+        loss_per_batch[global_idx] = 0.0f;
+    }
+}
+
 __kernel void batch_ssim_loss_gradient(
     __global const float* prediction,
     __global const float* target,

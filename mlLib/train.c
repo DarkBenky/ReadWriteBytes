@@ -20,7 +20,7 @@ int main() {
     cfg.adam_beta2 = 0.999f;
     cfg.adam_epsilon = 1e-8f;
     
-    cfg.loss_config.num_losses = 2;
+    cfg.loss_config.num_losses = 3;
     cfg.loss_config.types[0] = LOSS_MAE;
     cfg.loss_config.weights[0] = 1.5f;    
     // cfg.loss_config.types[1] = LOSS_MSE;
@@ -31,6 +31,8 @@ int main() {
     // cfg.loss_config.weights[3] = 0.55f;
     cfg.loss_config.types[1] = LOSS_SSIM;
     cfg.loss_config.weights[1] = 1.5f;
+    cfg.loss_config.types[2] = LOSS_SOBEL;
+    cfg.loss_config.weights[2] = 0.5f;
     cfg.residual_mode = 0;
 
     LearningRateDecay lr_decay;
@@ -50,8 +52,8 @@ int main() {
     cnn_print_architecture(cnn);
     
     /* Load pretrained baseline weights */
-    printf("\nLoading pretrained weights from model/cnn_weights_beselineV3.bin...\n");
-    if (cnn_load_weights(cnn, "model/cnn_weights_beselineV3.bin") == 0) {
+    printf("\nLoading pretrained weights from model/cnn_weights_beselineV4.bin...\n");
+    if (cnn_load_weights(cnn, "model/cnn_weights_beselineV4.bin") == 0) {
         printf("Successfully loaded pretrained weights!\n");
     } else {
         printf("Warning: Could not load pretrained weights, starting from scratch\n");
@@ -167,17 +169,18 @@ int main() {
         }
         
         if (step % LOG_EVERY_N_STEPS == 0 && step > 0) {
-            float current_mae, current_mse, current_laplace, current_color, current_ssim;
-            cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color, &current_ssim);
+            float current_mae, current_mse, current_laplace, current_color, current_ssim, current_sobel;
+            cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color, &current_ssim, &current_sobel);
             
             /* Library returns unweighted losses, compute weighted versions for display */
-            float weight_mae = 1.0f, weight_mse = 1.0f, weight_laplace = 1.0f, weight_color = 1.0f, weight_ssim = 1.0f;
+            float weight_mae = 1.0f, weight_mse = 1.0f, weight_laplace = 1.0f, weight_color = 1.0f, weight_ssim = 1.0f, weight_sobel = 1.0f;
             for (int i = 0; i < cfg.loss_config.num_losses; i++) {
                 if (cfg.loss_config.types[i] == LOSS_MAE) weight_mae = cfg.loss_config.weights[i];
                 else if (cfg.loss_config.types[i] == LOSS_MSE) weight_mse = cfg.loss_config.weights[i];
                 else if (cfg.loss_config.types[i] == LOSS_LAPLACE) weight_laplace = cfg.loss_config.weights[i];
                 else if (cfg.loss_config.types[i] == LOSS_COLOR_VARIANCE) weight_color = cfg.loss_config.weights[i];
                 else if (cfg.loss_config.types[i] == LOSS_SSIM) weight_ssim = cfg.loss_config.weights[i];
+                else if (cfg.loss_config.types[i] == LOSS_SOBEL) weight_sobel = cfg.loss_config.weights[i];
             }
             
             /* Multiply by weights to get weighted contribution to total loss */
@@ -186,6 +189,7 @@ int main() {
             float weighted_laplace = current_laplace * weight_laplace;
             float weighted_color = current_color * weight_color;
             float weighted_ssim = current_ssim * weight_ssim;
+            float weighted_sobel = current_sobel * weight_sobel;
             
             float avg_loss = accumulated_loss / LOG_EVERY_N_STEPS;
             printf("\n=== Batch %3d (Images %d) ===\n", 
@@ -207,10 +211,10 @@ int main() {
             printf("[DEBUG] Target (clean) range: [%.6f, %.6f]\n", target_min, target_max);
             
             /* Display: unweighted (weighted contribution) */
-            printf("   Losses: MAE=%.4f(%.4f) MSE=%.4f(%.4f) Laplace=%.4f(%.4f) Color=%.4f(%.4f) SSIM=%.4f(%.4f)\n", 
+            printf("   Losses: MAE=%.4f(%.4f) MSE=%.4f(%.4f) Laplace=%.4f(%.4f) Color=%.4f(%.4f) SSIM=%.4f(%.4f) Sobel=%.4f(%.4f)\n", 
                    current_mae, weighted_mae, current_mse, weighted_mse, 
                    current_laplace, weighted_laplace, current_color, weighted_color, 
-                   current_ssim, weighted_ssim);
+                   current_ssim, weighted_ssim, current_sobel, weighted_sobel);
             
             if (avg_loss < best_loss) {
                 best_loss = avg_loss;
