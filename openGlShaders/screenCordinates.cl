@@ -2721,79 +2721,6 @@ __kernel void convertModelToTriangles(
 	}
 }
 
-__kernel void initializeBoundingBox(
-	__global float *out_bbox_min,
-	__global float *out_bbox_max) {
-	if (get_global_id(0) == 0) {
-		out_bbox_min[0] = INFINITY;
-		out_bbox_min[1] = INFINITY;
-		out_bbox_min[2] = INFINITY;
-		out_bbox_max[0] = -INFINITY;
-		out_bbox_max[1] = -INFINITY;
-		out_bbox_max[2] = -INFINITY;
-	}
-}
-
-inline void loadTriangleFromBuffers(
-	int triangle_idx,
-	__global const float *v1_buffer,
-	__global const float *v2_buffer,
-	__global const float *v3_buffer,
-	__global const float *normals_buffer,
-	__global const float *colors_buffer,
-	__global const float *roughness_buffer,
-	__global const float *metallic_buffer,
-	__global const float *emission_buffer,
-	float3 *out_v1,
-	float3 *out_v2,
-	float3 *out_v3,
-	float3 *out_normal,
-	float3 *out_color,
-	float *out_roughness,
-	float *out_metallic,
-	float *out_emission) {
-	int idx = triangle_idx * 3;
-
-	// Load vertices
-	*out_v1 = (float3)(v1_buffer[idx], v1_buffer[idx + 1], v1_buffer[idx + 2]);
-	*out_v2 = (float3)(v2_buffer[idx], v2_buffer[idx + 1], v2_buffer[idx + 2]);
-	*out_v3 = (float3)(v3_buffer[idx], v3_buffer[idx + 1], v3_buffer[idx + 2]);
-
-	// Load normal
-	*out_normal = (float3)(normals_buffer[idx], normals_buffer[idx + 1], normals_buffer[idx + 2]);
-
-	// Load color
-	*out_color = (float3)(colors_buffer[idx], colors_buffer[idx + 1], colors_buffer[idx + 2]);
-
-	// Load material properties
-	*out_roughness = roughness_buffer[triangle_idx];
-	*out_metallic = metallic_buffer[triangle_idx];
-	*out_emission = emission_buffer[triangle_idx];
-}
-
-bool intersectRayAABB(
-	const float3 rayOrigin,
-	const float3 rayDirection,
-	const float3 bBoxMin,
-	const float3 bBoxMax,
-	float *out_tMin,
-	float *out_tMax) {
-	float3 invDir = 1.0f / rayDirection;
-	float3 t0 = (bBoxMin - rayOrigin) * invDir;
-	float3 t1 = (bBoxMax - rayOrigin) * invDir;
-	
-	float3 tMin = fmin(t0, t1);
-	float3 tMax = fmax(t0, t1);
-	
-	float tNear = fmax(fmax(tMin.x, tMin.y), tMin.z);
-	float tFar = fmin(fmin(tMax.x, tMax.y), tMax.z);
-	
-	*out_tMin = tNear;
-	*out_tMax = tFar;
-	
-	return tNear <= tFar && tFar > 0.0f;
-}
-
 void rayTriangleIntersection(
 	const float3 rayOrigin,
 	const float3 rayDirection,
@@ -2827,113 +2754,207 @@ void rayTriangleIntersection(
 	}
 }
 
-void chunkIntersection(
-	const float3 rayOrigin,
+void rayTriangleIntersectionClosest(
+	__global const MapGPU *map const float3 rayOrigin,
 	const float3 rayDirection,
-	__global const struct MapGPU *map,
-	float3 *out_hitColor,
-	float *out_hitDistance,
+	const float3 v1,
+	const float3 v2,
+	const float3 v3,
+	float *out_t,
+	float3 *outColor,
+	float *out_emission,
+	float *out_metallic,
 	float3 *out_hitNormal,
-	float *out_hitRoughness,
-	float *out_hitMetallic,
-	float *out_hitEmission,
-	const int ChankTriangleStart,
-	const int ChankTriangleEnd,
-	float3 bBoxMin,
-	float3 bBoxMax) {
-	// Ray-box intersection test
-	float tMin, tMax;
-	if (!intersectRayAABB(rayOrigin, rayDirection, bBoxMin, bBoxMax, &tMin, &tMax)) {
-		return;
-	}
-
-	// Iterate over triangles in the chunk
-	for (int triIdx = ChankTriangleStart; triIdx < ChankTriangleEnd; triIdx++) {
-		float3 v1, v2, v3;
+	float *out_roughness) {
+	int triangleIdx = -1;
+	for (int i = 0; i < map->chunkEndMed[CHUNK_COUNT_MED - 1]; i++) {
 		float t = INFINITY;
-		float3 hitNormal;
+		float3 triangleNormal = (float3)(map->chunkMedNormalsData[i * 3 + 0], map->chunkMedNormalsData[i * 3 + 1], map->chunkMedNormalsData[i * 3 + 2]);
+		rayTriangleIntersection(rayOrigin, rayDirection,
+								(float3)(map->chunkMedTrianglesData[i * 9 + 0], map->chunkMedTrianglesData[i * 9 + 1], map->chunkMedTrianglesData[i * 9 + 2]),
+								(float3)(map->chunkMedTrianglesData[i * 9 + 3], map->chunkMedTrianglesData[i * 9 + 4], map->chunkMedTrianglesData[i * 9 + 5]),
+								(float3)(map->chunkMedTrianglesData[i * 9 + 6], map->chunkMedTrianglesData[i * 9 + 7], map->chunkMedTrianglesData[i * 9 + 8]),
+								&t, &triangleNormal);
+		if (t < *out_t) {
+			*out_t = t;
+			*out_hitNormal = triangleNormal;
+			triangleIdx = i;
+		}
+	}
+	if (triangleIdx != -1) {
+		int colorIdx = triangleIdx * 3;
+		*outColor = (float3)(map->chunkMedColorsData[colorIdx + 0],
+							 map->chunkMedColorsData[colorIdx + 1],
+							 map->chunkMedColorsData[colorIdx + 2]);
+		*out_emission = map->chunkMedEmissionData[triangleIdx];
+		*out_metallic = map->chunkMedMetallicData[triangleIdx];
+		*out_roughness = map->chunkMedRoughnessData[triangleIdx];
+	}
+}
 
-		v1 = (float3)(map->chunkLowTrianglesData[triIdx * 9 + 0],
-					  map->chunkLowTrianglesData[triIdx * 9 + 1],
-					  map->chunkLowTrianglesData[triIdx * 9 + 2]);
-		v2 = (float3)(map->chunkLowTrianglesData[triIdx * 9 + 3],
-					  map->chunkLowTrianglesData[triIdx * 9 + 4],
-					  map->chunkLowTrianglesData[triIdx * 9 + 5]);
-		v3 = (float3)(map->chunkLowTrianglesData[triIdx * 9 + 6],
-					  map->chunkLowTrianglesData[triIdx * 9 + 7],
-					  map->chunkLowTrianglesData[triIdx * 9 + 8]);
-
-		rayTriangleIntersection(
-			rayOrigin,
-			rayDirection,
-			v1,
-			v2,
-			v3,
-			&t,
-			&hitNormal);
-
-		if (t < *out_hitDistance) {
-			*out_hitDistance = t;
-			*out_hitNormal = hitNormal;
-			*out_hitColor = (float3)(map->chunkLowColorsData[triIdx * 3 + 0],
-									 map->chunkLowColorsData[triIdx * 3 + 1],
-									 map->chunkLowColorsData[triIdx * 3 + 2]);
-			*out_hitRoughness = map->chunkLowRoughnessData[triIdx];
-			*out_hitMetallic = map->chunkLowMetallicData[triIdx];
-			*out_hitEmission = map->chunkLowEmissionData[triIdx];
+void rayTriangleIntersectionAny(
+	__global const MapGPU *map const float3 rayOrigin,
+	const float3 rayDirection,
+	const float3 v1,
+	const float3 v2,
+	const float3 v3,
+	float *out_t,
+	float3 *out_hitNormal) {
+	int triangleIdx = -1;
+	for (int i = 0; i < map->chunkEndMed[CHUNK_COUNT_MED - 1]; i++) {
+		float t = INFINITY;
+		float3 triangleNormal = (float3)(map->chunkMedNormalsData[i * 3 + 0], map->chunkMedNormalsData[i * 3 + 1], map->chunkMedNormalsData[i * 3 + 2]);
+		rayTriangleIntersection(rayOrigin, rayDirection,
+								(float3)(map->chunkMedTrianglesData[i * 9 + 0], map->chunkMedTrianglesData[i * 9 + 1], map->chunkMedTrianglesData[i * 9 + 2]),
+								(float3)(map->chunkMedTrianglesData[i * 9 + 3], map->chunkMedTrianglesData[i * 9 + 4], map->chunkMedTrianglesData[i * 9 + 5]),
+								(float3)(map->chunkMedTrianglesData[i * 9 + 6], map->chunkMedTrianglesData[i * 9 + 7], map->chunkMedTrianglesData[i * 9 + 8]),
+								&t, &triangleNormal);
+		if (t < *out_t) {
+			*out_t = t;
+			*out_hitNormal = triangleNormal;
+			break;
 		}
 	}
 }
 
-void reflectRayGGX(
-    const float3 incident,
-    const float3 normal,
-    const float roughness,
-    const float3 ray_origin,
-    int bounce,
-    float3 *out_reflected) {
-    
-    // Handle perfect mirror
-    if (roughness < 0.001f) {
-        *out_reflected = incident - 2.0f * dot(normal, incident) * normal;
-        return;
-    }
-    
-    // Random numbers
-    float2 uv = rand2(ray_origin, incident, bounce);
-    
-    // Correct normal orientation
-    float3 N = dot(normal, incident) < 0.0f ? normal : -normal;
-    
-    // Basis vectors
-    float3 tangent, bitangent;
-    createCoordinateSystem(N, &tangent, &bitangent);
-    
-    // GGX sampling
-    float alpha = roughness * roughness;
-    float alpha2 = alpha * alpha;
-    
-    float cosTheta = sqrt((1.0f - uv.x) / (1.0f + (alpha2 - 1.0f) * uv.x));
-    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
-    float phi = 2.0f * M_PI * uv.y;
-    
-    // Local half vector
-    float3 H_local = (float3)(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
-    
-    // Transform to world space
-    float3 H = tangent * H_local.x + bitangent * H_local.y + N * H_local.z;
-    H = normalize(H);
-    
-    // Reflect incident ray around half vector
-    *out_reflected = normalize(incident - 2.0f * dot(incident, H) * H);
-    
-    // Ensure reflection is above surface
-    if (dot(*out_reflected, N) < 0.0f) {
-        *out_reflected = N; // Fallback
-    }
+// inline float2 rand2(
+//     const float3 ray_origin,
+//     const float3 incident,
+//     const int bounce) {
+//     // Simple hash function for generating pseudo-random numbers
+//     float seed = dot(ray_origin, (float3)(12.9898f, 78.233f, 37.719f)) +
+//                  dot(incident, (float3)(39.346f, 11.135f, 83.155f)) +
+//                  (float)bounce * 17.0f;
+//     float rand1 = fract(sin(seed) * 43758.5453f);
+//     float rand2 = fract(sin(seed + 1.0f) * 43758.5453f);
+//     return (float2)(rand1, rand2);
+// }
+
+// void reflectRayGGX(
+//     const float3 incident,
+//     const float3 normal,
+//     const float roughness,
+//     const float3 ray_origin,
+//     int bounce,
+//     float3 *out_reflected) {
+
+//     // Handle perfect mirror
+//     if (roughness < 0.001f) {
+//         *out_reflected = incident - 2.0f * dot(normal, incident) * normal;
+//         return;
+//     }
+
+//     // Random numbers
+//     float2 uv = rand2(ray_origin, incident, bounce);
+
+//     // Correct normal orientation
+//     float3 N = dot(normal, incident) < 0.0f ? normal : -normal;
+
+//     // Basis vectors
+//     float3 tangent, bitangent;
+//     createCoordinateSystem(N, &tangent, &bitangent);
+
+//     // GGX sampling
+//     float alpha = roughness * roughness;
+//     float alpha2 = alpha * alpha;
+
+//     float cosTheta = sqrt((1.0f - uv.x) / (1.0f + (alpha2 - 1.0f) * uv.x));
+//     float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+//     float phi = 2.0f * M_PI * uv.y;
+
+//     // Local half vector
+//     float3 H_local = (float3)(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+
+//     // Transform to world space
+//     float3 H = tangent * H_local.x + bitangent * H_local.y + N * H_local.z;
+//     H = normalize(H);
+
+//     // Reflect incident ray around half vector
+//     *out_reflected = normalize(incident - 2.0f * dot(incident, H) * H);
+
+//     // Ensure reflection is above surface
+//     if (dot(*out_reflected, N) < 0.0f) {
+//         *out_reflected = N; // Fallback
+//     }
+// }
+
+// vec3 EvaluateBRDF(vec3 V, vec3 L, vec3 N, Material m) {
+//     vec3 diffuse  = m.albedo * (1.0 - m.metallic);
+//     vec3 specular = mix(vec3(0.04), m.albedo, m.metallic);
+//     return diffuse / PI + specular;
+// }
+
+// bool Occluded(vec3 origin, vec3 dir) {
+//     return IntersectAny(origin, dir);
+// }
+
+// vec3 TraceRay(Ray ray) {
+//     vec3 radiance   = vec3(0);
+//     vec3 throughput = vec3(1);
+
+//     vec3 sunDir = normalize(vec3(0.3, 0.9, 0.1));
+//     vec3 sunCol = vec3(20, 18, 15);
+
+//     for (int bounce = 0; bounce < 3; bounce++) {
+
+//         Hit h = Intersect(ray);
+
+//         // --- skybox hit ---
+//         if (!h.hit) {
+//             radiance += throughput * SampleSky(ray.dir);
+//             break;
+//         }
+
+//         Material m = h.material;
+//         vec3 P = h.position;
+//         vec3 N = h.normal;
+
+//         // --- sun (direct light) ---
+//         if (!Occluded(P + N * 1e-4, sunDir)) {
+//             float NdotL = max(dot(N, sunDir), 0.0);
+//             vec3 brdf = EvaluateBRDF(-ray.dir, sunDir, N, m);
+//             radiance += throughput * sunCol * brdf * NdotL;
+//         }
+
+//         // --- emission ---
+//         radiance += throughput * m.emission;
+
+//         // --- bounce ---
+//         vec3 newDir = SampleBRDF(-ray.dir, N, m);
+//         vec3 brdf   = EvaluateBRDF(-ray.dir, newDir, N, m);
+//         float pdf   = BRDF_PDF(-ray.dir, newDir, N, m);
+
+//         float NdotL = max(dot(N, newDir), 0.0);
+//         throughput *= brdf * NdotL / pdf;
+
+//         ray.origin = P + newDir * 1e-4;
+//         ray.dir    = newDir;
+//     }
+
+//     return radiance;
+// }
+
+__kernel void rayTrace(
+	__global const MapGPU *map,
+	// Camera and screen parameters
+	const float3 camPos,
+	const float3 camDir,
+	const float fov,
+	const int screenWidth,
+	const int screenHeight,
+    const int maxBounces,
+
+	// Output buffers
+	__global float *ScreenDistances,
+	__global float *ScreenColors,
+	__global float *ScreenNormals,
+	__global float *ScreenMaterialRoughness,
+	__global float *ScreenMaterialMetallic,
+	__global float *ScreenMaterialEmission) {
+	int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= screenWidth || y >= screenHeight) return;
 }
-
-
 
 __kernel void renderMissile(
 	// Missile model data
