@@ -13,7 +13,7 @@ static float degreesToRadians(float degrees) {
 	return degrees * M_PI / 180.0f;
 }
 
-static void updateBBox(float x, float y, float z, float minBB[3], float maxBB[3]) {
+void updateBBox(float x, float y, float z, float minBB[3], float maxBB[3]) {
 	if (x < minBB[0]) minBB[0] = x;
 	if (y < minBB[1]) minBB[1] = y;
 	if (z < minBB[2]) minBB[2] = z;

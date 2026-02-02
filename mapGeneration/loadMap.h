@@ -108,5 +108,7 @@ void free_map(struct Map *map);
 void initMapGPU(struct MapGPU *mapGpu, struct Map *map);
 void calculateBoundingBoxMapTile(struct MapTile *tile);
 void calculateBoundingBoxesMap(struct Map *map);
+void updateBBoxWithTriangle(float v1[3], float v2[3], float v3[3], float minBB[3], float maxBB[3]);
+void updateBBox(float x, float y, float z, float minBB[3], float maxBB[3]);
 
 #endif
