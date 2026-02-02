@@ -70,6 +70,11 @@ struct MapGPU {
     int chunkStartHigh[CHUNK_COUNT];
     int chunkStartMed[CHUNK_COUNT];
     int chunkStartLow[CHUNK_COUNT];
+    int chunkEndHigh[CHUNK_COUNT];
+    int chunkEndMed[CHUNK_COUNT];
+    int chunkEndLow[CHUNK_COUNT];
+    float chunkBBoxMin[CHUNK_COUNT * 3]; // minX, minY, minZ
+    float chunkBBoxMax[CHUNK_COUNT * 3]; // maxX, maxY, maxZ
 
     float chunkHighTrianglesData[HIGH_RES_TRIANGLE_COUNT * 9];
     float chunkHighRoughnessData[HIGH_RES_TRIANGLE_COUNT];

@@ -3,7 +3,7 @@ CFLAGS = -O3 -march=native -Wall -DFIRE_BENCHMARK
 LDFLAGS = -lm
 
 TARGET = fireSim_benchmark
-SRC = fireSim.c
+SRC = fireSim.c ../mapGeneration/loadMap.c ../flares/flare.c
 
 all: $(TARGET)
 

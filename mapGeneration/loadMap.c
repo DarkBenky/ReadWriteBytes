@@ -270,7 +270,6 @@ void init_terrain_map(char *dir_high, char *dir_med, char *dir_low, struct Map *
 	map->tilesX = min_x;
 	map->tilesY = min_y;
 
-	// Allocate temporary tile on heap (it's too large for stack - ~54MB)
 	struct MapTile *tempTile = (struct MapTile *)calloc(1, sizeof(struct MapTile));
 	if (!tempTile) {
 		printf("Failed to allocate memory for temporary tile\n");
@@ -523,6 +522,12 @@ struct MapTile *get_tile_by_index(struct Map *map, int index) {
 	return &map->tiles[index];
 }
 
+void updateBBoxWithTriangle(float v1[3], float v2[3], float v3[3], float minBB[3], float maxBB[3]) {
+	updateBBox(v1[0], v1[1], v1[2], minBB, maxBB);
+	updateBBox(v2[0], v2[1], v2[2], minBB, maxBB);
+	updateBBox(v3[0], v3[1], v3[2], minBB, maxBB);
+}
+
 void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 	// Initialize MapGPU structure from Map data
 	if (!mapGpu) {
@@ -546,6 +551,7 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 	int highOffset = 0;
 	int medOffset = 0;
 	int lowOffset = 0;
+	// Initialize chunk end indices
 
 	for (int i = 0; i < CHUNK_COUNT; i++) {
 		struct MapTile *tile = get_tile_by_index(map, i);
@@ -556,12 +562,22 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 		mapGpu->chunkStartMed[i] = medOffset;
 		mapGpu->chunkStartLow[i] = lowOffset;
 
+		float bbMin[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+		float bbMax[3] = {FLT_MIN, FLT_MIN, FLT_MIN	};
+
 		// Copy high-res triangle data (v1, v2, v3 = 9 floats per triangle)
 		int highCount = tile->terrainHigh.count;
 		for (int j = 0; j < highCount; j++) {
 			int srcIdx = j * 3;
 			int dstIdx = highOffset + j * 9;
 			int dstTriIdx = highOffset / 9 + j;
+
+			updateBBoxWithTriangle(
+				&(tile->terrainHigh.v1[srcIdx]),
+				&(tile->terrainHigh.v2[srcIdx]),
+				&(tile->terrainHigh.v3[srcIdx]),
+				bbMin, bbMax);
+
 
 			// Copy v1
 			mapGpu->chunkHighTrianglesData[dstIdx + 0] = tile->terrainHigh.v1[srcIdx + 0];
@@ -592,6 +608,15 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 			mapGpu->chunkHighEmissionData[dstTriIdx] = tile->terrainHigh.Emission[j];
 		}
 		highOffset += highCount * 9;
+		mapGpu->chunkEndHigh[i] = highOffset;
+
+		// save bbox
+		mapGpu->chunkBBoxMin[i * 3 + 0] = bbMin[0];
+		mapGpu->chunkBBoxMin[i * 3 + 1] = bbMin[1];
+		mapGpu->chunkBBoxMin[i * 3 + 2] = bbMin[2];
+		mapGpu->chunkBBoxMax[i * 3 + 0] = bbMax[0];
+		mapGpu->chunkBBoxMax[i * 3 + 1] = bbMax[1];
+		mapGpu->chunkBBoxMax[i * 3 + 2] = bbMax[2];
 
 		// Copy mid-res triangle data
 		int medCount = tile->terrainMed.count;
@@ -628,6 +653,7 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 			mapGpu->chunkMedEmissionData[dstTriIdx] = tile->terrainMed.Emission[j];
 		}
 		medOffset += medCount * 9;
+		mapGpu->chunkEndMed[i] = medOffset;
 
 		// Copy low-res triangle data
 		int lowCount = tile->terrainLow.count;
@@ -664,6 +690,7 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 			mapGpu->chunkLowEmissionData[dstTriIdx] = tile->terrainLow.Emission[j];
 		}
 		lowOffset += lowCount * 9;
+		mapGpu->chunkEndLow[i] = lowOffset;
 	}
 
 	printf("MapGPU initialized: %d chunks loaded\n", CHUNK_COUNT);
@@ -796,7 +823,7 @@ float inline distance(float a[3], float b[3]) {
 				 (a[2] - b[2]) * (a[2] - b[2]));
 }
 
-void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, float *hitDistance, float *hitPos[3], int *hitTriangleIndex) {
+void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, float *hitDistance, float hitPos[3], int *hitTriangleIndex) {
 	// Check collision of point with mesh bounding boxes in the tile at given LOD level
 	// If a bounding box is hit, return its center position and index
 	// If no bounding box is hit, return the closest bounding box info
@@ -808,11 +835,11 @@ void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, 
 	if (lod == LOD_HIGH) {
 		for (int i = 0; i < tile->terrainHigh.count; i++) {
 			if (PointInBoundingBox(pos, &tile->terrainHighBoundingBoxes[i])) {
-				*hitPos[0] = tile->terrainHighBoundingBoxes[i].center[0];
-				*hitPos[1] = tile->terrainHighBoundingBoxes[i].center[1];
-				*hitPos[2] = tile->terrainHighBoundingBoxes[i].center[2];
+				hitPos[0] = tile->terrainHighBoundingBoxes[i].center[0];
+				hitPos[1] = tile->terrainHighBoundingBoxes[i].center[1];
+				hitPos[2] = tile->terrainHighBoundingBoxes[i].center[2];
 				*hitTriangleIndex = i;
-				*hitDistance = distance(pos, *hitPos);
+				*hitDistance = distance(pos, hitPos);
 				return;
 			} else {
 				// Keep track of closest bounding box
@@ -829,11 +856,11 @@ void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, 
 	} else if (lod == LOD_MEDIUM) {
 		for (int i = 0; i < tile->terrainMed.count; i++) {
 			if (PointInBoundingBox(pos, &tile->terrainMedBoundingBoxes[i])) {
-				*hitPos[0] = tile->terrainMedBoundingBoxes[i].center[0];
-				*hitPos[1] = tile->terrainMedBoundingBoxes[i].center[1];
-				*hitPos[2] = tile->terrainMedBoundingBoxes[i].center[2];
+				hitPos[0] = tile->terrainMedBoundingBoxes[i].center[0];
+				hitPos[1] = tile->terrainMedBoundingBoxes[i].center[1];
+				hitPos[2] = tile->terrainMedBoundingBoxes[i].center[2];
 				*hitTriangleIndex = i;
-				*hitDistance = distance(pos, *hitPos);
+				*hitDistance = distance(pos, hitPos);
 				return;
 			} else {
 				// Keep track of closest bounding box
@@ -850,11 +877,11 @@ void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, 
 	} else if (lod == LOD_LOW) {
 		for (int i = 0; i < tile->terrainLow.count; i++) {
 			if (PointInBoundingBox(pos, &tile->terrainLowBoundingBoxes[i])) {
-				*hitPos[0] = tile->terrainLowBoundingBoxes[i].center[0];
-				*hitPos[1] = tile->terrainLowBoundingBoxes[i].center[1];
-				*hitPos[2] = tile->terrainLowBoundingBoxes[i].center[2];
+				hitPos[0] = tile->terrainLowBoundingBoxes[i].center[0];
+				hitPos[1] = tile->terrainLowBoundingBoxes[i].center[1];
+				hitPos[2] = tile->terrainLowBoundingBoxes[i].center[2];
 				*hitTriangleIndex = i;
-				*hitDistance = distance(pos, *hitPos);
+				*hitDistance = distance(pos, hitPos);
 				return;
 			} else {
 				// Keep track of closest bounding box
@@ -871,9 +898,9 @@ void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, 
 	}
 	// If no bounding box was hit, return closest
 	if (closestIndex != -1) {
-		*hitPos[0] = closestPos[0];
-		*hitPos[1] = closestPos[1];
-		*hitPos[2] = closestPos[2];
+		hitPos[0] = closestPos[0];
+		hitPos[1] = closestPos[1];
+		hitPos[2] = closestPos[2];
 		*hitTriangleIndex = closestIndex;
 		*hitDistance = closestDist;
 	} else {

@@ -13,6 +13,7 @@ struct OpenCLContext {
 	cl_command_queue queue;
 	cl_program program;
 	// kernels
+	cl_kernel rayTrace_kernel;
 	cl_kernel antiAliasKernel;
 	cl_kernel drawBoundingBox_kernel;
 	cl_kernel kernel; // project particles kernel

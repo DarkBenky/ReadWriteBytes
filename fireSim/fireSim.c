@@ -874,8 +874,8 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 	if (*active) {
 		float minDistance = MAX_FLOAT;
 		int closePixels = 0;
-		const float avoidanceThreshold = 250.0f;
-		const float criticalThreshold = 100.0f;
+		const float avoidanceThreshold = 750.0f;
+		const float criticalThreshold = 150.0f;
 
 		int regions[9] = {0};
 		float regionMinDist[9];
@@ -910,7 +910,7 @@ void missileSeekStep(struct Missile *missile, struct Missiles *allMissiles, bool
 			for (int x = 0; x < MISSILE_SEEKER_SIZE; x++) {
 				int i = y * MISSILE_SEEKER_SIZE + x;
 				float dist = missile->seeker.seekerDepthWideView[i];
-
+				// printf("Checking pixel (%d, %d): distance = %f\n", x, y, dist);
 				if (dist > 0.01f && dist < avoidanceThreshold) {
 					closePixels++;
 					if (dist < minDistance) minDistance = dist;
