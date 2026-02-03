@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 #include "../openGlShaders/gpuStruct.h"
 #include "../mapGeneration/loadMap.h"
 
@@ -37,6 +38,117 @@ struct Region {
 	float BBoxMax[3];
 	struct Block blocks[8];
 };
+
+struct HitInfo {
+	int hit;
+	float t;
+	float hitPoint[3];
+	float hitNormal[3];
+	float color[3];
+	float roughness;
+	float metallic;
+	float emission;
+	int volumeIdx;
+	int triangleIdx;
+};
+
+static int rayBoxIntersect(float rayOrigin[3], float rayDir[3],
+						   float boxMin[3], float boxMax[3],
+						   float *tMin, float *tMax) {
+	const float epsilon = 1e-6f;
+	float t1 = -1e30f;
+	float t2 = 1e30f;
+
+	for (int i = 0; i < 3; i++) {
+		if (fabsf(rayDir[i]) < epsilon) {
+			if (rayOrigin[i] < boxMin[i] || rayOrigin[i] > boxMax[i]) {
+				return 0;
+			}
+		} else {
+			float invD = 1.0f / rayDir[i];
+			float t_near = (boxMin[i] - rayOrigin[i]) * invD;
+			float t_far = (boxMax[i] - rayOrigin[i]) * invD;
+
+			if (t_near > t_far) {
+				float temp = t_near;
+				t_near = t_far;
+				t_far = temp;
+			}
+
+			t1 = (t_near > t1) ? t_near : t1;
+			t2 = (t_far < t2) ? t_far : t2;
+
+			if (t1 > t2) {
+				return 0;
+			}
+		}
+	}
+
+	*tMin = t1;
+	*tMax = t2;
+	return (t2 >= 0.0f);
+}
+
+static int rayTriangleIntersect(float rayOrigin[3], float rayDir[3],
+								float v1[3], float v2[3], float v3[3],
+								float *t, float hitNormal[3]) {
+	const float epsilon = 1e-6f;
+
+	float edge1[3] = {v2[0] - v1[0], v2[1] - v1[1], v2[2] - v1[2]};
+	float edge2[3] = {v3[0] - v1[0], v3[1] - v1[1], v3[2] - v1[2]};
+
+	float h[3] = {
+		rayDir[1] * edge2[2] - rayDir[2] * edge2[1],
+		rayDir[2] * edge2[0] - rayDir[0] * edge2[2],
+		rayDir[0] * edge2[1] - rayDir[1] * edge2[0]};
+
+	float a = edge1[0] * h[0] + edge1[1] * h[1] + edge1[2] * h[2];
+
+	if (a > -epsilon && a < epsilon) {
+		return 0;
+	}
+
+	float f = 1.0f / a;
+	float s[3] = {rayOrigin[0] - v1[0], rayOrigin[1] - v1[1], rayOrigin[2] - v1[2]};
+	float u = f * (s[0] * h[0] + s[1] * h[1] + s[2] * h[2]);
+
+	if (u < 0.0f || u > 1.0f) {
+		return 0;
+	}
+
+	float q[3] = {
+		s[1] * edge1[2] - s[2] * edge1[1],
+		s[2] * edge1[0] - s[0] * edge1[2],
+		s[0] * edge1[1] - s[1] * edge1[0]};
+
+	float v = f * (rayDir[0] * q[0] + rayDir[1] * q[1] + rayDir[2] * q[2]);
+
+	if (v < 0.0f || u + v > 1.0f) {
+		return 0;
+	}
+
+	float tValue = f * (edge2[0] * q[0] + edge2[1] * q[1] + edge2[2] * q[2]);
+
+	if (tValue > epsilon) {
+		*t = tValue;
+
+		float normal[3] = {
+			edge1[1] * edge2[2] - edge1[2] * edge2[1],
+			edge1[2] * edge2[0] - edge1[0] * edge2[2],
+			edge1[0] * edge2[1] - edge1[1] * edge2[0]};
+
+		float len = sqrtf(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+		if (len > epsilon) {
+			hitNormal[0] = normal[0] / len;
+			hitNormal[1] = normal[1] / len;
+			hitNormal[2] = normal[2] / len;
+		}
+
+		return 1;
+	}
+
+	return 0;
+}
 
 static void initializeBoundingBoxes(struct Region *region) {
 	float inf = 1e30f;
@@ -114,6 +226,164 @@ static void addTriangleToVolume(struct Volume *volume, float v1[3], float v2[3],
 	updateBBox(v3[0], v3[1], v3[2], volume->BBoxMin, volume->BBoxMax);
 
 	volume->count++;
+}
+
+struct HitInfo intersectRay(struct Region *region, float pos[3], float dir[3]) {
+	struct HitInfo result = {0};
+	result.hit = 0;
+	result.t = 1e30f;
+
+	const float epsilon = 1e-6f;
+	const float inf = 1e30f;
+
+	float tMin, tMax;
+	if (!rayBoxIntersect(pos, dir, region->BBoxMin, region->BBoxMax, &tMin, &tMax)) {
+		return result;
+	}
+
+	for (int b = 0; b < 8; b++) {
+		struct Block *block = &region->blocks[b];
+
+		if (block->BBoxMin[0] >= inf || block->BBoxMin[1] >= inf || block->BBoxMin[2] >= inf) {
+			continue;
+		}
+
+		if (!rayBoxIntersect(pos, dir, block->BBoxMin, block->BBoxMax, &tMin, &tMax)) {
+			continue;
+		}
+
+		for (int c = 0; c < 8; c++) {
+			struct Cluster *cluster = &block->clusters[c];
+
+			if (cluster->BBoxMin[0] >= inf || cluster->BBoxMin[1] >= inf || cluster->BBoxMin[2] >= inf) {
+				continue;
+			}
+
+			if (!rayBoxIntersect(pos, dir, cluster->BBoxMin, cluster->BBoxMax, &tMin, &tMax)) {
+				continue;
+			}
+
+			for (int v = 0; v < 8; v++) {
+				struct Volume *volume = &cluster->volumes[v];
+
+				if (volume->count == 0) {
+					continue;
+				}
+
+				if (volume->BBoxMin[0] >= inf || volume->BBoxMin[1] >= inf || volume->BBoxMin[2] >= inf) {
+					continue;
+				}
+
+				if (!rayBoxIntersect(pos, dir, volume->BBoxMin, volume->BBoxMax, &tMin, &tMax)) {
+					continue;
+				}
+
+				for (int i = 0; i < volume->count; i++) {
+					float v1[3] = {volume->v1[i * 3], volume->v1[i * 3 + 1], volume->v1[i * 3 + 2]};
+					float v2[3] = {volume->v2[i * 3], volume->v2[i * 3 + 1], volume->v2[i * 3 + 2]};
+					float v3[3] = {volume->v3[i * 3], volume->v3[i * 3 + 1], volume->v3[i * 3 + 2]};
+
+					float t = 0.0f;
+					float normal[3] = {0, 0, 0};
+
+					if (rayTriangleIntersect(pos, dir, v1, v2, v3, &t, normal)) {
+						if (t > epsilon && t < result.t) {
+							result.hit = 1;
+							result.t = t;
+
+							result.hitPoint[0] = pos[0] + dir[0] * t;
+							result.hitPoint[1] = pos[1] + dir[1] * t;
+							result.hitPoint[2] = pos[2] + dir[2] * t;
+
+							result.hitNormal[0] = normal[0];
+							result.hitNormal[1] = normal[1];
+							result.hitNormal[2] = normal[2];
+
+							result.color[0] = volume->colors[i * 3];
+							result.color[1] = volume->colors[i * 3 + 1];
+							result.color[2] = volume->colors[i * 3 + 2];
+
+							result.roughness = volume->Roughness[i];
+							result.metallic = volume->Metallic[i];
+							result.emission = volume->Emission[i];
+
+							result.volumeIdx = v;
+							result.triangleIdx = i;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return result;
+}
+
+int intersectAny(struct Region *region, float pos[3], float dir[3], float maxDist) {
+	const float epsilon = 1e-6f;
+	const float inf = 1e30f;
+
+	float tMin, tMax;
+	if (!rayBoxIntersect(pos, dir, region->BBoxMin, region->BBoxMax, &tMin, &tMax)) {
+		return 0;
+	}
+
+	for (int b = 0; b < 8; b++) {
+		struct Block *block = &region->blocks[b];
+
+		if (block->BBoxMin[0] >= inf || block->BBoxMin[1] >= inf || block->BBoxMin[2] >= inf) {
+			continue;
+		}
+
+		if (!rayBoxIntersect(pos, dir, block->BBoxMin, block->BBoxMax, &tMin, &tMax)) {
+			continue;
+		}
+
+		for (int c = 0; c < 8; c++) {
+			struct Cluster *cluster = &block->clusters[c];
+
+			if (cluster->BBoxMin[0] >= inf || cluster->BBoxMin[1] >= inf || cluster->BBoxMin[2] >= inf) {
+				continue;
+			}
+
+			if (!rayBoxIntersect(pos, dir, cluster->BBoxMin, cluster->BBoxMax, &tMin, &tMax)) {
+				continue;
+			}
+
+			for (int v = 0; v < 8; v++) {
+				struct Volume *volume = &cluster->volumes[v];
+
+				if (volume->count == 0) {
+					continue;
+				}
+
+				if (volume->BBoxMin[0] >= inf || volume->BBoxMin[1] >= inf || volume->BBoxMin[2] >= inf) {
+					continue;
+				}
+
+				if (!rayBoxIntersect(pos, dir, volume->BBoxMin, volume->BBoxMax, &tMin, &tMax)) {
+					continue;
+				}
+
+				for (int i = 0; i < volume->count; i++) {
+					float v1[3] = {volume->v1[i * 3], volume->v1[i * 3 + 1], volume->v1[i * 3 + 2]};
+					float v2[3] = {volume->v2[i * 3], volume->v2[i * 3 + 1], volume->v2[i * 3 + 2]};
+					float v3[3] = {volume->v3[i * 3], volume->v3[i * 3 + 1], volume->v3[i * 3 + 2]};
+
+					float t = 0.0f;
+					float normal[3] = {0, 0, 0};
+
+					if (rayTriangleIntersect(pos, dir, v1, v2, v3, &t, normal)) {
+						if (t > epsilon && t <= maxDist) {
+							return 1;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return 0;
 }
 
 enum Mode {
@@ -329,6 +599,64 @@ int main() {
 	printf("  P99:    %.6f ms\n", p99);
 	printf("  Min:    %.6f ms\n", timeStemps[0]);
 	printf("  Max:    %.6f ms\n", timeStemps[iterations - 1]);
+
+	printf("\n=== Ray Intersection Tests ===\n");
+
+	sceneTriangles->count = 0;
+	sceneTriangles->v1[0] = 0.0f; sceneTriangles->v1[1] = 0.0f; sceneTriangles->v1[2] = 10.0f;
+	sceneTriangles->v2[0] = 10.0f; sceneTriangles->v2[1] = 0.0f; sceneTriangles->v2[2] = 10.0f;
+	sceneTriangles->v3[0] = 5.0f; sceneTriangles->v3[1] = 10.0f; sceneTriangles->v3[2] = 10.0f;
+	sceneTriangles->normals[0] = 0.0f; sceneTriangles->normals[1] = 0.0f; sceneTriangles->normals[2] = -1.0f;
+	sceneTriangles->colors[0] = 255.0f; sceneTriangles->colors[1] = 0.0f; sceneTriangles->colors[2] = 0.0f;
+	sceneTriangles->Roughness[0] = 0.5f;
+	sceneTriangles->Metallic[0] = 0.1f;
+	sceneTriangles->Emission[0] = 0.0f;
+	sceneTriangles->count = 1;
+
+	loadTriangles(staticRegion, sceneTriangles, INIT_MODE);
+
+	float rayPos[3] = {5.0f, 3.0f, 0.0f};
+	float rayDir[3] = {0.0f, 0.0f, 1.0f};
+
+	printf("\nTest 1: intersectRay - Ray through triangle\n");
+	struct HitInfo hit = intersectRay(staticRegion, rayPos, rayDir);
+	if (hit.hit) {
+		printf("  Hit at distance %.2f\n", hit.t);
+		printf("  Hit point: (%.2f, %.2f, %.2f)\n", hit.hitPoint[0], hit.hitPoint[1], hit.hitPoint[2]);
+		printf("  Normal: (%.2f, %.2f, %.2f)\n", hit.hitNormal[0], hit.hitNormal[1], hit.hitNormal[2]);
+		printf("  Color: (%.0f, %.0f, %.0f)\n", hit.color[0], hit.color[1], hit.color[2]);
+		printf("  Roughness: %.2f, Metallic: %.2f, Emission: %.2f\n", hit.roughness, hit.metallic, hit.emission);
+	} else {
+		printf("  No hit (unexpected)\n");
+	}
+
+	printf("\nTest 2: intersectRay - Ray missing triangle\n");
+	float rayPos2[3] = {100.0f, 100.0f, 0.0f};
+	float rayDir2[3] = {0.0f, 0.0f, 1.0f};
+	struct HitInfo hit2 = intersectRay(staticRegion, rayPos2, rayDir2);
+	if (hit2.hit) {
+		printf("  Hit at distance %.2f (unexpected)\n", hit2.t);
+	} else {
+		printf("  No hit (expected)\n");
+	}
+
+	printf("\nTest 3: intersectAny - Ray within maxDist\n");
+	float maxDist = 20.0f;
+	int anyHit = intersectAny(staticRegion, rayPos, rayDir, maxDist);
+	if (anyHit) {
+		printf("  Object detected within %.2f units (expected)\n", maxDist);
+	} else {
+		printf("  No object detected (unexpected)\n");
+	}
+
+	printf("\nTest 4: intersectAny - Ray beyond maxDist\n");
+	float shortDist = 5.0f;
+	int anyHit2 = intersectAny(staticRegion, rayPos, rayDir, shortDist);
+	if (anyHit2) {
+		printf("  Object detected within %.2f units (unexpected)\n", shortDist);
+	} else {
+		printf("  No object detected within %.2f units (expected)\n", shortDist);
+	}
 
 	free(staticRegion);
 	free(sceneTriangles);
