@@ -4,3 +4,4 @@
 *.png
 *.log
 mlLib/wandb/
+triangleToGpu/loadToGpu
