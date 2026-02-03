@@ -3,4 +3,7 @@
 .ccls*
 *.png
 *.log
+*.o
 mlLib/wandb/
+triangleToGpu/loadToGpu
+main
