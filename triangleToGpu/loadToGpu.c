@@ -236,7 +236,7 @@ struct HitInfo intersectRay(struct Region *region, float pos[3], float dir[3]) {
 	for (int b = 0; b < 8; b++) {
 		struct Block *block = &region->blocks[b];
 
-		if (block->BBoxMin[0] >= inf || block->BBoxMax[0] <= -inf) {
+		if (block->BBoxMin[0] >= inf || block->BBoxMin[1] >= inf || block->BBoxMin[2] >= inf) {
 			continue;
 		}
 
@@ -247,7 +247,7 @@ struct HitInfo intersectRay(struct Region *region, float pos[3], float dir[3]) {
 		for (int c = 0; c < 8; c++) {
 			struct Cluster *cluster = &block->clusters[c];
 
-			if (cluster->BBoxMin[0] >= inf || cluster->BBoxMax[0] <= -inf) {
+			if (cluster->BBoxMin[0] >= inf || cluster->BBoxMin[1] >= inf || cluster->BBoxMin[2] >= inf) {
 				continue;
 			}
 
@@ -262,7 +262,7 @@ struct HitInfo intersectRay(struct Region *region, float pos[3], float dir[3]) {
 					continue;
 				}
 
-				if (volume->BBoxMin[0] >= inf || volume->BBoxMax[0] <= -inf) {
+				if (volume->BBoxMin[0] >= inf || volume->BBoxMin[1] >= inf || volume->BBoxMin[2] >= inf) {
 					continue;
 				}
 
@@ -323,7 +323,7 @@ int intersectAny(struct Region *region, float pos[3], float dir[3], float maxDis
 	for (int b = 0; b < 8; b++) {
 		struct Block *block = &region->blocks[b];
 
-		if (block->BBoxMin[0] >= inf || block->BBoxMax[0] <= -inf) {
+		if (block->BBoxMin[0] >= inf || block->BBoxMin[1] >= inf || block->BBoxMin[2] >= inf) {
 			continue;
 		}
 
@@ -334,7 +334,7 @@ int intersectAny(struct Region *region, float pos[3], float dir[3], float maxDis
 		for (int c = 0; c < 8; c++) {
 			struct Cluster *cluster = &block->clusters[c];
 
-			if (cluster->BBoxMin[0] >= inf || cluster->BBoxMax[0] <= -inf) {
+			if (cluster->BBoxMin[0] >= inf || cluster->BBoxMin[1] >= inf || cluster->BBoxMin[2] >= inf) {
 				continue;
 			}
 
@@ -349,7 +349,7 @@ int intersectAny(struct Region *region, float pos[3], float dir[3], float maxDis
 					continue;
 				}
 
-				if (volume->BBoxMin[0] >= inf || volume->BBoxMax[0] <= -inf) {
+				if (volume->BBoxMin[0] >= inf || volume->BBoxMin[1] >= inf || volume->BBoxMin[2] >= inf) {
 					continue;
 				}
 
