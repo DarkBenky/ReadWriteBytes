@@ -164,11 +164,11 @@ void loadTriangles(struct Region *staticRegion, struct Triangles *sceneTriangles
 		float sizeX = regionMax[0] - regionMin[0];
 		float sizeY = regionMax[1] - regionMin[1];
 		float sizeZ = regionMax[2] - regionMin[2];
-		
+
 		float bufferX = sizeX * BUFFER_PERCENTAGE;
 		float bufferY = sizeY * BUFFER_PERCENTAGE;
 		float bufferZ = sizeZ * BUFFER_PERCENTAGE;
-		
+
 		regionMin[0] -= bufferX;
 		regionMin[1] -= bufferY;
 		regionMin[2] -= bufferZ;
