@@ -1,4 +1,5 @@
 #define Capacity 1024
+#define BUFFER_PERCENTAGE 0.2f
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -181,6 +182,13 @@ static void computeTriangleCenter(float v1[3], float v2[3], float v3[3], float c
 	center[0] = (v1[0] + v2[0] + v3[0]) / 3.0f;
 	center[1] = (v1[1] + v2[1] + v3[1]) / 3.0f;
 	center[2] = (v1[2] + v2[2] + v3[2]) / 3.0f;
+}
+
+static void clampPoint(float point[3], float minBounds[3], float maxBounds[3]) {
+	for (int i = 0; i < 3; i++) {
+		if (point[i] < minBounds[i]) point[i] = minBounds[i];
+		if (point[i] > maxBounds[i]) point[i] = maxBounds[i];
+	}
 }
 
 static void addTriangleToVolume(struct Volume *volume, float v1[3], float v2[3], float v3[3],
@@ -402,14 +410,41 @@ void loadTriangles(struct Region *staticRegion, struct Triangles *sceneTriangles
 	float regionMin[3] = {1e30f, 1e30f, 1e30f};
 	float regionMax[3] = {-1e30f, -1e30f, -1e30f};
 
-	for (int i = 0; i < sceneTriangles->count && i < NUMBER_OF_TRIANGLES; i++) {
-		float v1[3] = {sceneTriangles->v1[i * 3], sceneTriangles->v1[i * 3 + 1], sceneTriangles->v1[i * 3 + 2]};
-		float v2[3] = {sceneTriangles->v2[i * 3], sceneTriangles->v2[i * 3 + 1], sceneTriangles->v2[i * 3 + 2]};
-		float v3[3] = {sceneTriangles->v3[i * 3], sceneTriangles->v3[i * 3 + 1], sceneTriangles->v3[i * 3 + 2]};
+	// In APPEND_MODE, use existing region bounds instead of recalculating
+	if (mode == APPEND_MODE) {
+		regionMin[0] = staticRegion->BBoxMin[0];
+		regionMin[1] = staticRegion->BBoxMin[1];
+		regionMin[2] = staticRegion->BBoxMin[2];
+		regionMax[0] = staticRegion->BBoxMax[0];
+		regionMax[1] = staticRegion->BBoxMax[1];
+		regionMax[2] = staticRegion->BBoxMax[2];
+	} else {
+		// In INIT_MODE, calculate bounds from triangles
+		for (int i = 0; i < sceneTriangles->count && i < NUMBER_OF_TRIANGLES; i++) {
+			float v1[3] = {sceneTriangles->v1[i * 3], sceneTriangles->v1[i * 3 + 1], sceneTriangles->v1[i * 3 + 2]};
+			float v2[3] = {sceneTriangles->v2[i * 3], sceneTriangles->v2[i * 3 + 1], sceneTriangles->v2[i * 3 + 2]};
+			float v3[3] = {sceneTriangles->v3[i * 3], sceneTriangles->v3[i * 3 + 1], sceneTriangles->v3[i * 3 + 2]};
 
-		updateBBox(v1[0], v1[1], v1[2], regionMin, regionMax);
-		updateBBox(v2[0], v2[1], v2[2], regionMin, regionMax);
-		updateBBox(v3[0], v3[1], v3[2], regionMin, regionMax);
+			updateBBox(v1[0], v1[1], v1[2], regionMin, regionMax);
+			updateBBox(v2[0], v2[1], v2[2], regionMin, regionMax);
+			updateBBox(v3[0], v3[1], v3[2], regionMin, regionMax);
+		}
+
+		// Expand bounding box by buffer percentage in all 6 directions
+		float sizeX = regionMax[0] - regionMin[0];
+		float sizeY = regionMax[1] - regionMin[1];
+		float sizeZ = regionMax[2] - regionMin[2];
+
+		float bufferX = sizeX * BUFFER_PERCENTAGE;
+		float bufferY = sizeY * BUFFER_PERCENTAGE;
+		float bufferZ = sizeZ * BUFFER_PERCENTAGE;
+
+		regionMin[0] -= bufferX;
+		regionMin[1] -= bufferY;
+		regionMin[2] -= bufferZ;
+		regionMax[0] += bufferX;
+		regionMax[1] += bufferY;
+		regionMax[2] += bufferZ;
 	}
 
 	staticRegion->BBoxMin[0] = regionMin[0];
@@ -433,6 +468,11 @@ void loadTriangles(struct Region *staticRegion, struct Triangles *sceneTriangles
 
 		float triCenter[3];
 		computeTriangleCenter(v1, v2, v3, triCenter);
+
+		// In APPEND_MODE, clamp triangle center to existing bounds
+		if (mode == APPEND_MODE) {
+			clampPoint(triCenter, regionMin, regionMax);
+		}
 
 		int blockIdx;
 		computeOctantIndex(triCenter, regionCenter, &blockIdx);
