@@ -20,6 +20,7 @@
 
 /* Internal layer representation */
 typedef struct {
+    LayerType type;          /* Layer type */
     int cin, cout, h, w, cin4;
     cl_mem weights, bias, output, grad_bias, grad_weights, grad_input;
     cl_mem batch_output;       /* Batch output buffer [max_batch][cout][h][w] */
@@ -29,8 +30,10 @@ typedef struct {
     char name[64];
     int use_relu;
     int skip_from;           /* Layer index to skip from, -1 = no skip */
+    int residual_from;       /* For RESIDUAL_SUBTRACT: layer index that saved the input, -1 = use network input */
     cl_mem skip_input;       /* Input from skip connection */
     cl_mem grad_output;      /* Gradient w.r.t this layer's output (for skip connections) */
+    cl_mem residual_saved;   /* For RESIDUAL_INPUT: saved input buffer */
 } ConvLayer;
 
 /* Main CNN structure */
@@ -40,6 +43,7 @@ struct CNNDenoiser {
     cl_program program;
     cl_kernel k_forward, k_backward, k_weight_grad, k_mae_loss, k_sgd_update, k_adam_update;
     cl_kernel k_mse_loss, k_laplace_loss, k_add_weighted_grad, k_residual_subtract, k_negate;
+    cl_kernel k_copy_buffer;  /* Copy buffer for residual input layer */
     cl_kernel k_color_variance_loss;
     cl_kernel k_forward_residual;  /* Fused forward + residual for last layer */
     cl_kernel k_add_skip;  /* Add skip connection */
@@ -494,6 +498,15 @@ static const char *kernel_source =
 "    }\n"
 "}\n"
 "\n"
+"__kernel void copy_buffer(\n"
+"    __global const float* input, __global float* output, int size)\n"
+"{\n"
+"    int gid = get_global_id(0);\n"
+"    if (gid < size) {\n"
+"        output[gid] = input[gid];\n"
+"    }\n"
+"}\n"
+"\n"
 "__kernel void negate(\n"
 "    __global const float* input, __global float* output, int size)\n"
 "{\n"
@@ -724,6 +737,7 @@ CNNDenoiser* cnn_create(CNNConfig config) {
     cnn->k_add_weighted_grad = clCreateKernel(cnn->program, "add_weighted_grad", &err);
     cnn->k_residual_subtract = clCreateKernel(cnn->program, "residual_subtract", &err);
     cnn->k_negate = clCreateKernel(cnn->program, "negate", &err);
+    cnn->k_copy_buffer = clCreateKernel(cnn->program, "copy_buffer", &err);
     cnn->k_forward_residual = clCreateKernel(cnn->program, "conv3x3_forward_relu_residual_f4", &err);
     cnn->k_add_skip = clCreateKernel(cnn->program, "add_skip", &err);
     cnn->k_add_skip_grad = clCreateKernel(cnn->program, "add_skip_grad", &err);
@@ -830,42 +844,82 @@ int cnn_add_layer(CNNDenoiser *cnn, LayerConfig layer) {
     if (cnn->n_layers >= MAX_LAYERS) return -1;
     
     ConvLayer *l = &cnn->layers[cnn->n_layers++];
+    l->type = layer.type;
     l->cin = layer.cin;
     l->cout = layer.cout;
     l->use_relu = layer.use_relu;
     l->skip_from = layer.skip_from;
+    l->residual_from = layer.residual_from;
     l->h = cnn->config.input_height;
     l->w = cnn->config.input_width;
     l->cin4 = layer.cin / 4;
     strncpy(l->name, layer.name, 63);
     
-    int w_size = layer.cout * l->cin4 * 9;
+    cl_int err;
     int out_size = layer.cout * l->h * l->w;
     
-    posix_memalign((void**)&l->h_weights, 64, w_size * 16);
-    posix_memalign((void**)&l->h_bias, 64, layer.cout * 4);
-    posix_memalign((void**)&l->h_grad_w, 64, w_size * 16);
-    posix_memalign((void**)&l->h_grad_b, 64, layer.cout * 4);
-    
-    memset(l->h_bias, 0, layer.cout * 4);
-    init_weights(l->h_weights, w_size * 4);
-    
-    cl_int err;
-    l->weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                                w_size * 16, l->h_weights, &err);
-    l->bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                            layer.cout * 4, l->h_bias, &err);
+    /* Allocate output buffer for all layer types */
     l->output = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
-    l->grad_bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cout * 4, NULL, &err);
-    l->grad_weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, w_size * 16, NULL, &err);
-    l->grad_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cin * l->h * l->w * 4, NULL, &err);
     l->grad_output = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
     
-    /* Allocate skip_input buffer if skip connection exists */
-    if (l->skip_from >= 0) {
-        l->skip_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
-    } else {
+    if (layer.type == LAYER_CONV) {
+        /* Standard convolution layer - allocate weights and biases */
+        int w_size = layer.cout * l->cin4 * 9;
+        
+        posix_memalign((void**)&l->h_weights, 64, w_size * 16);
+        posix_memalign((void**)&l->h_bias, 64, layer.cout * 4);
+        posix_memalign((void**)&l->h_grad_w, 64, w_size * 16);
+        posix_memalign((void**)&l->h_grad_b, 64, layer.cout * 4);
+        
+        memset(l->h_bias, 0, layer.cout * 4);
+        init_weights(l->h_weights, w_size * 4);
+        
+        l->weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                    w_size * 16, l->h_weights, &err);
+        l->bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                layer.cout * 4, l->h_bias, &err);
+        l->grad_bias = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cout * 4, NULL, &err);
+        l->grad_weights = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, w_size * 16, NULL, &err);
+        l->grad_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cin * l->h * l->w * 4, NULL, &err);
+        
+        /* Allocate skip_input buffer if skip connection exists */
+        if (l->skip_from >= 0) {
+            l->skip_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
+        } else {
+            l->skip_input = NULL;
+        }
+        
+    } else if (layer.type == LAYER_RESIDUAL_INPUT) {
+        /* Residual input layer - allocate buffer to save input */
+        l->residual_saved = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, out_size * 4, NULL, &err);
+        l->grad_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cin * l->h * l->w * 4, NULL, &err);
+        
+        /* No weights/biases needed */
+        l->weights = NULL;
+        l->bias = NULL;
+        l->grad_weights = NULL;
+        l->grad_bias = NULL;
         l->skip_input = NULL;
+        l->h_weights = NULL;
+        l->h_bias = NULL;
+        l->h_grad_w = NULL;
+        l->h_grad_b = NULL;
+        
+    } else if (layer.type == LAYER_RESIDUAL_SUBTRACT) {
+        /* Residual subtract layer - no special buffers needed */
+        l->grad_input = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, layer.cin * l->h * l->w * 4, NULL, &err);
+        
+        /* No weights/biases needed */
+        l->weights = NULL;
+        l->bias = NULL;
+        l->grad_weights = NULL;
+        l->grad_bias = NULL;
+        l->skip_input = NULL;
+        l->residual_saved = NULL;
+        l->h_weights = NULL;
+        l->h_bias = NULL;
+        l->h_grad_w = NULL;
+        l->h_grad_b = NULL;
     }
     
     return 0;
@@ -916,6 +970,16 @@ int cnn_finalize(CNNDenoiser *cnn) {
     if (cnn->config.optimizer == OPTIMIZER_ADAM) {
         for (int i = 0; i < cnn->n_layers; i++) {
             ConvLayer *l = &cnn->layers[i];
+            
+            /* Only allocate Adam buffers for CONV layers */
+            if (l->type != LAYER_CONV) {
+                l->adam_m_w = NULL;
+                l->adam_v_w = NULL;
+                l->adam_m_b = NULL;
+                l->adam_v_b = NULL;
+                continue;
+            }
+            
             int w_size = l->cout * l->cin4 * 9;
             l->adam_m_w = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, w_size * 16, NULL, NULL);
             l->adam_v_w = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, w_size * 16, NULL, NULL);
@@ -1385,20 +1449,70 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
         
-        clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
-        clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
-        clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
-        clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
-        clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
-        clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
-        clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
-        clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
+        if (l->type == LAYER_CONV) {
+            /* Standard convolution layer */
+            clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
+            clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
+            clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
+            clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
+            clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
+            clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
+            
+            size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, NULL, 0, NULL, &forward_events[i]);
+            
+        } else if (l->type == LAYER_RESIDUAL_INPUT) {
+            /* Residual input layer - save input and pass it through */
+            int buffer_size = l->cout * l->h * l->w;
+            
+            /* Copy input to saved buffer */
+            clSetKernelArg(cnn->k_copy_buffer, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_copy_buffer, 1, sizeof(cl_mem), &l->residual_saved);
+            clSetKernelArg(cnn->k_copy_buffer, 2, sizeof(int), &buffer_size);
+            
+            size_t global_copy = (buffer_size + 255) / 256 * 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_copy_buffer, 1, NULL, &global_copy, NULL, 0, NULL, NULL);
+            
+            /* Copy input to output (pass through) */
+            clSetKernelArg(cnn->k_copy_buffer, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_copy_buffer, 1, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_copy_buffer, 2, sizeof(int), &buffer_size);
+            
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_copy_buffer, 1, NULL, &global_copy, NULL, 0, NULL, NULL);
+            
+        } else if (l->type == LAYER_RESIDUAL_SUBTRACT) {
+            /* Residual subtract layer - compute (saved_input - current) */
+            int buffer_size = l->cout * l->h * l->w;
+            
+            /* Get the saved input from the referenced layer */
+            cl_mem saved_input;
+            if (l->residual_from >= 0 && l->residual_from < i) {
+                /* Validate that the referenced layer is RESIDUAL_INPUT */
+                if (cnn->layers[l->residual_from].type != LAYER_RESIDUAL_INPUT) {
+                    fprintf(stderr, "Error: Layer %d (%s) references layer %d for residual, but that layer is not RESIDUAL_INPUT\n",
+                            i, l->name, l->residual_from);
+                    saved_input = cnn->input_buf;  /* Fallback to network input */
+                } else {
+                    saved_input = cnn->layers[l->residual_from].residual_saved;
+                }
+            } else {
+                /* Use network input if no specific layer referenced */
+                saved_input = cnn->input_buf;
+            }
+            
+            /* Compute: output = saved_input - current (denoised = input - noise) */
+            clSetKernelArg(cnn->k_residual_subtract, 0, sizeof(cl_mem), &saved_input);
+            clSetKernelArg(cnn->k_residual_subtract, 1, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_residual_subtract, 2, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_residual_subtract, 3, sizeof(int), &buffer_size);
+            
+            size_t global_sub = (buffer_size + 255) / 256 * 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_residual_subtract, 1, NULL, &global_sub, NULL, 0, NULL, NULL);
+        }
         
-        size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
-        /* Use NULL for local work size - let OpenCL choose optimal size per layer */
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, NULL, 0, NULL, &forward_events[i]);
-        
-        /* Add skip connection if specified */
+        /* Add skip connection if specified (works for all layer types) */
         if (l->skip_from >= 0 && l->skip_from < i) {
             ConvLayer *skip_layer = &cnn->layers[l->skip_from];
             
@@ -1634,37 +1748,91 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             }
         }
         
-        /* STEP 2: Compute weight and bias gradients using accumulated output gradient */
-        clSetKernelArg(cnn->k_weight_grad, 0, sizeof(cl_mem), &layer_input);
-        clSetKernelArg(cnn->k_weight_grad, 1, sizeof(cl_mem), &l->grad_output);
-        clSetKernelArg(cnn->k_weight_grad, 2, sizeof(cl_mem), &l->output);
-        clSetKernelArg(cnn->k_weight_grad, 3, sizeof(cl_mem), &l->grad_weights);
-        clSetKernelArg(cnn->k_weight_grad, 4, sizeof(cl_mem), &l->grad_bias);
-        clSetKernelArg(cnn->k_weight_grad, 5, sizeof(int), &l->cin4);
-        clSetKernelArg(cnn->k_weight_grad, 6, sizeof(int), &l->h);
-        clSetKernelArg(cnn->k_weight_grad, 7, sizeof(int), &l->w);
-        clSetKernelArg(cnn->k_weight_grad, 8, sizeof(int), &l->use_relu);
-        
-        size_t grad_global[3] = {(size_t)l->cout, (size_t)l->cin4, 9};
-        clEnqueueNDRangeKernel(cnn->queue, cnn->k_weight_grad, 3, NULL, grad_global, NULL, 0, NULL, NULL);
-        
-        /* STEP 3: Backprop gradient to previous layer */
-        if (i > 0) {
-            int prev_cin4 = cnn->layers[i-1].cout / 4;
+        /* STEP 2: Layer-type specific backward pass */
+        if (l->type == LAYER_CONV) {
+            /* Standard conv layer - compute weight and bias gradients */
+            clSetKernelArg(cnn->k_weight_grad, 0, sizeof(cl_mem), &layer_input);
+            clSetKernelArg(cnn->k_weight_grad, 1, sizeof(cl_mem), &l->grad_output);
+            clSetKernelArg(cnn->k_weight_grad, 2, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_weight_grad, 3, sizeof(cl_mem), &l->grad_weights);
+            clSetKernelArg(cnn->k_weight_grad, 4, sizeof(cl_mem), &l->grad_bias);
+            clSetKernelArg(cnn->k_weight_grad, 5, sizeof(int), &l->cin4);
+            clSetKernelArg(cnn->k_weight_grad, 6, sizeof(int), &l->h);
+            clSetKernelArg(cnn->k_weight_grad, 7, sizeof(int), &l->w);
+            clSetKernelArg(cnn->k_weight_grad, 8, sizeof(int), &l->use_relu);
             
-            clSetKernelArg(cnn->k_backward, 0, sizeof(cl_mem), &l->grad_output);
-            clSetKernelArg(cnn->k_backward, 1, sizeof(cl_mem), &l->output);
-            clSetKernelArg(cnn->k_backward, 2, sizeof(cl_mem), &l->weights);
-            clSetKernelArg(cnn->k_backward, 3, sizeof(cl_mem), &cnn->layers[i-1].grad_output);
-            clSetKernelArg(cnn->k_backward, 4, sizeof(int), &prev_cin4);
-            clSetKernelArg(cnn->k_backward, 5, sizeof(int), &l->cout);
-            clSetKernelArg(cnn->k_backward, 6, sizeof(int), &l->h);
-            clSetKernelArg(cnn->k_backward, 7, sizeof(int), &l->w);
-            clSetKernelArg(cnn->k_backward, 8, sizeof(int), &l->use_relu);
+            size_t grad_global[3] = {(size_t)l->cout, (size_t)l->cin4, 9};
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_weight_grad, 3, NULL, grad_global, NULL, 0, NULL, NULL);
             
-            size_t back_global[3] = {(size_t)l->w, (size_t)l->h, (size_t)prev_cin4};
-            size_t back_local[3] = {16, 8, 1};
-            clEnqueueNDRangeKernel(cnn->queue, cnn->k_backward, 3, NULL, back_global, back_local, 0, NULL, NULL);
+            /* Backprop gradient to previous layer */
+            if (i > 0) {
+                int prev_cin4 = cnn->layers[i-1].cout / 4;
+                
+                clSetKernelArg(cnn->k_backward, 0, sizeof(cl_mem), &l->grad_output);
+                clSetKernelArg(cnn->k_backward, 1, sizeof(cl_mem), &l->output);
+                clSetKernelArg(cnn->k_backward, 2, sizeof(cl_mem), &l->weights);
+                clSetKernelArg(cnn->k_backward, 3, sizeof(cl_mem), &cnn->layers[i-1].grad_output);
+                clSetKernelArg(cnn->k_backward, 4, sizeof(int), &prev_cin4);
+                clSetKernelArg(cnn->k_backward, 5, sizeof(int), &l->cout);
+                clSetKernelArg(cnn->k_backward, 6, sizeof(int), &l->h);
+                clSetKernelArg(cnn->k_backward, 7, sizeof(int), &l->w);
+                clSetKernelArg(cnn->k_backward, 8, sizeof(int), &l->use_relu);
+                
+                size_t back_global[3] = {(size_t)l->w, (size_t)l->h, (size_t)prev_cin4};
+                size_t back_local[3] = {16, 8, 1};
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_backward, 3, NULL, back_global, back_local, 0, NULL, NULL);
+            }
+            
+        } else if (l->type == LAYER_RESIDUAL_INPUT) {
+            /* Residual input layer - gradient passes through to previous layer */
+            /* Also need to accumulate gradient for layers that use this saved input */
+            if (i > 0) {
+                int buffer_size = l->cout * l->h * l->w;
+                
+                /* Copy gradient to previous layer */
+                clSetKernelArg(cnn->k_add_skip_grad, 0, sizeof(cl_mem), &cnn->layers[i-1].grad_output);
+                clSetKernelArg(cnn->k_add_skip_grad, 1, sizeof(cl_mem), &l->grad_output);
+                clSetKernelArg(cnn->k_add_skip_grad, 2, sizeof(int), &buffer_size);
+                
+                size_t grad_global = (buffer_size + 255) / 256 * 256;
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_add_skip_grad, 1, NULL, &grad_global, NULL, 0, NULL, NULL);
+            }
+            
+        } else if (l->type == LAYER_RESIDUAL_SUBTRACT) {
+            /* Residual subtract: output = saved_input - noise_prediction
+             * d_loss/d_saved_input = d_loss/d_output * 1
+             * d_loss/d_noise_prediction = d_loss/d_output * (-1)
+             */
+            int buffer_size = l->cout * l->h * l->w;
+            
+            /* Gradient w.r.t. noise prediction (previous layer) */
+            if (i > 0) {
+                /* Negate gradient and add to previous layer */
+                clSetKernelArg(cnn->k_negate, 0, sizeof(cl_mem), &l->grad_output);
+                clSetKernelArg(cnn->k_negate, 1, sizeof(cl_mem), &cnn->temp_grad);
+                clSetKernelArg(cnn->k_negate, 2, sizeof(int), &buffer_size);
+                
+                size_t grad_global = (buffer_size + 255) / 256 * 256;
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_negate, 1, NULL, &grad_global, NULL, 0, NULL, NULL);
+                
+                /* Add negated gradient to previous layer */
+                clSetKernelArg(cnn->k_add_skip_grad, 0, sizeof(cl_mem), &cnn->layers[i-1].grad_output);
+                clSetKernelArg(cnn->k_add_skip_grad, 1, sizeof(cl_mem), &cnn->temp_grad);
+                clSetKernelArg(cnn->k_add_skip_grad, 2, sizeof(int), &buffer_size);
+                
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_add_skip_grad, 1, NULL, &grad_global, NULL, 0, NULL, NULL);
+            }
+            
+            /* Gradient w.r.t. saved input (flows back to residual_from layer) */
+            if (l->residual_from >= 0 && l->residual_from < i) {
+                /* Add gradient to the layer that saved the input */
+                clSetKernelArg(cnn->k_add_skip_grad, 0, sizeof(cl_mem), &cnn->layers[l->residual_from].grad_output);
+                clSetKernelArg(cnn->k_add_skip_grad, 1, sizeof(cl_mem), &l->grad_output);
+                clSetKernelArg(cnn->k_add_skip_grad, 2, sizeof(int), &buffer_size);
+                
+                size_t grad_global = (buffer_size + 255) / 256 * 256;
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_add_skip_grad, 1, NULL, &grad_global, NULL, 0, NULL, NULL);
+            }
         }
     }
     clFinish(cnn->queue);
@@ -1674,6 +1842,10 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
     if (cnn->config.optimizer == OPTIMIZER_SGD) {
         for (int i = 0; i < cnn->n_layers; i++) {
             ConvLayer *l = &cnn->layers[i];
+            
+            /* Skip non-CONV layers - they don't have weights */
+            if (l->type != LAYER_CONV) continue;
+            
             int w_vec_size = l->cout * l->cin4 * 9;
             float lr = cnn->config.learning_rate;
             
@@ -1692,6 +1864,10 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
         cnn->adam_t++;
         for (int i = 0; i < cnn->n_layers; i++) {
             ConvLayer *l = &cnn->layers[i];
+            
+            /* Skip non-CONV layers - they don't have weights */
+            if (l->type != LAYER_CONV) continue;
+            
             int w_vec_size = l->cout * l->cin4 * 9;
             float lr = cnn->config.learning_rate;
             float beta1 = cnn->config.adam_beta1;
@@ -1755,8 +1931,11 @@ int cnn_get_num_parameters(CNNDenoiser *cnn) {
     int total = 0;
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
-        total += l->cout * l->cin4 * 9 * 4;  /* weights */
-        total += l->cout;                     /* biases */
+        /* Only count parameters for CONV layers */
+        if (l->type == LAYER_CONV) {
+            total += l->cout * l->cin4 * 9 * 4;  /* weights */
+            total += l->cout;                     /* biases */
+        }
     }
     return total;
 }
@@ -1768,8 +1947,26 @@ void cnn_print_architecture(CNNDenoiser *cnn) {
     printf("Layers: %d\n", cnn->n_layers);
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
-        printf("  [%d] %s: %d->%d channels, %s\n", i, l->name, l->cin, l->cout,
-               l->use_relu ? "ReLU" : "Linear");
+        const char *type_name;
+        switch (l->type) {
+            case LAYER_CONV: type_name = "Conv"; break;
+            case LAYER_RESIDUAL_INPUT: type_name = "ResInput"; break;
+            case LAYER_RESIDUAL_SUBTRACT: type_name = "ResSub"; break;
+            default: type_name = "Unknown"; break;
+        }
+        
+        if (l->type == LAYER_CONV) {
+            printf("  [%d] %s (%s): %d->%d channels, %s", i, l->name, type_name, l->cin, l->cout,
+                   l->use_relu ? "ReLU" : "Linear");
+            if (l->skip_from >= 0) printf(" + skip[%d]", l->skip_from);
+            printf("\n");
+        } else if (l->type == LAYER_RESIDUAL_INPUT) {
+            printf("  [%d] %s (%s): %d channels (save input)\n", i, l->name, type_name, l->cout);
+        } else if (l->type == LAYER_RESIDUAL_SUBTRACT) {
+            printf("  [%d] %s (%s): %d channels (input", i, l->name, type_name, l->cout);
+            if (l->residual_from >= 0) printf("[%d]", l->residual_from);
+            printf(" - noise)\n");
+        }
     }
     printf("Total parameters: %d\n", cnn_get_num_parameters(cnn));
     printf("========================\n\n");
@@ -1791,21 +1988,33 @@ void cnn_destroy(CNNDenoiser *cnn) {
     
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
-        free(l->h_weights);
-        free(l->h_bias);
-        free(l->h_grad_w);
-        free(l->h_grad_b);
-        clReleaseMemObject(l->weights);
-        clReleaseMemObject(l->bias);
-        clReleaseMemObject(l->output);
-        clReleaseMemObject(l->grad_bias);
         
-        if (cnn->config.optimizer == OPTIMIZER_ADAM) {
-            clReleaseMemObject(l->adam_m_w);
-            clReleaseMemObject(l->adam_v_w);
-            clReleaseMemObject(l->adam_m_b);
-            clReleaseMemObject(l->adam_v_b);
+        /* Free host memory and OpenCL buffers based on layer type */
+        if (l->type == LAYER_CONV) {
+            free(l->h_weights);
+            free(l->h_bias);
+            free(l->h_grad_w);
+            free(l->h_grad_b);
+            if (l->weights) clReleaseMemObject(l->weights);
+            if (l->bias) clReleaseMemObject(l->bias);
+            if (l->grad_bias) clReleaseMemObject(l->grad_bias);
+            if (l->grad_weights) clReleaseMemObject(l->grad_weights);
+            
+            if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                if (l->adam_m_w) clReleaseMemObject(l->adam_m_w);
+                if (l->adam_v_w) clReleaseMemObject(l->adam_v_w);
+                if (l->adam_m_b) clReleaseMemObject(l->adam_m_b);
+                if (l->adam_v_b) clReleaseMemObject(l->adam_v_b);
+            }
+        } else if (l->type == LAYER_RESIDUAL_INPUT) {
+            if (l->residual_saved) clReleaseMemObject(l->residual_saved);
         }
+        
+        /* Common cleanup for all layer types */
+        if (l->output) clReleaseMemObject(l->output);
+        if (l->grad_output) clReleaseMemObject(l->grad_output);
+        if (l->grad_input) clReleaseMemObject(l->grad_input);
+        if (l->skip_input) clReleaseMemObject(l->skip_input);
     }
     
     if (cnn->finalized) {
@@ -1876,43 +2085,49 @@ int cnn_save_weights(CNNDenoiser* cnn, const char* filepath) {
         ConvLayer *l = &cnn->layers[i];
         
         /* Write layer metadata */
+        fwrite(&l->type, sizeof(int), 1, f);
         fwrite(&l->cin, sizeof(int), 1, f);
         fwrite(&l->cout, sizeof(int), 1, f);
         fwrite(&l->use_relu, sizeof(int), 1, f);
+        fwrite(&l->skip_from, sizeof(int), 1, f);
+        fwrite(&l->residual_from, sizeof(int), 1, f);
         fwrite(l->name, sizeof(char), 64, f);
         
-        /* Download weights from GPU */
-        int w_size = l->cout * l->cin4 * 9;
-        clEnqueueReadBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
-                           w_size * 16, l->h_weights, 0, NULL, NULL);
-        clEnqueueReadBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
-                           l->cout * 4, l->h_bias, 0, NULL, NULL);
-        
-        /* Write weights and biases */
-        fwrite(l->h_weights, sizeof(float), w_size * 4, f);
-        fwrite(l->h_bias, sizeof(float), l->cout, f);
-        
-        /* Write Adam optimizer state if using Adam */
-        if (cnn->config.optimizer == OPTIMIZER_ADAM) {
-            float *adam_m_w = malloc(w_size * 16);
-            float *adam_v_w = malloc(w_size * 16);
-            float *adam_m_b = malloc(l->cout * 4);
-            float *adam_v_b = malloc(l->cout * 4);
+        /* Only save weights for CONV layers */
+        if (l->type == LAYER_CONV) {
+            /* Download weights from GPU */
+            int w_size = l->cout * l->cin4 * 9;
+            clEnqueueReadBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
+                               w_size * 16, l->h_weights, 0, NULL, NULL);
+            clEnqueueReadBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
+                               l->cout * 4, l->h_bias, 0, NULL, NULL);
             
-            clEnqueueReadBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
-            clEnqueueReadBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
-            clEnqueueReadBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
-            clEnqueueReadBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+            /* Write weights and biases */
+            fwrite(l->h_weights, sizeof(float), w_size * 4, f);
+            fwrite(l->h_bias, sizeof(float), l->cout, f);
             
-            fwrite(adam_m_w, sizeof(float), w_size * 4, f);
-            fwrite(adam_v_w, sizeof(float), w_size * 4, f);
-            fwrite(adam_m_b, sizeof(float), l->cout, f);
-            fwrite(adam_v_b, sizeof(float), l->cout, f);
-            
-            free(adam_m_w);
-            free(adam_v_w);
-            free(adam_m_b);
-            free(adam_v_b);
+            /* Write Adam optimizer state if using Adam */
+            if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                float *adam_m_w = malloc(w_size * 16);
+                float *adam_v_w = malloc(w_size * 16);
+                float *adam_m_b = malloc(l->cout * 4);
+                float *adam_v_b = malloc(l->cout * 4);
+                
+                clEnqueueReadBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
+                clEnqueueReadBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
+                clEnqueueReadBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
+                clEnqueueReadBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+                
+                fwrite(adam_m_w, sizeof(float), w_size * 4, f);
+                fwrite(adam_v_w, sizeof(float), w_size * 4, f);
+                fwrite(adam_m_b, sizeof(float), l->cout, f);
+                fwrite(adam_v_b, sizeof(float), l->cout, f);
+                
+                free(adam_m_w);
+                free(adam_v_w);
+                free(adam_m_b);
+                free(adam_v_b);
+            }
         }
     }
     
@@ -1958,60 +2173,67 @@ int cnn_load_weights(CNNDenoiser* cnn, const char* filepath) {
         ConvLayer *l = &cnn->layers[i];
         
         /* Read and verify layer metadata */
-        int cin, cout, use_relu;
+        int type, cin, cout, use_relu, skip_from, residual_from;
         char name[64];
+        fread(&type, sizeof(int), 1, f);
         fread(&cin, sizeof(int), 1, f);
         fread(&cout, sizeof(int), 1, f);
         fread(&use_relu, sizeof(int), 1, f);
+        fread(&skip_from, sizeof(int), 1, f);
+        fread(&residual_from, sizeof(int), 1, f);
         fread(name, sizeof(char), 64, f);
         
-        if (cin != l->cin || cout != l->cout) {
-            fprintf(stderr, "Layer %d dimension mismatch\n", i);
+        if (cin != l->cin || cout != l->cout || type != l->type) {
+            fprintf(stderr, "Layer %d mismatch (cin=%d/%d, cout=%d/%d, type=%d/%d)\n", 
+                    i, cin, l->cin, cout, l->cout, type, l->type);
             fclose(f);
             return -1;
         }
         
-        /* Read weights and biases */
-        int w_size = l->cout * l->cin4 * 9;
-        fread(l->h_weights, sizeof(float), w_size * 4, f);
-        fread(l->h_bias, sizeof(float), l->cout, f);
-        
-        /* Upload to GPU */
-        clEnqueueWriteBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
-                            w_size * 16, l->h_weights, 0, NULL, NULL);
-        clEnqueueWriteBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
-                            l->cout * 4, l->h_bias, 0, NULL, NULL);
-        
-        /* Read Adam optimizer state if present */
-        if (saved_config.optimizer == OPTIMIZER_ADAM) {
-            float *adam_m_w = malloc(w_size * 16);
-            float *adam_v_w = malloc(w_size * 16);
-            float *adam_m_b = malloc(l->cout * 4);
-            float *adam_v_b = malloc(l->cout * 4);
+        /* Only load weights for CONV layers */
+        if (l->type == LAYER_CONV) {
+            /* Read weights and biases */
+            int w_size = l->cout * l->cin4 * 9;
+            fread(l->h_weights, sizeof(float), w_size * 4, f);
+            fread(l->h_bias, sizeof(float), l->cout, f);
             
-            fread(adam_m_w, sizeof(float), w_size * 4, f);
-            fread(adam_v_w, sizeof(float), w_size * 4, f);
-            fread(adam_m_b, sizeof(float), l->cout, f);
-            fread(adam_v_b, sizeof(float), l->cout, f);
+            /* Upload to GPU */
+            clEnqueueWriteBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
+                                w_size * 16, l->h_weights, 0, NULL, NULL);
+            clEnqueueWriteBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
+                                l->cout * 4, l->h_bias, 0, NULL, NULL);
             
-            if (cnn->config.optimizer == OPTIMIZER_ADAM) {
-                /* RESET Adam state for stable fine-tuning with new learning rate */
-                printf("Resetting Adam momentum buffers for layer %d to zero for stable fine-tuning\n", i);
-                memset(adam_m_w, 0, w_size * 16);
-                memset(adam_v_w, 0, w_size * 16);
-                memset(adam_m_b, 0, l->cout * 4);
-                memset(adam_v_b, 0, l->cout * 4);
+            /* Read Adam optimizer state if present */
+            if (saved_config.optimizer == OPTIMIZER_ADAM) {
+                float *adam_m_w = malloc(w_size * 16);
+                float *adam_v_w = malloc(w_size * 16);
+                float *adam_m_b = malloc(l->cout * 4);
+                float *adam_v_b = malloc(l->cout * 4);
                 
-                clEnqueueWriteBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
-                clEnqueueWriteBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
-                clEnqueueWriteBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
-                clEnqueueWriteBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+                fread(adam_m_w, sizeof(float), w_size * 4, f);
+                fread(adam_v_w, sizeof(float), w_size * 4, f);
+                fread(adam_m_b, sizeof(float), l->cout, f);
+                fread(adam_v_b, sizeof(float), l->cout, f);
+                
+                if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                    /* RESET Adam state for stable fine-tuning with new learning rate */
+                    printf("Resetting Adam momentum buffers for layer %d to zero for stable fine-tuning\n", i);
+                    memset(adam_m_w, 0, w_size * 16);
+                    memset(adam_v_w, 0, w_size * 16);
+                    memset(adam_m_b, 0, l->cout * 4);
+                    memset(adam_v_b, 0, l->cout * 4);
+                    
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+                }
+                
+                free(adam_m_w);
+                free(adam_v_w);
+                free(adam_m_b);
+                free(adam_v_b);
             }
-            
-            free(adam_m_w);
-            free(adam_v_w);
-            free(adam_m_b);
-            free(adam_v_b);
         }
     }
     
@@ -2257,37 +2479,91 @@ int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, in
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
         
-        /* Use fused residual kernel for last layer if residual mode */
-        if (i == last_layer_idx && cnn->config.residual_mode) {
-            clSetKernelArg(cnn->k_forward_residual, 0, sizeof(cl_mem), &current);
-            clSetKernelArg(cnn->k_forward_residual, 1, sizeof(cl_mem), &cnn->input_buf);
-            clSetKernelArg(cnn->k_forward_residual, 2, sizeof(cl_mem), &cnn->residual_buf);
-            clSetKernelArg(cnn->k_forward_residual, 3, sizeof(cl_mem), &l->weights);
-            clSetKernelArg(cnn->k_forward_residual, 4, sizeof(cl_mem), &l->bias);
-            clSetKernelArg(cnn->k_forward_residual, 5, sizeof(int), &l->cin4);
-            clSetKernelArg(cnn->k_forward_residual, 6, sizeof(int), &l->cout);
-            clSetKernelArg(cnn->k_forward_residual, 7, sizeof(int), &l->h);
-            clSetKernelArg(cnn->k_forward_residual, 8, sizeof(int), &l->w);
+        if (l->type == LAYER_CONV) {
+            /* Standard convolution layer */
+            /* Use fused residual kernel for last layer if old residual mode enabled */
+            if (i == last_layer_idx && cnn->config.residual_mode) {
+                clSetKernelArg(cnn->k_forward_residual, 0, sizeof(cl_mem), &current);
+                clSetKernelArg(cnn->k_forward_residual, 1, sizeof(cl_mem), &cnn->input_buf);
+                clSetKernelArg(cnn->k_forward_residual, 2, sizeof(cl_mem), &cnn->residual_buf);
+                clSetKernelArg(cnn->k_forward_residual, 3, sizeof(cl_mem), &l->weights);
+                clSetKernelArg(cnn->k_forward_residual, 4, sizeof(cl_mem), &l->bias);
+                clSetKernelArg(cnn->k_forward_residual, 5, sizeof(int), &l->cin4);
+                clSetKernelArg(cnn->k_forward_residual, 6, sizeof(int), &l->cout);
+                clSetKernelArg(cnn->k_forward_residual, 7, sizeof(int), &l->h);
+                clSetKernelArg(cnn->k_forward_residual, 8, sizeof(int), &l->w);
+                
+                size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
+                size_t local[3] = {16, 8, 1};
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward_residual, 3, NULL, global, local, 0, NULL, NULL);
+                
+                current = cnn->residual_buf;
+            } else {
+                clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
+                clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
+                clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
+                clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
+                clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
+                clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
+                clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
+                clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
+                
+                size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
+                size_t local[3] = {16, 8, 1};
+                clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
+                
+                current = l->output;
+            }
             
-            size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
-            size_t local[3] = {16, 8, 1};
-            clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward_residual, 3, NULL, global, local, 0, NULL, NULL);
+        } else if (l->type == LAYER_RESIDUAL_INPUT) {
+            /* Residual input layer - save input and pass it through */
+            int buffer_size = l->cout * l->h * l->w;
             
-            /* Output is directly in residual_buf */
-            current = cnn->residual_buf;
-        } else {
-            clSetKernelArg(cnn->k_forward, 0, sizeof(cl_mem), &current);
-            clSetKernelArg(cnn->k_forward, 1, sizeof(cl_mem), &l->output);
-            clSetKernelArg(cnn->k_forward, 2, sizeof(cl_mem), &l->weights);
-            clSetKernelArg(cnn->k_forward, 3, sizeof(cl_mem), &l->bias);
-            clSetKernelArg(cnn->k_forward, 4, sizeof(int), &l->cin4);
-            clSetKernelArg(cnn->k_forward, 5, sizeof(int), &l->cout);
-            clSetKernelArg(cnn->k_forward, 6, sizeof(int), &l->h);
-            clSetKernelArg(cnn->k_forward, 7, sizeof(int), &l->w);
+            /* Copy input to saved buffer */
+            clSetKernelArg(cnn->k_copy_buffer, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_copy_buffer, 1, sizeof(cl_mem), &l->residual_saved);
+            clSetKernelArg(cnn->k_copy_buffer, 2, sizeof(int), &buffer_size);
             
-            size_t global[3] = {l->w, l->h, (l->cout + 3) / 4};
-            size_t local[3] = {16, 8, 1};
-            clEnqueueNDRangeKernel(cnn->queue, cnn->k_forward, 3, NULL, global, local, 0, NULL, NULL);
+            size_t global_copy = (buffer_size + 255) / 256 * 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_copy_buffer, 1, NULL, &global_copy, NULL, 0, NULL, NULL);
+            
+            /* Copy input to output (pass through) */
+            clSetKernelArg(cnn->k_copy_buffer, 0, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_copy_buffer, 1, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_copy_buffer, 2, sizeof(int), &buffer_size);
+            
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_copy_buffer, 1, NULL, &global_copy, NULL, 0, NULL, NULL);
+            
+            current = l->output;
+            
+        } else if (l->type == LAYER_RESIDUAL_SUBTRACT) {
+            /* Residual subtract layer - compute (saved_input - current) */
+            int buffer_size = l->cout * l->h * l->w;
+            
+            /* Get the saved input from the referenced layer */
+            cl_mem saved_input;
+            if (l->residual_from >= 0 && l->residual_from < i) {
+                /* Validate that the referenced layer is RESIDUAL_INPUT */
+                if (cnn->layers[l->residual_from].type != LAYER_RESIDUAL_INPUT) {
+                    fprintf(stderr, "Error: Layer %d (%s) references layer %d for residual, but that layer is not RESIDUAL_INPUT\n",
+                            i, l->name, l->residual_from);
+                    saved_input = cnn->input_buf;  /* Fallback to network input */
+                } else {
+                    saved_input = cnn->layers[l->residual_from].residual_saved;
+                }
+            } else {
+                /* Use network input if no specific layer referenced */
+                saved_input = cnn->input_buf;
+            }
+            
+            /* Compute: output = saved_input - current (denoised = input - noise) */
+            clSetKernelArg(cnn->k_residual_subtract, 0, sizeof(cl_mem), &saved_input);
+            clSetKernelArg(cnn->k_residual_subtract, 1, sizeof(cl_mem), &current);
+            clSetKernelArg(cnn->k_residual_subtract, 2, sizeof(cl_mem), &l->output);
+            clSetKernelArg(cnn->k_residual_subtract, 3, sizeof(int), &buffer_size);
+            
+            size_t global_sub = (buffer_size + 255) / 256 * 256;
+            clEnqueueNDRangeKernel(cnn->queue, cnn->k_residual_subtract, 1, NULL, &global_sub, NULL, 0, NULL, NULL);
             
             current = l->output;
         }

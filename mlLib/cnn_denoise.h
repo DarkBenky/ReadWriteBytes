@@ -71,12 +71,21 @@ typedef struct learning_rate_decay {
     int step;
 } LearningRateDecay;
 
+/* Layer type */
+typedef enum {
+    LAYER_CONV = 0,          /* Standard convolution layer */
+    LAYER_RESIDUAL_INPUT = 1,/* Saves input for residual subtraction */
+    LAYER_RESIDUAL_SUBTRACT = 2 /* Subtracts noise prediction from saved input */
+} LayerType;
+
 /* Layer configuration */
 typedef struct {
+    LayerType type;          /* Layer type */
     int cin;                 /* Input channels */
     int cout;                /* Output channels */
     int use_relu;            /* 1 = ReLU activation, 0 = linear */
     int skip_from;           /* Layer index to add as skip connection, -1 = no skip */
+    int residual_from;       /* For RESIDUAL_SUBTRACT: layer index that saved the input, -1 = use network input */
     char name[64];           /* Layer name for debugging */
 } LayerConfig;
 
