@@ -95,7 +95,7 @@ int main(void) {
         .cout = 4,
         .use_relu = 0,
         .skip_from = -1,
-        .residual_from = 0,  /* Reference layer 0 (save_input) */
+        .residual_from = 1,  /* Reference layer 1 (save_input) */
         .name = "denoise"
     });
     

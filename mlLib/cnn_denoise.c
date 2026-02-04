@@ -1489,7 +1489,14 @@ float cnn_train_step(CNNDenoiser *cnn, float* noisy_input, float* clean_target, 
             /* Get the saved input from the referenced layer */
             cl_mem saved_input;
             if (l->residual_from >= 0 && l->residual_from < i) {
-                saved_input = cnn->layers[l->residual_from].residual_saved;
+                /* Validate that the referenced layer is RESIDUAL_INPUT */
+                if (cnn->layers[l->residual_from].type != LAYER_RESIDUAL_INPUT) {
+                    fprintf(stderr, "Error: Layer %d (%s) references layer %d for residual, but that layer is not RESIDUAL_INPUT\n",
+                            i, l->name, l->residual_from);
+                    saved_input = cnn->input_buf;  /* Fallback to network input */
+                } else {
+                    saved_input = cnn->layers[l->residual_from].residual_saved;
+                }
             } else {
                 /* Use network input if no specific layer referenced */
                 saved_input = cnn->input_buf;
@@ -2536,7 +2543,14 @@ int cnn_denoise(CNNDenoiser* cnn, float* noisy_input, float* denoised_output, in
             /* Get the saved input from the referenced layer */
             cl_mem saved_input;
             if (l->residual_from >= 0 && l->residual_from < i) {
-                saved_input = cnn->layers[l->residual_from].residual_saved;
+                /* Validate that the referenced layer is RESIDUAL_INPUT */
+                if (cnn->layers[l->residual_from].type != LAYER_RESIDUAL_INPUT) {
+                    fprintf(stderr, "Error: Layer %d (%s) references layer %d for residual, but that layer is not RESIDUAL_INPUT\n",
+                            i, l->name, l->residual_from);
+                    saved_input = cnn->input_buf;  /* Fallback to network input */
+                } else {
+                    saved_input = cnn->layers[l->residual_from].residual_saved;
+                }
             } else {
                 /* Use network input if no specific layer referenced */
                 saved_input = cnn->input_buf;
