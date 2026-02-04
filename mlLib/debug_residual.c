@@ -11,23 +11,26 @@ int main(void) {
     cfg.optimizer = OPTIMIZER_ADAM;
     cfg.adam_beta1 = 0.95f;
     cfg.adam_beta2 = 0.999f;
-    cfg.residual_mode = 1;
+    cfg.residual_mode = 0;  /* Using new layer-based residual architecture */
     
     CNNDenoiser* cnn = cnn_create(cfg);
     
-    /* Same architecture as train.c */
-    cnn_add_layer(cnn, (LayerConfig){4, 16, 1, -1, "encode_1"});
-    cnn_add_layer(cnn, (LayerConfig){16, 20, 1, -1, "encode_2"});
-    cnn_add_layer(cnn, (LayerConfig){20, 24, 1, -1, "bottleneck"});
-    cnn_add_layer(cnn, (LayerConfig){24, 20, 1, 1, "decode_1_skip1"});
-    cnn_add_layer(cnn, (LayerConfig){20, 16, 1, 0, "decode_2_skip0"});
-    cnn_add_layer(cnn, (LayerConfig){16, 4, 0, -1, "output"});
+    /* New residual architecture with explicit layers */
+    cnn_add_layer(cnn, (LayerConfig){LAYER_RESIDUAL_INPUT, 4, 4, 0, -1, -1, "save_input"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_CONV, 4, 16, 1, -1, -1, "encode_1"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_CONV, 16, 20, 1, -1, -1, "encode_2"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_CONV, 20, 24, 1, -1, -1, "bottleneck"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_CONV, 24, 20, 1, 2, -1, "decode_1_skip2"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_CONV, 20, 16, 1, 1, -1, "decode_2_skip1"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_CONV, 16, 4, 0, -1, -1, "noise_output"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_RESIDUAL_SUBTRACT, 4, 4, 0, -1, 0, "denoise"});
+    cnn_add_layer(cnn, (LayerConfig){LAYER_CONV, 4, 4, 0, -1, -1, "output"});
     
     cnn_finalize(cnn);
     
     int size = 800 * 600 * 4;
     float *input = malloc(size * sizeof(float));
-    float *noise_target = malloc(size * sizeof(float));
+    float *target = malloc(size * sizeof(float));
     float *output = malloc(size * sizeof(float));
     
     /* Create clear test pattern */
@@ -38,22 +41,20 @@ int main(void) {
     
     for (int i = 0; i < size; i++) {
         input[i] = input_val;
-        noise_target[i] = noise_val;  /* The noise to predict */
+        target[i] = clean_val;  /* Target is clean image */
     }
     
     printf("  Input (noisy): %.3f\n", input_val);
     printf("  Clean (expected): %.3f\n", clean_val);
-    printf("  Noise target: %.3f (what network should predict)\n", noise_val);
-    printf("  Expected output: input - noise = %.3f - %.3f = %.3f\n\n", 
-           input_val, noise_val, clean_val);
+    printf("  Noise: %.3f (what network should internally predict)\n", noise_val);
+    printf("  Expected output: %.3f\n\n", clean_val);
     
     /* Train for a few steps */
     printf("Training for 30 steps...\n");
     for (int step = 0; step < 30; step++) {
-        cnn_train_step(cnn, input, noise_target, 1);
+        cnn_train_step(cnn, input, target, 1);
         
         if (step % 10 == 0) {
-            /* Get the output using cnn_get_output (applies residual) */
             cnn_get_output(cnn, output);
             
             printf("Step %2d:\n", step);
@@ -75,9 +76,9 @@ int main(void) {
             printf("  |output - clean|: %.6f\n", dist_to_clean);
             
             if (same_count > 95) {
-                printf("  ❌ OUTPUT IS IDENTICAL TO INPUT!\n");
+                printf("  ERROR: OUTPUT IS IDENTICAL TO INPUT!\n");
             } else if (dist_to_clean < dist_to_input) {
-                printf("  ✅ Moving toward clean target\n");
+                printf("  SUCCESS: Moving toward clean target\n");
             }
             printf("\n");
         }
@@ -90,22 +91,19 @@ int main(void) {
     printf("  Input:  %.6f\n", input_val);
     printf("  Clean:  %.6f\n", clean_val);
     printf("  Output: %.6f\n", output[0]);
-    printf("  Noise should be predicted as: %.6f\n", noise_val);
-    printf("  Output should equal: input - noise = %.6f\n", input_val - noise_val);
     
     if (fabs(output[0] - input_val) < 0.001) {
-        printf("\n❌ BUG CONFIRMED: Output equals input!\n");
-        printf("   Residual mode is NOT being applied to output.\n");
-        printf("   The cnn_get_output() function may not be working correctly.\n");
+        printf("\nERROR: Output equals input!\n");
+        printf("   Residual architecture is NOT working.\n");
     } else if (fabs(output[0] - clean_val) < 0.05) {
-        printf("\n✅ SUCCESS: Output close to clean target!\n");
-        printf("   Residual mode is working correctly.\n");
+        printf("\nSUCCESS: Output close to clean target!\n");
+        printf("   New residual layer architecture is working correctly.\n");
     } else {
-        printf("\n⚠️  Residual mode working but network needs more training.\n");
+        printf("\nResidual architecture working but network needs more training.\n");
     }
     
     free(input);
-    free(noise_target);
+    free(target);
     free(output);
     cnn_destroy(cnn);
     

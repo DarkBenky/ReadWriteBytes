@@ -1924,8 +1924,11 @@ int cnn_get_num_parameters(CNNDenoiser *cnn) {
     int total = 0;
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
-        total += l->cout * l->cin4 * 9 * 4;  /* weights */
-        total += l->cout;                     /* biases */
+        /* Only count parameters for CONV layers */
+        if (l->type == LAYER_CONV) {
+            total += l->cout * l->cin4 * 9 * 4;  /* weights */
+            total += l->cout;                     /* biases */
+        }
     }
     return total;
 }
@@ -1937,8 +1940,26 @@ void cnn_print_architecture(CNNDenoiser *cnn) {
     printf("Layers: %d\n", cnn->n_layers);
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
-        printf("  [%d] %s: %d->%d channels, %s\n", i, l->name, l->cin, l->cout,
-               l->use_relu ? "ReLU" : "Linear");
+        const char *type_name;
+        switch (l->type) {
+            case LAYER_CONV: type_name = "Conv"; break;
+            case LAYER_RESIDUAL_INPUT: type_name = "ResInput"; break;
+            case LAYER_RESIDUAL_SUBTRACT: type_name = "ResSub"; break;
+            default: type_name = "Unknown"; break;
+        }
+        
+        if (l->type == LAYER_CONV) {
+            printf("  [%d] %s (%s): %d->%d channels, %s", i, l->name, type_name, l->cin, l->cout,
+                   l->use_relu ? "ReLU" : "Linear");
+            if (l->skip_from >= 0) printf(" + skip[%d]", l->skip_from);
+            printf("\n");
+        } else if (l->type == LAYER_RESIDUAL_INPUT) {
+            printf("  [%d] %s (%s): %d channels (save input)\n", i, l->name, type_name, l->cout);
+        } else if (l->type == LAYER_RESIDUAL_SUBTRACT) {
+            printf("  [%d] %s (%s): %d channels (input", i, l->name, type_name, l->cout);
+            if (l->residual_from >= 0) printf("[%d]", l->residual_from);
+            printf(" - noise)\n");
+        }
     }
     printf("Total parameters: %d\n", cnn_get_num_parameters(cnn));
     printf("========================\n\n");
@@ -1960,21 +1981,33 @@ void cnn_destroy(CNNDenoiser *cnn) {
     
     for (int i = 0; i < cnn->n_layers; i++) {
         ConvLayer *l = &cnn->layers[i];
-        free(l->h_weights);
-        free(l->h_bias);
-        free(l->h_grad_w);
-        free(l->h_grad_b);
-        clReleaseMemObject(l->weights);
-        clReleaseMemObject(l->bias);
-        clReleaseMemObject(l->output);
-        clReleaseMemObject(l->grad_bias);
         
-        if (cnn->config.optimizer == OPTIMIZER_ADAM) {
-            clReleaseMemObject(l->adam_m_w);
-            clReleaseMemObject(l->adam_v_w);
-            clReleaseMemObject(l->adam_m_b);
-            clReleaseMemObject(l->adam_v_b);
+        /* Free host memory and OpenCL buffers based on layer type */
+        if (l->type == LAYER_CONV) {
+            free(l->h_weights);
+            free(l->h_bias);
+            free(l->h_grad_w);
+            free(l->h_grad_b);
+            if (l->weights) clReleaseMemObject(l->weights);
+            if (l->bias) clReleaseMemObject(l->bias);
+            if (l->grad_bias) clReleaseMemObject(l->grad_bias);
+            if (l->grad_weights) clReleaseMemObject(l->grad_weights);
+            
+            if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                if (l->adam_m_w) clReleaseMemObject(l->adam_m_w);
+                if (l->adam_v_w) clReleaseMemObject(l->adam_v_w);
+                if (l->adam_m_b) clReleaseMemObject(l->adam_m_b);
+                if (l->adam_v_b) clReleaseMemObject(l->adam_v_b);
+            }
+        } else if (l->type == LAYER_RESIDUAL_INPUT) {
+            if (l->residual_saved) clReleaseMemObject(l->residual_saved);
         }
+        
+        /* Common cleanup for all layer types */
+        if (l->output) clReleaseMemObject(l->output);
+        if (l->grad_output) clReleaseMemObject(l->grad_output);
+        if (l->grad_input) clReleaseMemObject(l->grad_input);
+        if (l->skip_input) clReleaseMemObject(l->skip_input);
     }
     
     if (cnn->finalized) {
@@ -2045,43 +2078,49 @@ int cnn_save_weights(CNNDenoiser* cnn, const char* filepath) {
         ConvLayer *l = &cnn->layers[i];
         
         /* Write layer metadata */
+        fwrite(&l->type, sizeof(int), 1, f);
         fwrite(&l->cin, sizeof(int), 1, f);
         fwrite(&l->cout, sizeof(int), 1, f);
         fwrite(&l->use_relu, sizeof(int), 1, f);
+        fwrite(&l->skip_from, sizeof(int), 1, f);
+        fwrite(&l->residual_from, sizeof(int), 1, f);
         fwrite(l->name, sizeof(char), 64, f);
         
-        /* Download weights from GPU */
-        int w_size = l->cout * l->cin4 * 9;
-        clEnqueueReadBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
-                           w_size * 16, l->h_weights, 0, NULL, NULL);
-        clEnqueueReadBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
-                           l->cout * 4, l->h_bias, 0, NULL, NULL);
-        
-        /* Write weights and biases */
-        fwrite(l->h_weights, sizeof(float), w_size * 4, f);
-        fwrite(l->h_bias, sizeof(float), l->cout, f);
-        
-        /* Write Adam optimizer state if using Adam */
-        if (cnn->config.optimizer == OPTIMIZER_ADAM) {
-            float *adam_m_w = malloc(w_size * 16);
-            float *adam_v_w = malloc(w_size * 16);
-            float *adam_m_b = malloc(l->cout * 4);
-            float *adam_v_b = malloc(l->cout * 4);
+        /* Only save weights for CONV layers */
+        if (l->type == LAYER_CONV) {
+            /* Download weights from GPU */
+            int w_size = l->cout * l->cin4 * 9;
+            clEnqueueReadBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
+                               w_size * 16, l->h_weights, 0, NULL, NULL);
+            clEnqueueReadBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
+                               l->cout * 4, l->h_bias, 0, NULL, NULL);
             
-            clEnqueueReadBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
-            clEnqueueReadBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
-            clEnqueueReadBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
-            clEnqueueReadBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+            /* Write weights and biases */
+            fwrite(l->h_weights, sizeof(float), w_size * 4, f);
+            fwrite(l->h_bias, sizeof(float), l->cout, f);
             
-            fwrite(adam_m_w, sizeof(float), w_size * 4, f);
-            fwrite(adam_v_w, sizeof(float), w_size * 4, f);
-            fwrite(adam_m_b, sizeof(float), l->cout, f);
-            fwrite(adam_v_b, sizeof(float), l->cout, f);
-            
-            free(adam_m_w);
-            free(adam_v_w);
-            free(adam_m_b);
-            free(adam_v_b);
+            /* Write Adam optimizer state if using Adam */
+            if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                float *adam_m_w = malloc(w_size * 16);
+                float *adam_v_w = malloc(w_size * 16);
+                float *adam_m_b = malloc(l->cout * 4);
+                float *adam_v_b = malloc(l->cout * 4);
+                
+                clEnqueueReadBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
+                clEnqueueReadBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
+                clEnqueueReadBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
+                clEnqueueReadBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+                
+                fwrite(adam_m_w, sizeof(float), w_size * 4, f);
+                fwrite(adam_v_w, sizeof(float), w_size * 4, f);
+                fwrite(adam_m_b, sizeof(float), l->cout, f);
+                fwrite(adam_v_b, sizeof(float), l->cout, f);
+                
+                free(adam_m_w);
+                free(adam_v_w);
+                free(adam_m_b);
+                free(adam_v_b);
+            }
         }
     }
     
@@ -2127,60 +2166,67 @@ int cnn_load_weights(CNNDenoiser* cnn, const char* filepath) {
         ConvLayer *l = &cnn->layers[i];
         
         /* Read and verify layer metadata */
-        int cin, cout, use_relu;
+        int type, cin, cout, use_relu, skip_from, residual_from;
         char name[64];
+        fread(&type, sizeof(int), 1, f);
         fread(&cin, sizeof(int), 1, f);
         fread(&cout, sizeof(int), 1, f);
         fread(&use_relu, sizeof(int), 1, f);
+        fread(&skip_from, sizeof(int), 1, f);
+        fread(&residual_from, sizeof(int), 1, f);
         fread(name, sizeof(char), 64, f);
         
-        if (cin != l->cin || cout != l->cout) {
-            fprintf(stderr, "Layer %d dimension mismatch\n", i);
+        if (cin != l->cin || cout != l->cout || type != l->type) {
+            fprintf(stderr, "Layer %d mismatch (cin=%d/%d, cout=%d/%d, type=%d/%d)\n", 
+                    i, cin, l->cin, cout, l->cout, type, l->type);
             fclose(f);
             return -1;
         }
         
-        /* Read weights and biases */
-        int w_size = l->cout * l->cin4 * 9;
-        fread(l->h_weights, sizeof(float), w_size * 4, f);
-        fread(l->h_bias, sizeof(float), l->cout, f);
-        
-        /* Upload to GPU */
-        clEnqueueWriteBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
-                            w_size * 16, l->h_weights, 0, NULL, NULL);
-        clEnqueueWriteBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
-                            l->cout * 4, l->h_bias, 0, NULL, NULL);
-        
-        /* Read Adam optimizer state if present */
-        if (saved_config.optimizer == OPTIMIZER_ADAM) {
-            float *adam_m_w = malloc(w_size * 16);
-            float *adam_v_w = malloc(w_size * 16);
-            float *adam_m_b = malloc(l->cout * 4);
-            float *adam_v_b = malloc(l->cout * 4);
+        /* Only load weights for CONV layers */
+        if (l->type == LAYER_CONV) {
+            /* Read weights and biases */
+            int w_size = l->cout * l->cin4 * 9;
+            fread(l->h_weights, sizeof(float), w_size * 4, f);
+            fread(l->h_bias, sizeof(float), l->cout, f);
             
-            fread(adam_m_w, sizeof(float), w_size * 4, f);
-            fread(adam_v_w, sizeof(float), w_size * 4, f);
-            fread(adam_m_b, sizeof(float), l->cout, f);
-            fread(adam_v_b, sizeof(float), l->cout, f);
+            /* Upload to GPU */
+            clEnqueueWriteBuffer(cnn->queue, l->weights, CL_TRUE, 0, 
+                                w_size * 16, l->h_weights, 0, NULL, NULL);
+            clEnqueueWriteBuffer(cnn->queue, l->bias, CL_TRUE, 0, 
+                                l->cout * 4, l->h_bias, 0, NULL, NULL);
             
-            if (cnn->config.optimizer == OPTIMIZER_ADAM) {
-                /* RESET Adam state for stable fine-tuning with new learning rate */
-                printf("Resetting Adam momentum buffers for layer %d to zero for stable fine-tuning\n", i);
-                memset(adam_m_w, 0, w_size * 16);
-                memset(adam_v_w, 0, w_size * 16);
-                memset(adam_m_b, 0, l->cout * 4);
-                memset(adam_v_b, 0, l->cout * 4);
+            /* Read Adam optimizer state if present */
+            if (saved_config.optimizer == OPTIMIZER_ADAM) {
+                float *adam_m_w = malloc(w_size * 16);
+                float *adam_v_w = malloc(w_size * 16);
+                float *adam_m_b = malloc(l->cout * 4);
+                float *adam_v_b = malloc(l->cout * 4);
                 
-                clEnqueueWriteBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
-                clEnqueueWriteBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
-                clEnqueueWriteBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
-                clEnqueueWriteBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+                fread(adam_m_w, sizeof(float), w_size * 4, f);
+                fread(adam_v_w, sizeof(float), w_size * 4, f);
+                fread(adam_m_b, sizeof(float), l->cout, f);
+                fread(adam_v_b, sizeof(float), l->cout, f);
+                
+                if (cnn->config.optimizer == OPTIMIZER_ADAM) {
+                    /* RESET Adam state for stable fine-tuning with new learning rate */
+                    printf("Resetting Adam momentum buffers for layer %d to zero for stable fine-tuning\n", i);
+                    memset(adam_m_w, 0, w_size * 16);
+                    memset(adam_v_w, 0, w_size * 16);
+                    memset(adam_m_b, 0, l->cout * 4);
+                    memset(adam_v_b, 0, l->cout * 4);
+                    
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_m_w, CL_TRUE, 0, w_size * 16, adam_m_w, 0, NULL, NULL);
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_v_w, CL_TRUE, 0, w_size * 16, adam_v_w, 0, NULL, NULL);
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_m_b, CL_TRUE, 0, l->cout * 4, adam_m_b, 0, NULL, NULL);
+                    clEnqueueWriteBuffer(cnn->queue, l->adam_v_b, CL_TRUE, 0, l->cout * 4, adam_v_b, 0, NULL, NULL);
+                }
+                
+                free(adam_m_w);
+                free(adam_v_w);
+                free(adam_m_b);
+                free(adam_v_b);
             }
-            
-            free(adam_m_w);
-            free(adam_v_w);
-            free(adam_m_b);
-            free(adam_v_b);
         }
     }
     
