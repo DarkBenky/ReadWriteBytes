@@ -391,6 +391,101 @@ enum Mode {
 	INIT_MODE,
 };
 
+void convertModelToSceneTriangles(struct Triangles* model, float position[3], float direction[3], struct Triangles* sceneTriangles, enum Mode mode) {
+	if (!model || !sceneTriangles) {
+		return;
+	}
+
+	if (mode == INIT_MODE) {
+		sceneTriangles->count = 0;
+	}
+
+	if (sceneTriangles->count + model->count > NUMBER_OF_TRIANGLES) {
+		return;
+	}
+
+	int offset = sceneTriangles->count;
+
+	float dirLen = sqrtf(direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]);
+	if (dirLen < 0.0001f) {
+		dirLen = 1.0f;
+	}
+	float normDir[3] = {direction[0] / dirLen, direction[1] / dirLen, direction[2] / dirLen};
+
+	float defaultDir[3] = {0.0f, 0.0f, 1.0f};
+	
+	float axis[3] = {
+		defaultDir[1] * normDir[2] - defaultDir[2] * normDir[1],
+		defaultDir[2] * normDir[0] - defaultDir[0] * normDir[2],
+		defaultDir[0] * normDir[1] - defaultDir[1] * normDir[0]
+	};
+	
+	float cosAngle = defaultDir[0] * normDir[0] + defaultDir[1] * normDir[1] + defaultDir[2] * normDir[2];
+	float angle = acosf(cosAngle);
+	float axisLen = sqrtf(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+	
+	float rotMatrix[3][3];
+	if (axisLen > 0.0001f && fabsf(angle) > 0.0001f) {
+		axis[0] /= axisLen;
+		axis[1] /= axisLen;
+		axis[2] /= axisLen;
+		
+		float c = cosf(angle);
+		float s = sinf(angle);
+		float t = 1.0f - c;
+		
+		rotMatrix[0][0] = t * axis[0] * axis[0] + c;
+		rotMatrix[0][1] = t * axis[0] * axis[1] - s * axis[2];
+		rotMatrix[0][2] = t * axis[0] * axis[2] + s * axis[1];
+		
+		rotMatrix[1][0] = t * axis[0] * axis[1] + s * axis[2];
+		rotMatrix[1][1] = t * axis[1] * axis[1] + c;
+		rotMatrix[1][2] = t * axis[1] * axis[2] - s * axis[0];
+		
+		rotMatrix[2][0] = t * axis[0] * axis[2] - s * axis[1];
+		rotMatrix[2][1] = t * axis[1] * axis[2] + s * axis[0];
+		rotMatrix[2][2] = t * axis[2] * axis[2] + c;
+	} else {
+		rotMatrix[0][0] = 1.0f; rotMatrix[0][1] = 0.0f; rotMatrix[0][2] = 0.0f;
+		rotMatrix[1][0] = 0.0f; rotMatrix[1][1] = 1.0f; rotMatrix[1][2] = 0.0f;
+		rotMatrix[2][0] = 0.0f; rotMatrix[2][1] = 0.0f; rotMatrix[2][2] = 1.0f;
+	}
+
+	for (int i = 0; i < model->count; i++) {
+		int srcIdx = i * 3;
+		int dstIdx = (offset + i) * 3;
+		
+		float v1[3] = {model->v1[srcIdx + 0], model->v1[srcIdx + 1], model->v1[srcIdx + 2]};
+		sceneTriangles->v1[dstIdx + 0] = rotMatrix[0][0] * v1[0] + rotMatrix[0][1] * v1[1] + rotMatrix[0][2] * v1[2] + position[0];
+		sceneTriangles->v1[dstIdx + 1] = rotMatrix[1][0] * v1[0] + rotMatrix[1][1] * v1[1] + rotMatrix[1][2] * v1[2] + position[1];
+		sceneTriangles->v1[dstIdx + 2] = rotMatrix[2][0] * v1[0] + rotMatrix[2][1] * v1[1] + rotMatrix[2][2] * v1[2] + position[2];
+
+		float v2[3] = {model->v2[srcIdx + 0], model->v2[srcIdx + 1], model->v2[srcIdx + 2]};
+		sceneTriangles->v2[dstIdx + 0] = rotMatrix[0][0] * v2[0] + rotMatrix[0][1] * v2[1] + rotMatrix[0][2] * v2[2] + position[0];
+		sceneTriangles->v2[dstIdx + 1] = rotMatrix[1][0] * v2[0] + rotMatrix[1][1] * v2[1] + rotMatrix[1][2] * v2[2] + position[1];
+		sceneTriangles->v2[dstIdx + 2] = rotMatrix[2][0] * v2[0] + rotMatrix[2][1] * v2[1] + rotMatrix[2][2] * v2[2] + position[2];
+
+		float v3[3] = {model->v3[srcIdx + 0], model->v3[srcIdx + 1], model->v3[srcIdx + 2]};
+		sceneTriangles->v3[dstIdx + 0] = rotMatrix[0][0] * v3[0] + rotMatrix[0][1] * v3[1] + rotMatrix[0][2] * v3[2] + position[0];
+		sceneTriangles->v3[dstIdx + 1] = rotMatrix[1][0] * v3[0] + rotMatrix[1][1] * v3[1] + rotMatrix[1][2] * v3[2] + position[1];
+		sceneTriangles->v3[dstIdx + 2] = rotMatrix[2][0] * v3[0] + rotMatrix[2][1] * v3[1] + rotMatrix[2][2] * v3[2] + position[2];
+
+		sceneTriangles->Roughness[offset + i] = model->Roughness[i];
+		sceneTriangles->Metallic[offset + i] = model->Metallic[i];
+		sceneTriangles->Emission[offset + i] = model->Emission[i];
+
+		float n[3] = {model->normals[srcIdx + 0], model->normals[srcIdx + 1], model->normals[srcIdx + 2]};
+		sceneTriangles->normals[dstIdx + 0] = rotMatrix[0][0] * n[0] + rotMatrix[0][1] * n[1] + rotMatrix[0][2] * n[2];
+		sceneTriangles->normals[dstIdx + 1] = rotMatrix[1][0] * n[0] + rotMatrix[1][1] * n[1] + rotMatrix[1][2] * n[2];
+		sceneTriangles->normals[dstIdx + 2] = rotMatrix[2][0] * n[0] + rotMatrix[2][1] * n[1] + rotMatrix[2][2] * n[2];
+
+		sceneTriangles->colors[dstIdx + 0] = model->colors[srcIdx + 0];
+		sceneTriangles->colors[dstIdx + 1] = model->colors[srcIdx + 1];
+		sceneTriangles->colors[dstIdx + 2] = model->colors[srcIdx + 2];
+	}
+	sceneTriangles->count += model->count;
+}
+
 void loadTriangles(struct Region *staticRegion, struct Triangles *sceneTriangles, enum Mode mode) {
 	if (!staticRegion || !sceneTriangles) {
 		return;
@@ -535,13 +630,41 @@ int randomInt(int min, int max) {
 int main() {
 	int iterations = 1000;
 	float timeStemps[iterations];
+	float timeStempsModelCopy[iterations];
 
-	// test performance of loading data
 	struct Region *staticRegion = malloc(sizeof(struct Region));
 	struct Triangles *sceneTriangles = malloc(sizeof(struct Triangles));
+	struct Triangles *model = malloc(sizeof(struct Triangles));
 	sceneTriangles->count = 0;
+	model->count = 0;
 
-	// Fill sceneTriangles with test data
+	for (int i = 0; i < NUMBER_OF_TRIANGLES / 4; i++) {
+		model->v1[i * 3 + 0] = (float)randomInt(-10, 10);
+		model->v1[i * 3 + 1] = (float)randomInt(-10, 10);
+		model->v1[i * 3 + 2] = (float)randomInt(-10, 10);
+
+		model->v2[i * 3 + 0] = (float)randomInt(-10, 10);
+		model->v2[i * 3 + 1] = (float)randomInt(-10, 10);
+		model->v2[i * 3 + 2] = (float)randomInt(-10, 10);
+
+		model->v3[i * 3 + 0] = (float)randomInt(-10, 10);
+		model->v3[i * 3 + 1] = (float)randomInt(-10, 10);
+		model->v3[i * 3 + 2] = (float)randomInt(-10, 10);
+
+		model->normals[i * 3 + 0] = (float)randomInt(-1, 1);
+		model->normals[i * 3 + 1] = (float)randomInt(-1, 1);
+		model->normals[i * 3 + 2] = (float)randomInt(-1, 1);
+
+		model->colors[i * 3 + 0] = (float)randomInt(0, 255);
+		model->colors[i * 3 + 1] = (float)randomInt(0, 255);
+		model->colors[i * 3 + 2] = (float)randomInt(0, 255);
+
+		model->Roughness[i] = (float)(rand() % 100) / 100.0f;
+		model->Metallic[i] = (float)(rand() % 100) / 100.0f;
+		model->Emission[i] = (float)(rand() % 100) / 100.0f;
+		model->count++;
+	}
+
 	for (int iter = 0; iter < iterations; iter++) {
 		sceneTriangles->count = 0;
 		int numTriangles = randomInt(NUMBER_OF_TRIANGLES / 2, NUMBER_OF_TRIANGLES);
@@ -571,10 +694,19 @@ int main() {
 			sceneTriangles->Emission[i] = (float)(rand() % 100) / 100.0f;
 			sceneTriangles->count++;
 		}
-		clock_t start = clock();
+
+		float position[3] = {(float)randomInt(-100, 100), (float)randomInt(-100, 100), (float)randomInt(-100, 100)};
+		float direction[3] = {(float)randomInt(-1, 1), (float)randomInt(-1, 1), (float)randomInt(-1, 1)};
+
+		clock_t startModel = clock();
+		convertModelToSceneTriangles(model, position, direction, sceneTriangles, APPEND_MODE);
+		clock_t endModel = clock();
+		timeStempsModelCopy[iter] = (float)(endModel - startModel) / CLOCKS_PER_SEC * 1000.0f;
+
+		clock_t startLoad = clock();
 		loadTriangles(staticRegion, sceneTriangles, INIT_MODE);
-		clock_t end = clock();
-		timeStemps[iter] = (float)(end - start) / CLOCKS_PER_SEC * 1000.0f;
+		clock_t endLoad = clock();
+		timeStemps[iter] = (float)(endLoad - startLoad) / CLOCKS_PER_SEC * 1000.0f;
 	}
 
 	for (int i = 0; i < iterations - 1; i++) {
@@ -587,18 +719,36 @@ int main() {
 		}
 	}
 
+	for (int i = 0; i < iterations - 1; i++) {
+		for (int j = i + 1; j < iterations; j++) {
+			if (timeStempsModelCopy[i] > timeStempsModelCopy[j]) {
+				float temp = timeStempsModelCopy[i];
+				timeStempsModelCopy[i] = timeStempsModelCopy[j];
+				timeStempsModelCopy[j] = temp;
+			}
+		}
+	}
+
 	int medianIdx = iterations / 2;
 	float median = (iterations % 2 == 0) ? (timeStemps[medianIdx - 1] + timeStemps[medianIdx]) / 2.0f : timeStemps[medianIdx];
+	float medianModel = (iterations % 2 == 0) ? (timeStempsModelCopy[medianIdx - 1] + timeStempsModelCopy[medianIdx]) / 2.0f : timeStempsModelCopy[medianIdx];
 
 	int p99Idx = (int)(iterations * 0.99f);
 	if (p99Idx >= iterations) p99Idx = iterations - 1;
 	float p99 = timeStemps[p99Idx];
+	float p99Model = timeStempsModelCopy[p99Idx];
 
-	printf("Benchmark Results (n=%d):\n", iterations);
+	printf("=== loadTriangles Benchmark Results (n=%d) ===\n", iterations);
 	printf("  Median: %.6f ms\n", median);
 	printf("  P99:    %.6f ms\n", p99);
 	printf("  Min:    %.6f ms\n", timeStemps[0]);
 	printf("  Max:    %.6f ms\n", timeStemps[iterations - 1]);
+
+	printf("\n=== convertModelToSceneTriangles Benchmark Results (n=%d) ===\n", iterations);
+	printf("  Median: %.6f ms\n", medianModel);
+	printf("  P99:    %.6f ms\n", p99Model);
+	printf("  Min:    %.6f ms\n", timeStempsModelCopy[0]);
+	printf("  Max:    %.6f ms\n", timeStempsModelCopy[iterations - 1]);
 
 	printf("\n=== Ray Intersection Tests ===\n");
 
@@ -660,6 +810,7 @@ int main() {
 
 	free(staticRegion);
 	free(sceneTriangles);
+	free(model);
 
 	return 0;
 }

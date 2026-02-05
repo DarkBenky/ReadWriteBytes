@@ -670,3 +670,111 @@ __kernel void batch_ssim_loss_gradient(
     
     loss_buffer[batch_offset + pixel_idx] = total_loss / 3.0f;
 }
+
+/* ========== RESIDUAL LAYER SUPPORT ========== */
+
+/* Batch residual input layer - save input for later subtraction
+ * Simply copies input to both output and saved buffer
+ */
+__kernel void batch_residual_input(
+    __global const float* input,         /* [batch][channels][h][w] */
+    __global float* output,              /* [batch][channels][h][w] - pass through */
+    __global float* saved,               /* [batch][channels][h][w] - saved for later */
+    int batch_size, int channels, int H, int W)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int z = get_global_id(2);  /* batch * channels combined */
+    
+    int hw = H * W;
+    int batch = z / channels;
+    int c = z % channels;
+    
+    if (x >= W || y >= H || batch >= batch_size) return;
+    
+    int idx = batch * channels * hw + c * hw + y * W + x;
+    
+    /* Pass through and save */
+    float val = input[idx];
+    output[idx] = val;
+    saved[idx] = val;
+}
+
+/* Batch residual subtract layer - compute (saved_input - current_input)
+ * Typically used as: denoised = input - noise_prediction
+ */
+__kernel void batch_residual_subtract(
+    __global const float* saved_input,   /* [batch][channels][h][w] - from RESIDUAL_INPUT layer */
+    __global const float* noise_pred,    /* [batch][channels][h][w] - current layer input */
+    __global float* output,              /* [batch][channels][h][w] - denoised result */
+    int batch_size, int channels, int H, int W)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int z = get_global_id(2);  /* batch * channels combined */
+    
+    int hw = H * W;
+    int batch = z / channels;
+    int c = z % channels;
+    
+    if (x >= W || y >= H || batch >= batch_size) return;
+    
+    int idx = batch * channels * hw + c * hw + y * W + x;
+    
+    /* Subtract noise from saved input */
+    output[idx] = saved_input[idx] - noise_pred[idx];
+}
+
+/* Batch backward for residual input - pass gradient through */
+__kernel void batch_residual_input_backward(
+    __global const float* grad_out,      /* [batch][channels][h][w] */
+    __global float* grad_in,             /* [batch][channels][h][w] - accumulate */
+    int batch_size, int channels, int H, int W)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int z = get_global_id(2);
+    
+    int hw = H * W;
+    int batch = z / channels;
+    int c = z % channels;
+    
+    if (x >= W || y >= H || batch >= batch_size) return;
+    
+    int idx = batch * channels * hw + c * hw + y * W + x;
+    
+    /* Pass gradient through (identity operation) */
+    grad_in[idx] = grad_out[idx];
+}
+
+/* Batch backward for residual subtract
+ * d_loss/d_saved_input = d_loss/d_output * 1 (positive gradient)
+ * d_loss/d_noise = d_loss/d_output * (-1) (negated gradient)
+ */
+__kernel void batch_residual_subtract_backward(
+    __global const float* grad_out,          /* [batch][channels][h][w] - gradient from next layer */
+    __global float* grad_saved,              /* [batch][channels][h][w] - gradient to saved input layer */
+    __global float* grad_noise,              /* [batch][channels][h][w] - gradient to noise prediction */
+    int batch_size, int channels, int H, int W)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int z = get_global_id(2);
+    
+    int hw = H * W;
+    int batch = z / channels;
+    int c = z % channels;
+    
+    if (x >= W || y >= H || batch >= batch_size) return;
+    
+    int idx = batch * channels * hw + c * hw + y * W + x;
+    
+    float grad = grad_out[idx];
+    
+    /* Gradient w.r.t. saved input (positive) */
+    grad_saved[idx] = grad;
+    
+    /* Gradient w.r.t. noise prediction (negated) */
+    grad_noise[idx] = -grad;
+}
+

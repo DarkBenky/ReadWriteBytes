@@ -174,22 +174,26 @@ def submit_loss():
     loss = data.get('loss')
     learning_rate = data.get('learning_rate')
     time = data.get('time')
+    forward_time = data.get('forward_time', 0.0)
     mae_loss = data.get('mae_loss', 0.0)
     mse_loss = data.get('mse_loss', 0.0)
     color_loss = data.get('color_loss', 0.0)
     laplacian_loss = data.get('laplacian_loss', 0.0)
     ssim_loss = data.get('ssim_loss', 0.0)
+    sobel_loss = data.get('sobel_loss', 0.0)
 
     wandb.log({
         "epoch": epoch,
         "loss": loss,
         "learning_rate": learning_rate,
         "time": time,
+        "forward_time": forward_time,
         "mae_loss": mae_loss,
         "mse_loss": mse_loss,
         "color_loss": color_loss,
         "laplacian_loss": laplacian_loss,
-        "ssim_loss": ssim_loss
+        "ssim_loss": ssim_loss,
+        "sobel_loss": sobel_loss
     })
     return jsonify({"status": "success"}), 200
 
