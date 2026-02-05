@@ -1804,6 +1804,80 @@ float cnn_train_step(CNNDenoiser *cnn, float *noisy_input, float *clean_target, 
 			total_loss += weight * color_loss_normalized;
 
 			clReleaseMemObject(loss_buf);
+		} else if (loss_type == LOSS_SSIM) {
+			int H = cnn->config.input_height;
+			int W = cnn->config.input_width;
+			int batch_size_one = 1;
+			
+			/* Create buffer for per-pixel loss values */
+			cl_mem loss_pixel_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, hw * sizeof(float), NULL, NULL);
+
+			clSetKernelArg(cnn->k_batch_ssim_loss, 0, sizeof(cl_mem), &loss_input);
+			clSetKernelArg(cnn->k_batch_ssim_loss, 1, sizeof(cl_mem), &cnn->target_buf);
+			clSetKernelArg(cnn->k_batch_ssim_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+			clSetKernelArg(cnn->k_batch_ssim_loss, 3, sizeof(cl_mem), &loss_pixel_buf);
+			clSetKernelArg(cnn->k_batch_ssim_loss, 4, sizeof(int), &batch_size_one);
+			clSetKernelArg(cnn->k_batch_ssim_loss, 5, sizeof(int), &H);
+			clSetKernelArg(cnn->k_batch_ssim_loss, 6, sizeof(int), &W);
+
+			size_t ssim_global[3] = {W, H, 1};
+			cl_int err = clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_ssim_loss, 3, NULL, ssim_global, NULL, 0, NULL, NULL);
+			if (err != CL_SUCCESS) fprintf(stderr, "[ERROR] SSIM loss kernel failed: %d\n", err);
+
+			/* Read back per-pixel loss and sum */
+			float *pixel_losses = malloc(hw * sizeof(float));
+			clEnqueueReadBuffer(cnn->queue, loss_pixel_buf, CL_TRUE, 0, hw * sizeof(float), pixel_losses, 0, NULL, NULL);
+			
+			float loss = 0.0f;
+			for (int i = 0; i < hw; i++) {
+				loss += pixel_losses[i];
+			}
+			int rgb_pixels = hw * 3;
+			float ssim_loss_normalized = loss / rgb_pixels;
+			cnn->last_ssim_loss = ssim_loss_normalized;
+			total_loss += weight * ssim_loss_normalized;
+			
+			free(pixel_losses);
+			clReleaseMemObject(loss_pixel_buf);
+		} else if (loss_type == LOSS_SOBEL) {
+			int H = cnn->config.input_height;
+			int W = cnn->config.input_width;
+			int C = last_layer->cout;
+			int batch_size_one = 1;
+			
+			/* Create buffer for per-pixel loss values */
+			cl_mem loss_pixel_buf = clCreateBuffer(cnn->ctx, CL_MEM_READ_WRITE, hw * C * sizeof(float), NULL, NULL);
+
+			clSetKernelArg(cnn->k_batch_sobel_loss, 0, sizeof(cl_mem), &loss_input);
+			clSetKernelArg(cnn->k_batch_sobel_loss, 1, sizeof(cl_mem), &cnn->target_buf);
+			clSetKernelArg(cnn->k_batch_sobel_loss, 2, sizeof(cl_mem), &temp_grad_loss);
+			clSetKernelArg(cnn->k_batch_sobel_loss, 3, sizeof(cl_mem), &loss_pixel_buf);
+			clSetKernelArg(cnn->k_batch_sobel_loss, 4, sizeof(int), &batch_size_one);
+			clSetKernelArg(cnn->k_batch_sobel_loss, 5, sizeof(int), &H);
+			clSetKernelArg(cnn->k_batch_sobel_loss, 6, sizeof(int), &W);
+			clSetKernelArg(cnn->k_batch_sobel_loss, 7, sizeof(int), &C);
+
+			size_t sobel_global[3] = {W, H, C};
+			cl_int err = clEnqueueNDRangeKernel(cnn->queue, cnn->k_batch_sobel_loss, 3, NULL, sobel_global, NULL, 0, NULL, NULL);
+			if (err != CL_SUCCESS) fprintf(stderr, "[ERROR] Sobel loss kernel failed: %d\n", err);
+
+			/* Read back per-pixel loss and sum (RGB only, skip luminance) */
+			float *pixel_losses = malloc(hw * C * sizeof(float));
+			clEnqueueReadBuffer(cnn->queue, loss_pixel_buf, CL_TRUE, 0, hw * C * sizeof(float), pixel_losses, 0, NULL, NULL);
+			
+			float loss = 0.0f;
+			for (int c = 0; c < 3; c++) {  /* RGB only */
+				for (int i = 0; i < hw; i++) {
+					loss += pixel_losses[c * hw + i];
+				}
+			}
+			int rgb_pixels = hw * 3;
+			float sobel_loss_normalized = loss / rgb_pixels;
+			cnn->last_sobel_loss = sobel_loss_normalized;
+			total_loss += weight * sobel_loss_normalized;
+			
+			free(pixel_losses);
+			clReleaseMemObject(loss_pixel_buf);
 		}
 
 		/* Add weighted gradient to accumulated gradient buffer */

@@ -123,6 +123,43 @@ int main() {
 				   stats.loss_time_ms,
 				   stats.update_time_ms,
 				   stats.total_time_ms);
+
+			if (BATCH_SIZE == 1) {
+				float current_mae, current_mse, current_laplace, current_color, current_ssim, current_sobel;
+				cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color, &current_ssim, &current_sobel);
+
+				float weight_mae = 1.0f, weight_mse = 1.0f, weight_laplace = 1.0f, weight_color = 1.0f, weight_ssim = 1.0f, weight_sobel = 1.0f;
+				for (int i = 0; i < cfg.loss_config.num_losses; i++) {
+					if (cfg.loss_config.types[i] == LOSS_MAE)
+						weight_mae = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_MSE)
+						weight_mse = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_LAPLACE)
+						weight_laplace = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_COLOR_VARIANCE)
+						weight_color = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_SSIM)
+						weight_ssim = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_SOBEL)
+						weight_sobel = cfg.loss_config.weights[i];
+				}
+
+				float weighted_mae = current_mae * weight_mae;
+				float weighted_mse = current_mse * weight_mse;
+				float weighted_laplace = current_laplace * weight_laplace;
+				float weighted_color = current_color * weight_color;
+				float weighted_ssim = current_ssim * weight_ssim;
+				float weighted_sobel = current_sobel * weight_sobel;
+
+				printf("Losses: MAE=%.4f(%.4f) MSE=%.4f(%.4f) Laplace=%.4f(%.4f) Color=%.4f(%.4f) SSIM=%.4f(%.4f) Sobel=%.4f(%.4f)\n",
+					   current_mae, weighted_mae, current_mse, weighted_mse,
+					   current_laplace, weighted_laplace, current_color, weighted_color,
+					   current_ssim, weighted_ssim, current_sobel, weighted_sobel);
+
+				float current_total_loss = accumulated_loss / (step + 1);
+				send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, current_total_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, stats.forward_time_ms, current_mae, current_mse, current_color, current_laplace, current_ssim, current_sobel);
+			}
+
 			printf("Current Loss: %.6f (%.2f img/s)\n",
 				   accumulated_loss / (step + 1),
 				   BATCH_SIZE * 1000.0 / stats.total_time_ms);
