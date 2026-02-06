@@ -362,7 +362,7 @@ __kernel void batch_laplace_loss_gradient(
     __global const float* output,        /* [batch][C][H][W] */
     __global const float* target,        /* [batch][C][H][W] */
     __global float* grad_out,            /* [batch][C][H][W] */
-    __global float* loss_per_batch,      /* [batch] accumulator */
+    __global float* loss_buffer,         /* [batch * C * H * W] loss per pixel */
     int batch_size,
     int H, int W, int C)
 {
@@ -373,20 +373,20 @@ __kernel void batch_laplace_loss_gradient(
     
     if (x >= W || y >= H || batch >= batch_size) return;
     
+    int img_size = C * H * W;
+    int channel_size = H * W;
+    int global_idx = batch * img_size + c * channel_size + y * W + x;
+    
     /* Skip luminance channel (channel 3), only process RGB (0,1,2) */
     if (c >= 3) {
-        int img_size = C * H * W;
-        int channel_size = H * W;
-        int global_idx = batch * img_size + c * channel_size + y * W + x;
         grad_out[global_idx] = 0.0f;
+        loss_buffer[global_idx] = 0.0f;
         return;
     }
     
     /* Laplacian only computed for interior pixels */
     if (x > 0 && y > 0 && x < W-1 && y < H-1) {
-        int img_size = C * H * W;
-        int channel_size = H * W;
-        int idx = batch * img_size + c * channel_size + y * W + x;
+        int idx = global_idx;
         
         /* Compute Laplacian: -4*center + left + right + up + down */
         float lap_out = -4.0f * output[idx] +
@@ -402,15 +402,12 @@ __kernel void batch_laplace_loss_gradient(
         /* MAE-style gradient for Laplacian */
         grad_out[idx] = (diff > 0.0f) ? 1.0f : -1.0f;
         
-        /* Accumulate loss for all RGB channels at the channel position */
-        loss_per_batch[idx] = fabs(diff);
+        /* Store loss per pixel for reduction */
+        loss_buffer[idx] = fabs(diff);
     } else {
         /* Zero gradient and loss for border pixels */
-        int img_size = C * H * W;
-        int channel_size = H * W;
-        int global_idx = batch * img_size + c * channel_size + y * W + x;
         grad_out[global_idx] = 0.0f;
-        loss_per_batch[global_idx] = 0.0f;
+        loss_buffer[global_idx] = 0.0f;
     }
 }
 

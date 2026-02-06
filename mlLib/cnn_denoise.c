@@ -364,13 +364,16 @@ static const char *kernel_source =
 	"    local_loss[lid] = 0.0f;\n"
 	"    \n"
 	"    if (gid < size) {\n"
+	"        int c = gid % C;\n"
 	"        int x = (gid / C) % W;\n"
 	"        int y = (gid / C) / W;\n"
+	"        int idx = c * H * W + y * W + x;\n"
 	"        \n"
-	"        if (x > 0 && y > 0 && x < W-1 && y < H-1) {\n"
-	"            int c = gid % C;\n"
-	"            int idx = c * H * W + y * W + x;\n"
-	"            \n"
+	"        /* Only process RGB channels (0,1,2), skip luminance (3) */\n"
+	"        if (c >= 3) {\n"
+	"            grad[idx] = 0.0f;\n"
+	"        } else if (x > 0 && y > 0 && x < W-1 && y < H-1) {\n"
+	"            /* Laplacian only for interior pixels */\n"
 	"            float lap_out = -4.0f * output[idx] +\n"
 	"                            output[idx - 1] + output[idx + 1] +\n"
 	"                            output[idx - W] + output[idx + W];\n"
@@ -382,6 +385,8 @@ static const char *kernel_source =
 	"            float diff = lap_out - lap_tgt;\n"
 	"            grad[idx] = (diff > 0.0f) ? 1.0f : -1.0f;\n"
 	"            local_loss[lid] = fabs(diff);\n"
+	"        } else {\n"
+	"            grad[idx] = 0.0f;\n"
 	"        }\n"
 	"    }\n"
 	"    barrier(CLK_LOCAL_MEM_FENCE);\n"
@@ -1755,6 +1760,7 @@ float cnn_train_step(CNNDenoiser *cnn, float *noisy_input, float *clean_target, 
 			clSetKernelArg(cnn->k_laplace_loss, 4, sizeof(int), &H);
 			clSetKernelArg(cnn->k_laplace_loss, 5, sizeof(int), &W);
 			clSetKernelArg(cnn->k_laplace_loss, 6, sizeof(int), &C);
+			clSetKernelArg(cnn->k_laplace_loss, 7, 256 * sizeof(float), NULL);
 
 			size_t global_loss = 256 * num_workgroups;
 			size_t local_loss = 256;
@@ -1766,7 +1772,8 @@ float cnn_train_step(CNNDenoiser *cnn, float *noisy_input, float *clean_target, 
 			float loss = 0.0f;
 			for (int i = 0; i < num_workgroups; i++)
 				loss += loss_per_wg[i];
-			float laplace_loss_normalized = loss / out_size;
+			int rgb_pixels = (out_size / 4) * 3;
+			float laplace_loss_normalized = loss / rgb_pixels;
 			cnn->last_laplace_loss = laplace_loss_normalized;
 			total_loss += weight * laplace_loss_normalized;
 

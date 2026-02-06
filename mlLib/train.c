@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#define MAX_STEPS 10000
+#define MAX_STEPS 100000
 #define LOG_EVERY_N_STEPS 100
 #define LOG_STEP 1
 
@@ -19,19 +19,19 @@ int main() {
 	cfg.adam_beta2 = 0.999f;
 	cfg.adam_epsilon = 1e-8f;
 
-	cfg.loss_config.num_losses = 3;
+	cfg.loss_config.num_losses = 4;
 	cfg.loss_config.types[0] = LOSS_MAE;
-	cfg.loss_config.weights[0] = 1.75f;
-	// cfg.loss_config.types[1] = LOSS_MSE;
-	// cfg.loss_config.weights[1] = 0.75f;
-	// cfg.loss_config.types[1] = LOSS_COLOR_VARIANCE;
-	// cfg.loss_config.weights[1] = 0.005f;
-	// cfg.loss_config.types[3] = LOSS_LAPLACE;
-	// cfg.loss_config.weights[3] = 0.55f;
+	cfg.loss_config.weights[0] = 1.85f;
 	cfg.loss_config.types[1] = LOSS_SSIM;
-	cfg.loss_config.weights[1] = 1.65f;
+	cfg.loss_config.weights[1] = 1.85f;
 	cfg.loss_config.types[2] = LOSS_SOBEL;
-	cfg.loss_config.weights[2] = 0.15f;
+	cfg.loss_config.weights[2] = 0.05f;
+	cfg.loss_config.types[3] = LOSS_LAPLACE;
+	cfg.loss_config.weights[3] = 0.5f;
+	// cfg.loss_config.types[4] = LOSS_MSE;
+	// cfg.loss_config.weights[4] = 0.75f;
+	// cfg.loss_config.types[5] = LOSS_COLOR_VARIANCE;
+	// cfg.loss_config.weights[5] = 0.005f;
 	cfg.residual_mode = 0;
 
 	LearningRateDecay lr_decay;
@@ -52,6 +52,13 @@ int main() {
 
 	cnn_finalize(cnn);
 	cnn_print_architecture(cnn);
+
+	printf("Loading baseline weights from model/cnn_weights_baselineV1.bin...\n");
+	if (cnn_load_weights(cnn, "model/cnn_weights_baselineV1.bin") == 0) {
+		printf("Successfully loaded baseline weights.\n");
+	} else {
+		printf("Warning: Could not load baseline weights, starting from scratch.\n");
+	}
 
 	DataLoader *loader = malloc(sizeof(DataLoader));
 	fillDataLoader(loader, "/media/user/2TB Clear/imageData");
@@ -103,7 +110,8 @@ int main() {
 			interleavedToPlanar(sample->highRes, &batch_target[b * IMAGE_SIZE], WIDTH, HEIGHT, 4);
 		}
 
-		accumulated_loss += cnn_train_step(cnn, batch_input, batch_target, BATCH_SIZE);
+		float step_loss = cnn_train_step(cnn, batch_input, batch_target, BATCH_SIZE);
+		accumulated_loss += step_loss;
 
 		TimingStats stats;
 		cnn_get_timing_stats(cnn, &stats);
@@ -156,172 +164,166 @@ int main() {
 					   current_laplace, weighted_laplace, current_color, weighted_color,
 					   current_ssim, weighted_ssim, current_sobel, weighted_sobel);
 
-				float current_total_loss = accumulated_loss / (step + 1);
-				send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, current_total_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, stats.forward_time_ms, current_mae, current_mse, current_color, current_laplace, current_ssim, current_sobel);
+				send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, step_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, stats.forward_time_ms, current_mae, current_mse, current_color, current_laplace, current_ssim, current_sobel);
 			}
 
-			printf("Current Loss: %.6f (%.2f img/s)\n",
-				   accumulated_loss / (step + 1),
-				   BATCH_SIZE * 1000.0 / stats.total_time_ms);
-		}
+			if (step % LOG_EVERY_N_STEPS == 0 && step > 0) {
+				float current_mae, current_mse, current_laplace, current_color, current_ssim, current_sobel;
+				cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color, &current_ssim, &current_sobel);
 
-		if (step % LOG_EVERY_N_STEPS == 0 && step > 0) {
-			float current_mae, current_mse, current_laplace, current_color, current_ssim, current_sobel;
-			cnn_get_individual_losses(cnn, &current_mae, &current_mse, &current_laplace, &current_color, &current_ssim, &current_sobel);
-
-			/* Library returns unweighted losses, compute weighted versions for display */
-			float weight_mae = 1.0f, weight_mse = 1.0f, weight_laplace = 1.0f, weight_color = 1.0f, weight_ssim = 1.0f, weight_sobel = 1.0f;
-			for (int i = 0; i < cfg.loss_config.num_losses; i++) {
-				if (cfg.loss_config.types[i] == LOSS_MAE)
-					weight_mae = cfg.loss_config.weights[i];
-				else if (cfg.loss_config.types[i] == LOSS_MSE)
-					weight_mse = cfg.loss_config.weights[i];
-				else if (cfg.loss_config.types[i] == LOSS_LAPLACE)
-					weight_laplace = cfg.loss_config.weights[i];
-				else if (cfg.loss_config.types[i] == LOSS_COLOR_VARIANCE)
-					weight_color = cfg.loss_config.weights[i];
-				else if (cfg.loss_config.types[i] == LOSS_SSIM)
-					weight_ssim = cfg.loss_config.weights[i];
-				else if (cfg.loss_config.types[i] == LOSS_SOBEL)
-					weight_sobel = cfg.loss_config.weights[i];
-			}
-
-			float weighted_mae = current_mae * weight_mae;
-			float weighted_mse = current_mse * weight_mse;
-			float weighted_laplace = current_laplace * weight_laplace;
-			float weighted_color = current_color * weight_color;
-			float weighted_ssim = current_ssim * weight_ssim;
-			float weighted_sobel = current_sobel * weight_sobel;
-
-			float avg_loss = accumulated_loss / LOG_EVERY_N_STEPS;
-			printf("\n=== Batch %3d (Images %d) ===\n",
-				   step, step * BATCH_SIZE);
-			printf("   Avg Loss: %.6f, LR: %.6f, Time: %.2f ms/batch, Throughput: %.1f img/s\n",
-				   avg_loss, cnn_get_learning_rate(cnn),
-				   stats.total_time_ms,
-				   BATCH_SIZE * 1000.0 / stats.total_time_ms);
-
-			float input_min = 1e9, input_max = -1e9, target_min = 1e9, target_max = -1e9;
-			for (int i = 0; i < IMAGE_SIZE; i++) {
-				if (batch_input[i] < input_min) input_min = batch_input[i];
-				if (batch_input[i] > input_max) input_max = batch_input[i];
-				if (batch_target[i] < target_min) target_min = batch_target[i];
-				if (batch_target[i] > target_max) target_max = batch_target[i];
-			}
-			printf("[DEBUG] Input (noisy) range: [%.6f, %.6f]\n", input_min, input_max);
-			printf("[DEBUG] Target (clean) range: [%.6f, %.6f]\n", target_min, target_max);
-
-			printf("   Losses: MAE=%.4f(%.4f) MSE=%.4f(%.4f) Laplace=%.4f(%.4f) Color=%.4f(%.4f) SSIM=%.4f(%.4f) Sobel=%.4f(%.4f)\n",
-				   current_mae, weighted_mae, current_mse, weighted_mse,
-				   current_laplace, weighted_laplace, current_color, weighted_color,
-				   current_ssim, weighted_ssim, current_sobel, weighted_sobel);
-
-			if (avg_loss < best_loss) {
-				best_loss = avg_loss;
-				printf("   *** New best loss! Saving weights... ***\n");
-				cnn_save_weights(cnn, "cnn_weights_best.bin");
-			}
-
-			send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, stats.forward_time_ms, current_mae, current_mse, current_color, current_laplace, current_ssim, current_sobel);
-			accumulated_loss = 0.0f;
-
-			if (BATCH_SIZE > 1) {
-				cnn_get_batch_output(cnn, prediction, 0);
-			} else {
-				cnn_get_output(cnn, prediction);
-			}
-
-			float pred_min = 1e9, pred_max = -1e9;
-			float pred_sum_r = 0, pred_sum_g = 0, pred_sum_b = 0, pred_sum_l = 0;
-			for (int i = 0; i < WIDTH * HEIGHT; i++) {
-				float r = prediction[i];
-				float g = prediction[WIDTH * HEIGHT + i];
-				float b = prediction[2 * WIDTH * HEIGHT + i];
-				float l = prediction[3 * WIDTH * HEIGHT + i];
-
-				if (r < pred_min) pred_min = r;
-				if (r > pred_max) pred_max = r;
-				if (g < pred_min) pred_min = g;
-				if (g > pred_max) pred_max = g;
-				if (b < pred_min) pred_min = b;
-				if (b > pred_max) pred_max = b;
-
-				pred_sum_r += r;
-				pred_sum_g += g;
-				pred_sum_b += b;
-				pred_sum_l += l;
-			}
-			int num_pixels = WIDTH * HEIGHT;
-			printf("[DEBUG] Prediction stats (planar): min=%.6f max=%.6f\n", pred_min, pred_max);
-			printf("  Avg: R=%.6f G=%.6f B=%.6f L=%.6f\n",
-				   pred_sum_r / num_pixels, pred_sum_g / num_pixels, pred_sum_b / num_pixels, pred_sum_l / num_pixels);
-			printf("  First pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
-				   prediction[0], prediction[WIDTH * HEIGHT], prediction[2 * WIDTH * HEIGHT], prediction[3 * WIDTH * HEIGHT]);
-
-			planarToInterleaved(prediction, prediction_interleaved, WIDTH, HEIGHT, 4);
-
-			printf("[DEBUG] After interleave: first pixel RGBL = %.6f %.6f %.6f %.6f\n",
-				   prediction_interleaved[0], prediction_interleaved[1],
-				   prediction_interleaved[2], prediction_interleaved[3]);
-
-			printf("[DEBUG] Input (noisy) first pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
-				   display_sample->lowRes[0], display_sample->lowRes[1], display_sample->lowRes[2], display_sample->lowRes[3]);
-			printf("[DEBUG] Target (clean) first pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
-				   display_sample->highRes[0], display_sample->highRes[1], display_sample->highRes[2], display_sample->highRes[3]);
-
-			size_t base64_size = ((WIDTH * HEIGHT * 3 + 2) / 3) * 4 + 1;
-			size_t rgb_size = WIDTH * HEIGHT * 3;
-
-			char *clean_b64 = malloc(base64_size);
-			char *noisy_b64 = malloc(base64_size);
-			char *pred_b64 = malloc(base64_size);
-
-			unsigned char *clean_rgb = malloc(rgb_size);
-			unsigned char *noisy_rgb = malloc(rgb_size);
-			unsigned char *pred_rgb = malloc(rgb_size);
-
-			imageToBase64_noalloc(display_sample->highRes, WIDTH, HEIGHT, clean_rgb, clean_b64);
-			imageToBase64_noalloc(display_sample->lowRes, WIDTH, HEIGHT, noisy_rgb, noisy_b64);
-			imageToBase64_noalloc(prediction_interleaved, WIDTH, HEIGHT, pred_rgb, pred_b64);
-
-			printf("[DEBUG] RGB conversion - first 10 bytes of pred_rgb: ");
-			for (int i = 0; i < 10; i++)
-				printf("%d ", pred_rgb[i]);
-			printf("\n");
-
-			int nonzero_count = 0;
-			for (int i = 0; i < rgb_size; i++) {
-				if (pred_rgb[i] != 0) nonzero_count++;
-			}
-			printf("[DEBUG] pred_rgb has %d/%zu non-zero bytes (%.1f%%)\n",
-				   nonzero_count, rgb_size, 100.0 * nonzero_count / rgb_size);
-
-			/* TEMPORARY: Scale prediction for visualization if values are too small */
-			float scale_factor = 1.0f;
-			if (pred_max < 0.1f && pred_max > 0.0f) {
-				scale_factor = 0.5f / pred_max; /* Scale max to 0.5 */
-				printf("[VISUALIZATION] Scaling prediction by %.1fx for visibility (max=%.6f)\n",
-					   scale_factor, pred_max);
-
-				for (int i = 0; i < IMAGE_SIZE; i++) {
-					prediction_interleaved[i] = fminf(prediction_interleaved[i] * scale_factor, 1.0f);
+				/* Library returns unweighted losses, compute weighted versions for display */
+				float weight_mae = 1.0f, weight_mse = 1.0f, weight_laplace = 1.0f, weight_color = 1.0f, weight_ssim = 1.0f, weight_sobel = 1.0f;
+				for (int i = 0; i < cfg.loss_config.num_losses; i++) {
+					if (cfg.loss_config.types[i] == LOSS_MAE)
+						weight_mae = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_MSE)
+						weight_mse = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_LAPLACE)
+						weight_laplace = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_COLOR_VARIANCE)
+						weight_color = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_SSIM)
+						weight_ssim = cfg.loss_config.weights[i];
+					else if (cfg.loss_config.types[i] == LOSS_SOBEL)
+						weight_sobel = cfg.loss_config.weights[i];
 				}
 
+				float weighted_mae = current_mae * weight_mae;
+				float weighted_mse = current_mse * weight_mse;
+				float weighted_laplace = current_laplace * weight_laplace;
+				float weighted_color = current_color * weight_color;
+				float weighted_ssim = current_ssim * weight_ssim;
+				float weighted_sobel = current_sobel * weight_sobel;
+
+				float avg_loss = accumulated_loss / LOG_EVERY_N_STEPS;
+				printf("\n=== Batch %3d (Images %d) ===\n",
+					   step, step * BATCH_SIZE);
+				printf("   Avg Loss: %.6f, LR: %.6f, Time: %.2f ms/batch, Throughput: %.1f img/s\n",
+					   avg_loss, cnn_get_learning_rate(cnn),
+					   stats.total_time_ms,
+					   BATCH_SIZE * 1000.0 / stats.total_time_ms);
+
+				float input_min = 1e9, input_max = -1e9, target_min = 1e9, target_max = -1e9;
+				for (int i = 0; i < IMAGE_SIZE; i++) {
+					if (batch_input[i] < input_min) input_min = batch_input[i];
+					if (batch_input[i] > input_max) input_max = batch_input[i];
+					if (batch_target[i] < target_min) target_min = batch_target[i];
+					if (batch_target[i] > target_max) target_max = batch_target[i];
+				}
+				printf("[DEBUG] Input (noisy) range: [%.6f, %.6f]\n", input_min, input_max);
+				printf("[DEBUG] Target (clean) range: [%.6f, %.6f]\n", target_min, target_max);
+
+				printf("   Losses: MAE=%.4f(%.4f) MSE=%.4f(%.4f) Laplace=%.4f(%.4f) Color=%.4f(%.4f) SSIM=%.4f(%.4f) Sobel=%.4f(%.4f)\n",
+					   current_mae, weighted_mae, current_mse, weighted_mse,
+					   current_laplace, weighted_laplace, current_color, weighted_color,
+					   current_ssim, weighted_ssim, current_sobel, weighted_sobel);
+
+				if (avg_loss < best_loss) {
+					best_loss = avg_loss;
+					printf("   *** New best loss! Saving weights... ***\n");
+					cnn_save_weights(cnn, "cnn_weights_best.bin");
+				}
+
+				send_metadata_to_python("http://127.0.0.1:5000/submitLoss", step, avg_loss, cnn_get_learning_rate(cnn), stats.total_time_ms, stats.forward_time_ms, current_mae, current_mse, current_color, current_laplace, current_ssim, current_sobel);
+
+				if (BATCH_SIZE > 1) {
+					cnn_get_batch_output(cnn, prediction, 0);
+				} else {
+					cnn_get_output(cnn, prediction);
+				}
+
+				float pred_min = 1e9, pred_max = -1e9;
+				float pred_sum_r = 0, pred_sum_g = 0, pred_sum_b = 0, pred_sum_l = 0;
+				for (int i = 0; i < WIDTH * HEIGHT; i++) {
+					float r = prediction[i];
+					float g = prediction[WIDTH * HEIGHT + i];
+					float b = prediction[2 * WIDTH * HEIGHT + i];
+					float l = prediction[3 * WIDTH * HEIGHT + i];
+
+					if (r < pred_min) pred_min = r;
+					if (r > pred_max) pred_max = r;
+					if (g < pred_min) pred_min = g;
+					if (g > pred_max) pred_max = g;
+					if (b < pred_min) pred_min = b;
+					if (b > pred_max) pred_max = b;
+
+					pred_sum_r += r;
+					pred_sum_g += g;
+					pred_sum_b += b;
+					pred_sum_l += l;
+				}
+				int num_pixels = WIDTH * HEIGHT;
+				printf("[DEBUG] Prediction stats (planar): min=%.6f max=%.6f\n", pred_min, pred_max);
+				printf("  Avg: R=%.6f G=%.6f B=%.6f L=%.6f\n",
+					   pred_sum_r / num_pixels, pred_sum_g / num_pixels, pred_sum_b / num_pixels, pred_sum_l / num_pixels);
+				printf("  First pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
+					   prediction[0], prediction[WIDTH * HEIGHT], prediction[2 * WIDTH * HEIGHT], prediction[3 * WIDTH * HEIGHT]);
+
+				planarToInterleaved(prediction, prediction_interleaved, WIDTH, HEIGHT, 4);
+
+				printf("[DEBUG] After interleave: first pixel RGBL = %.6f %.6f %.6f %.6f\n",
+					   prediction_interleaved[0], prediction_interleaved[1],
+					   prediction_interleaved[2], prediction_interleaved[3]);
+
+				printf("[DEBUG] Input (noisy) first pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
+					   display_sample->lowRes[0], display_sample->lowRes[1], display_sample->lowRes[2], display_sample->lowRes[3]);
+				printf("[DEBUG] Target (clean) first pixel: R=%.6f G=%.6f B=%.6f L=%.6f\n",
+					   display_sample->highRes[0], display_sample->highRes[1], display_sample->highRes[2], display_sample->highRes[3]);
+
+				size_t base64_size = ((WIDTH * HEIGHT * 3 + 2) / 3) * 4 + 1;
+				size_t rgb_size = WIDTH * HEIGHT * 3;
+
+				char *clean_b64 = malloc(base64_size);
+				char *noisy_b64 = malloc(base64_size);
+				char *pred_b64 = malloc(base64_size);
+
+				unsigned char *clean_rgb = malloc(rgb_size);
+				unsigned char *noisy_rgb = malloc(rgb_size);
+				unsigned char *pred_rgb = malloc(rgb_size);
+
+				imageToBase64_noalloc(display_sample->highRes, WIDTH, HEIGHT, clean_rgb, clean_b64);
+				imageToBase64_noalloc(display_sample->lowRes, WIDTH, HEIGHT, noisy_rgb, noisy_b64);
 				imageToBase64_noalloc(prediction_interleaved, WIDTH, HEIGHT, pred_rgb, pred_b64);
+
+				printf("[DEBUG] RGB conversion - first 10 bytes of pred_rgb: ");
+				for (int i = 0; i < 10; i++)
+					printf("%d ", pred_rgb[i]);
+				printf("\n");
+
+				int nonzero_count = 0;
+				for (int i = 0; i < rgb_size; i++) {
+					if (pred_rgb[i] != 0) nonzero_count++;
+				}
+				printf("[DEBUG] pred_rgb has %d/%zu non-zero bytes (%.1f%%)\n",
+					   nonzero_count, rgb_size, 100.0 * nonzero_count / rgb_size);
+
+				/* TEMPORARY: Scale prediction for visualization if values are too small */
+				float scale_factor = 1.0f;
+				if (pred_max < 0.1f && pred_max > 0.0f) {
+					scale_factor = 0.5f / pred_max; /* Scale max to 0.5 */
+					printf("[VISUALIZATION] Scaling prediction by %.1fx for visibility (max=%.6f)\n",
+						   scale_factor, pred_max);
+
+					for (int i = 0; i < IMAGE_SIZE; i++) {
+						prediction_interleaved[i] = fminf(prediction_interleaved[i] * scale_factor, 1.0f);
+					}
+
+					imageToBase64_noalloc(prediction_interleaved, WIDTH, HEIGHT, pred_rgb, pred_b64);
+				}
+
+				send_images_to_python("http://127.0.0.1:5000/submitImage", noisy_b64, clean_b64, pred_b64, step);
+
+				free(clean_b64);
+				free(noisy_b64);
+				free(pred_b64);
+				free(clean_rgb);
+				free(noisy_rgb);
+				free(pred_rgb);
 			}
 
-			send_images_to_python("http://127.0.0.1:5000/submitImage", noisy_b64, clean_b64, pred_b64, step);
-
-			free(clean_b64);
-			free(noisy_b64);
-			free(pred_b64);
-			free(clean_rgb);
-			free(noisy_rgb);
-			free(pred_rgb);
+			float new_lr = learning_rate_decay_get(&lr_decay, step);
+			cnn_set_learning_rate(cnn, new_lr);
 		}
-
-		float new_lr = learning_rate_decay_get(&lr_decay, step);
-		cnn_set_learning_rate(cnn, new_lr);
 	}
 
 	printf("\n=== Training Performance (Averaged over %d batches) ===\n", timing_samples);
