@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
+#include <CL/cl.h>
 #include "../openGlShaders/gpuStruct.h"
 #include "../mapGeneration/loadMap.h"
 
@@ -37,6 +38,17 @@ struct Region {
 	float BBoxMin[3];
 	float BBoxMax[3];
 	struct Block blocks[8];
+};
+
+struct Scene {
+	struct Region staticGeometry;
+	struct Triangles _tempTriangles; // Temporary storage for converting models to triangles
+	struct Region dynamicGeometry;
+	cl_mem buffer_sceneRegion;
+	cl_kernel rayTraceScene;
+	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
+	cl_mem buffer_normals;					 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+	cl_mem buffer_screen_colors;			 // ScreenWidth * ScreenHeight * sizeof(float) * 3
 };
 
 struct HitInfo {
@@ -391,7 +403,7 @@ enum Mode {
 	INIT_MODE,
 };
 
-void convertModelToSceneTriangles(struct Triangles* model, float position[3], float direction[3], struct Triangles* sceneTriangles, enum Mode mode) {
+void convertModelToSceneTriangles(struct Triangles *model, float position[3], float direction[3], struct Triangles *sceneTriangles, enum Mode mode) {
 	if (!model || !sceneTriangles) {
 		return;
 	}
@@ -413,48 +425,53 @@ void convertModelToSceneTriangles(struct Triangles* model, float position[3], fl
 	float normDir[3] = {direction[0] / dirLen, direction[1] / dirLen, direction[2] / dirLen};
 
 	float defaultDir[3] = {0.0f, 0.0f, 1.0f};
-	
+
 	float axis[3] = {
 		defaultDir[1] * normDir[2] - defaultDir[2] * normDir[1],
 		defaultDir[2] * normDir[0] - defaultDir[0] * normDir[2],
-		defaultDir[0] * normDir[1] - defaultDir[1] * normDir[0]
-	};
-	
+		defaultDir[0] * normDir[1] - defaultDir[1] * normDir[0]};
+
 	float cosAngle = defaultDir[0] * normDir[0] + defaultDir[1] * normDir[1] + defaultDir[2] * normDir[2];
 	float angle = acosf(cosAngle);
 	float axisLen = sqrtf(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
-	
+
 	float rotMatrix[3][3];
 	if (axisLen > 0.0001f && fabsf(angle) > 0.0001f) {
 		axis[0] /= axisLen;
 		axis[1] /= axisLen;
 		axis[2] /= axisLen;
-		
+
 		float c = cosf(angle);
 		float s = sinf(angle);
 		float t = 1.0f - c;
-		
+
 		rotMatrix[0][0] = t * axis[0] * axis[0] + c;
 		rotMatrix[0][1] = t * axis[0] * axis[1] - s * axis[2];
 		rotMatrix[0][2] = t * axis[0] * axis[2] + s * axis[1];
-		
+
 		rotMatrix[1][0] = t * axis[0] * axis[1] + s * axis[2];
 		rotMatrix[1][1] = t * axis[1] * axis[1] + c;
 		rotMatrix[1][2] = t * axis[1] * axis[2] - s * axis[0];
-		
+
 		rotMatrix[2][0] = t * axis[0] * axis[2] - s * axis[1];
 		rotMatrix[2][1] = t * axis[1] * axis[2] + s * axis[0];
 		rotMatrix[2][2] = t * axis[2] * axis[2] + c;
 	} else {
-		rotMatrix[0][0] = 1.0f; rotMatrix[0][1] = 0.0f; rotMatrix[0][2] = 0.0f;
-		rotMatrix[1][0] = 0.0f; rotMatrix[1][1] = 1.0f; rotMatrix[1][2] = 0.0f;
-		rotMatrix[2][0] = 0.0f; rotMatrix[2][1] = 0.0f; rotMatrix[2][2] = 1.0f;
+		rotMatrix[0][0] = 1.0f;
+		rotMatrix[0][1] = 0.0f;
+		rotMatrix[0][2] = 0.0f;
+		rotMatrix[1][0] = 0.0f;
+		rotMatrix[1][1] = 1.0f;
+		rotMatrix[1][2] = 0.0f;
+		rotMatrix[2][0] = 0.0f;
+		rotMatrix[2][1] = 0.0f;
+		rotMatrix[2][2] = 1.0f;
 	}
 
 	for (int i = 0; i < model->count; i++) {
 		int srcIdx = i * 3;
 		int dstIdx = (offset + i) * 3;
-		
+
 		float v1[3] = {model->v1[srcIdx + 0], model->v1[srcIdx + 1], model->v1[srcIdx + 2]};
 		sceneTriangles->v1[dstIdx + 0] = rotMatrix[0][0] * v1[0] + rotMatrix[0][1] * v1[1] + rotMatrix[0][2] * v1[2] + position[0];
 		sceneTriangles->v1[dstIdx + 1] = rotMatrix[1][0] * v1[0] + rotMatrix[1][1] * v1[1] + rotMatrix[1][2] * v1[2] + position[1];
@@ -627,6 +644,46 @@ int randomInt(int min, int max) {
 	return min + rand() % (max - min + 1);
 }
 
+// PIPELINE:
+// 1. initGeometry (once): Load static map geometry into both static and dynamic regions
+// 2. Per-frame (or every N frames):
+//    a. resetScene: Copy static geometry to dynamic region (clears previous frame's dynamic objects)
+//    b. addToScene: Add models at new positions/directions to dynamic region (planes, missiles, etc.)
+//    c. Render using dynamicGeometry
+//
+// This allows static map to persist while dynamic objects are repositioned each frame
+
+void initGeometry(struct Scene *scene, struct Triangles *staticGeometry) {
+	if (!scene || !staticGeometry) {
+		printf("Invalid input to initGeometry\n");
+		return;
+	}
+	loadTriangles(&scene->staticGeometry, staticGeometry, INIT_MODE);
+	loadTriangles(&scene->dynamicGeometry, staticGeometry, INIT_MODE);
+}
+
+void addToScene(struct Scene *scene, struct Triangles *model, float position[3], float direction[3]) {
+	if (!scene || !model) {
+		printf("Invalid input to addToScene\n");
+		return;
+	}
+	convertModelToSceneTriangles(model, position, direction, &scene->_tempTriangles, INIT_MODE);
+	loadTriangles(&scene->dynamicGeometry, &scene->_tempTriangles, APPEND_MODE);
+	// clear temp triangles after loading into scene
+	scene->_tempTriangles.count = 0;
+}
+
+void resetScene(struct Scene *scene) {
+	// when we reset the scene, we set dynamic geometry to be the same as static geometry
+	if (!scene) {
+		printf("Invalid input to resetScene\n");
+		return;
+	}
+	memcopy(&scene->staticGeometry, &scene->dynamicGeometry, sizeof(struct Triangles));
+}
+
+
+
 int main() {
 	int iterations = 1000;
 	float timeStemps[iterations];
@@ -753,11 +810,21 @@ int main() {
 	printf("\n=== Ray Intersection Tests ===\n");
 
 	sceneTriangles->count = 0;
-	sceneTriangles->v1[0] = 0.0f; sceneTriangles->v1[1] = 0.0f; sceneTriangles->v1[2] = 10.0f;
-	sceneTriangles->v2[0] = 10.0f; sceneTriangles->v2[1] = 0.0f; sceneTriangles->v2[2] = 10.0f;
-	sceneTriangles->v3[0] = 5.0f; sceneTriangles->v3[1] = 10.0f; sceneTriangles->v3[2] = 10.0f;
-	sceneTriangles->normals[0] = 0.0f; sceneTriangles->normals[1] = 0.0f; sceneTriangles->normals[2] = -1.0f;
-	sceneTriangles->colors[0] = 255.0f; sceneTriangles->colors[1] = 0.0f; sceneTriangles->colors[2] = 0.0f;
+	sceneTriangles->v1[0] = 0.0f;
+	sceneTriangles->v1[1] = 0.0f;
+	sceneTriangles->v1[2] = 10.0f;
+	sceneTriangles->v2[0] = 10.0f;
+	sceneTriangles->v2[1] = 0.0f;
+	sceneTriangles->v2[2] = 10.0f;
+	sceneTriangles->v3[0] = 5.0f;
+	sceneTriangles->v3[1] = 10.0f;
+	sceneTriangles->v3[2] = 10.0f;
+	sceneTriangles->normals[0] = 0.0f;
+	sceneTriangles->normals[1] = 0.0f;
+	sceneTriangles->normals[2] = -1.0f;
+	sceneTriangles->colors[0] = 255.0f;
+	sceneTriangles->colors[1] = 0.0f;
+	sceneTriangles->colors[2] = 0.0f;
 	sceneTriangles->Roughness[0] = 0.5f;
 	sceneTriangles->Metallic[0] = 0.1f;
 	sceneTriangles->Emission[0] = 0.0f;
