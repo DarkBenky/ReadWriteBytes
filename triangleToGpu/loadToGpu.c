@@ -44,11 +44,13 @@ struct Scene {
 	struct Region staticGeometry;
 	struct Triangles _tempTriangles; // Temporary storage for converting models to triangles
 	struct Region dynamicGeometry;
+	cl_context context;
+	cl_command_queue queue;
 	cl_mem buffer_sceneRegion;
 	cl_kernel rayTraceScene;
-	cl_mem buffer_distances;				 // ScreenWidth * ScreenHeight * sizeof(float)
-	cl_mem buffer_normals;					 // ScreenWidth * ScreenHeight * sizeof(float) * 3
-	cl_mem buffer_screen_colors;			 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+	cl_mem buffer_distances;	 // ScreenWidth * ScreenHeight * sizeof(float)
+	cl_mem buffer_normals;		 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+	cl_mem buffer_screen_colors; // ScreenWidth * ScreenHeight * sizeof(float) * 3
 };
 
 struct HitInfo {
@@ -673,16 +675,83 @@ void addToScene(struct Scene *scene, struct Triangles *model, float position[3],
 	scene->_tempTriangles.count = 0;
 }
 
+void initGpuBuffers(struct Scene *scene, cl_context context, cl_command_queue queue, int screenWidth, int screenHeight) {
+	if (!scene || !context || !queue) {
+		printf("Invalid input to initGpuBuffers\n");
+		return;
+	}
+
+	scene->context = context;
+	scene->queue = queue;
+
+	cl_int err;
+	size_t regionSize = sizeof(struct Region);
+	scene->buffer_sceneRegion = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, regionSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create scene region buffer: %d\n", err);
+		return;
+	}
+
+	size_t distanceSize = screenWidth * screenHeight * sizeof(float);
+	scene->buffer_distances = clCreateBuffer(scene->context, CL_MEM_WRITE_ONLY, distanceSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create distance buffer: %d\n", err);
+		return;
+	}
+
+	size_t normalSize = screenWidth * screenHeight * sizeof(float) * 3;
+	scene->buffer_normals = clCreateBuffer(scene->context, CL_MEM_WRITE_ONLY, normalSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create normal buffer: %d\n", err);
+		return;
+	}
+
+	size_t colorSize = screenWidth * screenHeight * sizeof(float) * 3;
+	scene->buffer_screen_colors = clCreateBuffer(scene->context, CL_MEM_WRITE_ONLY, colorSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create color buffer: %d\n", err);
+		return;
+	}
+
+	printf("GPU buffers initialized successfully\n");
+}
+
+void uploadToGpu(struct Scene *scene) {
+	if (!scene) {
+		printf("Invalid input to uploadToGpu\n");
+		return;
+	}
+
+	cl_int err = clEnqueueWriteBuffer(scene->queue, scene->buffer_sceneRegion, CL_TRUE, 0,
+									  sizeof(struct Region), &scene->dynamicGeometry, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to upload scene region to GPU: %d\n", err);
+		return;
+	}
+
+	err = clFinish(scene->queue);
+	if (err != CL_SUCCESS) {
+		printf("Failed to finish upload: %d\n", err);
+		return;
+	}
+}
+
+void cleanupGpuBuffers(struct Scene *scene) {
+	if (!scene) return;
+
+	if (scene->buffer_sceneRegion) clReleaseMemObject(scene->buffer_sceneRegion);
+	if (scene->buffer_distances) clReleaseMemObject(scene->buffer_distances);
+	if (scene->buffer_normals) clReleaseMemObject(scene->buffer_normals);
+	if (scene->buffer_screen_colors) clReleaseMemObject(scene->buffer_screen_colors);
+}
+
 void resetScene(struct Scene *scene) {
-	// when we reset the scene, we set dynamic geometry to be the same as static geometry
 	if (!scene) {
 		printf("Invalid input to resetScene\n");
 		return;
 	}
-	memcopy(&scene->staticGeometry, &scene->dynamicGeometry, sizeof(struct Triangles));
+	memcpy(&scene->dynamicGeometry, &scene->staticGeometry, sizeof(struct Region));
 }
-
-
 
 int main() {
 	int iterations = 1000;

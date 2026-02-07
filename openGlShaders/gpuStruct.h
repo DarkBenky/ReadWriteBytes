@@ -6,6 +6,20 @@
 #include <GL/gl.h>
 #include <stdbool.h>
 
+struct SkyBox {
+	struct RawImage *right;
+	struct RawImage *left;
+	struct RawImage *top;
+	struct RawImage *bottom;
+	struct RawImage *front;
+	struct RawImage *back;
+};
+
+struct RawImage {
+	unsigned char *data; // RGB pixel data
+	int width, height, components;
+};
+
 struct OpenCLContext {
 	cl_platform_id platform;
 	cl_device_id device;

@@ -22,6 +22,7 @@
 #include "fireSim/fireSim.h"
 #include "openGlShaders/gpuStruct.h"
 #include "mapGeneration/loadMap.h"
+#include "utils/bbox.h"
 
 void *SharedMem = NULL;
 #define USE_GPU_LOD 1 // 1 = GPU LOD selection, 0 = CPU LOD selection
@@ -135,11 +136,6 @@ char *renderModesName[] = {
 	"renderDebugMode",
 };
 
-struct RawImage {
-	unsigned char *data; // RGB pixel data
-	int width, height, components;
-};
-
 struct ImageFont {
 	int width;
 	int height;
@@ -204,15 +200,6 @@ struct RawImage *load_jpeg(const char *filename) {
 
 	return img;
 }
-
-struct SkyBox {
-	struct RawImage *right;
-	struct RawImage *left;
-	struct RawImage *top;
-	struct RawImage *bottom;
-	struct RawImage *front;
-	struct RawImage *back;
-};
 
 float *convertImageToFloat(struct RawImage *img) {
 	if (!img) return NULL;
@@ -4691,16 +4678,6 @@ void writeFileTriangles(const char *filename, struct Triangles *triangles) {
 	printf("Triangles written to %s successfully\n", filename);
 	printf("File size: %u bytes\n", fileSize);
 	printf("Triangle count: %d\n", triangles->count);
-}
-
-void updateBBox(float x, float y, float z, float minBB[3], float maxBB[3]) {
-	if (x < minBB[0]) minBB[0] = x;
-	if (y < minBB[1]) minBB[1] = y;
-	if (z < minBB[2]) minBB[2] = z;
-
-	if (x > maxBB[0]) maxBB[0] = x;
-	if (y > maxBB[1]) maxBB[1] = y;
-	if (z > maxBB[2]) maxBB[2] = z;
 }
 
 void readFileTriangles(const char *filename, struct Triangles *triangles, float scale) {

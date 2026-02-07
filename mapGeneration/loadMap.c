@@ -8,18 +8,10 @@
 #include <math.h>
 #include "../fireSim/fireSim.h"
 #include "loadMap.h"
+#include "../utils/bbox.h"
 
 static float degreesToRadians(float degrees) {
 	return degrees * M_PI / 180.0f;
-}
-
-void updateBBox(float x, float y, float z, float minBB[3], float maxBB[3]) {
-	if (x < minBB[0]) minBB[0] = x;
-	if (y < minBB[1]) minBB[1] = y;
-	if (z < minBB[2]) minBB[2] = z;
-	if (x > maxBB[0]) maxBB[0] = x;
-	if (y > maxBB[1]) maxBB[1] = y;
-	if (z > maxBB[2]) maxBB[2] = z;
 }
 
 static void createRotationMatrix(float rx, float ry, float rz, float matrix[3][3]) {
@@ -563,7 +555,7 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 		mapGpu->chunkStartLow[i] = lowOffset;
 
 		float bbMin[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
-		float bbMax[3] = {FLT_MIN, FLT_MIN, FLT_MIN	};
+		float bbMax[3] = {FLT_MIN, FLT_MIN, FLT_MIN};
 
 		// Copy high-res triangle data (v1, v2, v3 = 9 floats per triangle)
 		int highCount = tile->terrainHigh.count;
@@ -577,7 +569,6 @@ void initMapGPU(struct MapGPU *mapGpu, struct Map *map) {
 				&(tile->terrainHigh.v2[srcIdx]),
 				&(tile->terrainHigh.v3[srcIdx]),
 				bbMin, bbMax);
-
 
 			// Copy v1
 			mapGpu->chunkHighTrianglesData[dstIdx + 0] = tile->terrainHigh.v1[srcIdx + 0];
@@ -719,7 +710,6 @@ void free_map(struct Map *map) {
 	map->tileSizeZ = 0;
 }
 
-
 void calculateBoundingBoxMapTile(struct MapTile *tile) {
 	// Helper function to update bounding box with a vertex
 
@@ -827,7 +817,7 @@ void collisionWithMeshMapTile(struct MapTile *tile, float pos[3], LODLevel lod, 
 	// Check collision of point with mesh bounding boxes in the tile at given LOD level
 	// If a bounding box is hit, return its center position and index
 	// If no bounding box is hit, return the closest bounding box info
-	
+
 	float closestDist = FLT_MAX;
 	float closestPos[3] = {0.0f, 0.0f, 0.0f};
 	int closestIndex = -1;
@@ -1010,16 +1000,16 @@ void collideRayWithMapTile(struct MapTile *tile, struct Ray ray, float *hitDista
 	float closestDist = FLT_MAX;
 	float closestPos[3] = {0.0f, 0.0f, 0.0f};
 	int closestIndex = -1;
-	
+
 	if (tile->current_lod == LOD_HIGH) {
 		for (int i = 0; i < tile->terrainHigh.count; i++) {
 			if (rayIntersectsBoundingBox(&ray, &tile->terrainHighBoundingBoxes[i])) {
 				rayTriangleIntersection(&ray,
-									   &tile->terrainHigh.v1[i * 3],
-									   &tile->terrainHigh.v2[i * 3],
-									   &tile->terrainHigh.v3[i * 3],
-									   &closestDist,
-									   closestPos);
+										&tile->terrainHigh.v1[i * 3],
+										&tile->terrainHigh.v2[i * 3],
+										&tile->terrainHigh.v3[i * 3],
+										&closestDist,
+										closestPos);
 				if (closestDist < FLT_MAX) {
 					closestIndex = i;
 				}
@@ -1029,11 +1019,11 @@ void collideRayWithMapTile(struct MapTile *tile, struct Ray ray, float *hitDista
 		for (int i = 0; i < tile->terrainMed.count; i++) {
 			if (rayIntersectsBoundingBox(&ray, &tile->terrainMedBoundingBoxes[i])) {
 				rayTriangleIntersection(&ray,
-									   &tile->terrainMed.v1[i * 3],
-									   &tile->terrainMed.v2[i * 3],
-									   &tile->terrainMed.v3[i * 3],
-									   &closestDist,
-									   closestPos);
+										&tile->terrainMed.v1[i * 3],
+										&tile->terrainMed.v2[i * 3],
+										&tile->terrainMed.v3[i * 3],
+										&closestDist,
+										closestPos);
 				if (closestDist < FLT_MAX) {
 					closestIndex = i;
 				}
@@ -1043,11 +1033,11 @@ void collideRayWithMapTile(struct MapTile *tile, struct Ray ray, float *hitDista
 		for (int i = 0; i < tile->terrainLow.count; i++) {
 			if (rayIntersectsBoundingBox(&ray, &tile->terrainLowBoundingBoxes[i])) {
 				rayTriangleIntersection(&ray,
-									   &tile->terrainLow.v1[i * 3],
-									   &tile->terrainLow.v2[i * 3],
-									   &tile->terrainLow.v3[i * 3],
-									   &closestDist,
-									   closestPos);
+										&tile->terrainLow.v1[i * 3],
+										&tile->terrainLow.v2[i * 3],
+										&tile->terrainLow.v3[i * 3],
+										&closestDist,
+										closestPos);
 				if (closestDist < FLT_MAX) {
 					closestIndex = i;
 				}
@@ -1076,8 +1066,7 @@ void calculateClosesSurfacesForWholeMap(struct Map *map, struct Ray *ray, float 
 		float samplePos[3] = {
 			ray->origin[0] + ray->direction[0] * t,
 			ray->origin[1] + ray->direction[1] * t,
-			ray->origin[2] + ray->direction[2] * t
-		};
+			ray->origin[2] + ray->direction[2] * t};
 
 		// Convert world position to tile coordinates
 		int tile_x = (int)((samplePos[0] - map->posX) / map->tileSizeX) + map->tilesX;
