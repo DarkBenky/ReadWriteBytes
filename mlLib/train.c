@@ -19,15 +19,15 @@ int main() {
 	cfg.adam_beta2 = 0.999f;
 	cfg.adam_epsilon = 1e-8f;
 
-	cfg.loss_config.num_losses = 4;
+	cfg.loss_config.num_losses = 2;
 	cfg.loss_config.types[0] = LOSS_MAE;
 	cfg.loss_config.weights[0] = 1.85f;
 	cfg.loss_config.types[1] = LOSS_SSIM;
-	cfg.loss_config.weights[1] = 1.85f;
-	cfg.loss_config.types[2] = LOSS_SOBEL;
-	cfg.loss_config.weights[2] = 0.05f;
-	cfg.loss_config.types[3] = LOSS_LAPLACE;
-	cfg.loss_config.weights[3] = 0.5f;
+	// cfg.loss_config.weights[1] = 1.85f;
+	// cfg.loss_config.types[2] = LOSS_SOBEL;
+	// cfg.loss_config.weights[2] = 0.05f;
+	// cfg.loss_config.types[3] = LOSS_LAPLACE;
+	// cfg.loss_config.weights[3] = 0.5f;
 	// cfg.loss_config.types[4] = LOSS_MSE;
 	// cfg.loss_config.weights[4] = 0.75f;
 	// cfg.loss_config.types[5] = LOSS_COLOR_VARIANCE;
@@ -53,8 +53,8 @@ int main() {
 	cnn_finalize(cnn);
 	cnn_print_architecture(cnn);
 
-	printf("Loading baseline weights from model/cnn_weights_baselineV1.bin...\n");
-	if (cnn_load_weights(cnn, "model/cnn_weights_baselineV1.bin") == 0) {
+	printf("Loading baseline weights from model/cnn_weights_baselineV2.bin...\n");
+	if (cnn_load_weights(cnn, "model/cnn_weights_baselineV2.bin") == 0) {
 		printf("Successfully loaded baseline weights.\n");
 	} else {
 		printf("Warning: Could not load baseline weights, starting from scratch.\n");
