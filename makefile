@@ -4,8 +4,8 @@ LDFLAGS = -flto -lm -lOpenCL -ljpeg -lglfw -lGL
 
 all: main
 
-main: main.c particleSim.c fireSim/fireSim.c flares/flare.c tinyobj_loader_c.h particleSim.h fireSim/fireSim.h flares/flare.h openGlShaders/gpuStruct.h mapGeneration/loadMap.c mapGeneration/loadMap.h utils/bbox.c utils/bbox.h
-	$(CC) $(CFLAGS) main.c particleSim.c fireSim/fireSim.c flares/flare.c mapGeneration/loadMap.c utils/bbox.c -o main $(LDFLAGS)
+main: main.c particleSim.c fireSim/fireSim.c flares/flare.c tinyobj_loader_c.h particleSim.h fireSim/fireSim.h flares/flare.h openGlShaders/gpuStruct.h mapGeneration/loadMap.c mapGeneration/loadMap.h utils/bbox.c utils/bbox.h utils/image.c utils/image.h
+	$(CC) $(CFLAGS) main.c particleSim.c fireSim/fireSim.c flares/flare.c mapGeneration/loadMap.c utils/bbox.c utils/image.c -o main $(LDFLAGS)
 
 clean:
 	rm -f main

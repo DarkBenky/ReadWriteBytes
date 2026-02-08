@@ -7,6 +7,7 @@
 #include <CL/cl.h>
 #include "../openGlShaders/gpuStruct.h"
 #include "../mapGeneration/loadMap.h"
+#include "../utils/image.h"
 
 struct Volume {
 	float BBoxMin[3];
@@ -44,6 +45,7 @@ struct Scene {
 	struct Region staticGeometry;
 	struct Triangles _tempTriangles; // Temporary storage for converting models to triangles
 	struct Region dynamicGeometry;
+	struct SkyBox SkyBox;
 	cl_context context;
 	cl_command_queue queue;
 	cl_mem buffer_sceneRegion;
@@ -51,6 +53,12 @@ struct Scene {
 	cl_mem buffer_distances;	 // ScreenWidth * ScreenHeight * sizeof(float)
 	cl_mem buffer_normals;		 // ScreenWidth * ScreenHeight * sizeof(float) * 3
 	cl_mem buffer_screen_colors; // ScreenWidth * ScreenHeight * sizeof(float) * 3
+	cl_mem buffer_skybox_top;
+	cl_mem buffer_skybox_bottom;
+	cl_mem buffer_skybox_left;
+	cl_mem buffer_skybox_right;
+	cl_mem buffer_skybox_front;
+	cl_mem buffer_skybox_back;
 };
 
 struct HitInfo {
@@ -65,6 +73,23 @@ struct HitInfo {
 	int volumeIdx;
 	int triangleIdx;
 };
+
+bool loadSkyBoxForScene(struct Scene *scene) { // Changed from void to bool
+	scene->SkyBox.right = load_jpeg("../skybox/right.jpg");
+	scene->SkyBox.left = load_jpeg("../skybox/left.jpg");
+	scene->SkyBox.top = load_jpeg("../skybox/top.jpg");
+	scene->SkyBox.bottom = load_jpeg("../skybox/bottom.jpg");
+	scene->SkyBox.front = load_jpeg("../skybox/front.jpg");
+	scene->SkyBox.back = load_jpeg("../skybox/back.jpg");
+
+	if (!scene->SkyBox.right || !scene->SkyBox.left || !scene->SkyBox.top ||
+		!scene->SkyBox.bottom || !scene->SkyBox.front || !scene->SkyBox.back) {
+		printf("Failed to load one or more skybox images\n");
+		return false; // Return false on failure
+	}
+
+	return true; // Return true on success
+}
 
 static int rayBoxIntersect(float rayOrigin[3], float rayDir[3],
 						   float boxMin[3], float boxMax[3],
@@ -713,7 +738,105 @@ void initGpuBuffers(struct Scene *scene, cl_context context, cl_command_queue qu
 		return;
 	}
 
+	scene->buffer_skybox_right = NULL;
+	scene->buffer_skybox_left = NULL;
+	scene->buffer_skybox_top = NULL;
+	scene->buffer_skybox_bottom = NULL;
+	scene->buffer_skybox_front = NULL;
+	scene->buffer_skybox_back = NULL;
+
 	printf("GPU buffers initialized successfully\n");
+}
+
+void uploadSkyboxToGpu(struct Scene *scene) {
+	if (!scene || !scene->context || !scene->queue) {
+		printf("Invalid input to uploadSkyboxToGpu\n");
+		return;
+	}
+
+	if (!scene->SkyBox.right || !scene->SkyBox.left || !scene->SkyBox.top ||
+		!scene->SkyBox.bottom || !scene->SkyBox.front || !scene->SkyBox.back) {
+		printf("Skybox images not loaded\n");
+		return;
+	}
+
+	cl_int err;
+	size_t imageSize = scene->SkyBox.right->width * scene->SkyBox.right->height * scene->SkyBox.right->components;
+
+	scene->buffer_skybox_right = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create skybox right buffer: %d\n", err);
+		return;
+	}
+	err = clEnqueueWriteBuffer(scene->queue, scene->buffer_skybox_right, CL_TRUE, 0,
+							   imageSize, scene->SkyBox.right->data, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to upload skybox right: %d\n", err);
+		return;
+	}
+
+	scene->buffer_skybox_left = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create skybox left buffer: %d\n", err);
+		return;
+	}
+	err = clEnqueueWriteBuffer(scene->queue, scene->buffer_skybox_left, CL_TRUE, 0,
+							   imageSize, scene->SkyBox.left->data, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to upload skybox left: %d\n", err);
+		return;
+	}
+
+	scene->buffer_skybox_top = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create skybox top buffer: %d\n", err);
+		return;
+	}
+	err = clEnqueueWriteBuffer(scene->queue, scene->buffer_skybox_top, CL_TRUE, 0,
+							   imageSize, scene->SkyBox.top->data, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to upload skybox top: %d\n", err);
+		return;
+	}
+
+	scene->buffer_skybox_bottom = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create skybox bottom buffer: %d\n", err);
+		return;
+	}
+	err = clEnqueueWriteBuffer(scene->queue, scene->buffer_skybox_bottom, CL_TRUE, 0,
+							   imageSize, scene->SkyBox.bottom->data, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to upload skybox bottom: %d\n", err);
+		return;
+	}
+
+	scene->buffer_skybox_front = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create skybox front buffer: %d\n", err);
+		return;
+	}
+	err = clEnqueueWriteBuffer(scene->queue, scene->buffer_skybox_front, CL_TRUE, 0,
+							   imageSize, scene->SkyBox.front->data, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to upload skybox front: %d\n", err);
+		return;
+	}
+
+	scene->buffer_skybox_back = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, imageSize, NULL, &err);
+	if (err != CL_SUCCESS) {
+		printf("Failed to create skybox back buffer: %d\n", err);
+		return;
+	}
+	err = clEnqueueWriteBuffer(scene->queue, scene->buffer_skybox_back, CL_TRUE, 0,
+							   imageSize, scene->SkyBox.back->data, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to upload skybox back: %d\n", err);
+		return;
+	}
+
+	clFinish(scene->queue);
+	printf("Skybox uploaded to GPU successfully\n");
 }
 
 void uploadToGpu(struct Scene *scene) {
@@ -743,6 +866,12 @@ void cleanupGpuBuffers(struct Scene *scene) {
 	if (scene->buffer_distances) clReleaseMemObject(scene->buffer_distances);
 	if (scene->buffer_normals) clReleaseMemObject(scene->buffer_normals);
 	if (scene->buffer_screen_colors) clReleaseMemObject(scene->buffer_screen_colors);
+	if (scene->buffer_skybox_right) clReleaseMemObject(scene->buffer_skybox_right);
+	if (scene->buffer_skybox_left) clReleaseMemObject(scene->buffer_skybox_left);
+	if (scene->buffer_skybox_top) clReleaseMemObject(scene->buffer_skybox_top);
+	if (scene->buffer_skybox_bottom) clReleaseMemObject(scene->buffer_skybox_bottom);
+	if (scene->buffer_skybox_front) clReleaseMemObject(scene->buffer_skybox_front);
+	if (scene->buffer_skybox_back) clReleaseMemObject(scene->buffer_skybox_back);
 }
 
 void resetScene(struct Scene *scene) {

@@ -23,6 +23,7 @@
 #include "openGlShaders/gpuStruct.h"
 #include "mapGeneration/loadMap.h"
 #include "utils/bbox.h"
+#include "utils/image.h"
 
 void *SharedMem = NULL;
 #define USE_GPU_LOD 1 // 1 = GPU LOD selection, 0 = CPU LOD selection
@@ -168,56 +169,7 @@ struct BVHLinear {
 	int TrianglesCount;			// Number of triangles in the BVH
 };
 
-struct RawImage *load_jpeg(const char *filename) {
-	FILE *f = fopen(filename, "rb");
-	if (!f) return NULL;
-
-	struct jpeg_decompress_struct cinfo;
-	struct jpeg_error_mgr jerr;
-	cinfo.err = jpeg_std_error(&jerr);
-	jpeg_create_decompress(&cinfo);
-	jpeg_stdio_src(&cinfo, f);
-	jpeg_read_header(&cinfo, TRUE);
-	jpeg_start_decompress(&cinfo);
-
-	struct RawImage *img = malloc(sizeof(*img));
-	img->width = cinfo.output_width;
-	img->height = cinfo.output_height;
-	img->components = cinfo.output_components; // usually 3 for RGB
-
-	size_t rowbytes = img->width * img->components;
-	img->data = malloc(img->height * rowbytes);
-
-	JSAMPROW rowptr[1];
-	while (cinfo.output_scanline < img->height) {
-		rowptr[0] = img->data + rowbytes * cinfo.output_scanline;
-		jpeg_read_scanlines(&cinfo, rowptr, 1);
-	}
-
-	jpeg_finish_decompress(&cinfo);
-	jpeg_destroy_decompress(&cinfo);
-	fclose(f);
-
-	return img;
-}
-
-float *convertImageToFloat(struct RawImage *img) {
-	if (!img) return NULL;
-
-	float *data = malloc(img->width * img->height * 3 * sizeof(float));
-	if (!data) return NULL;
-
-	for (int i = 0; i < img->width * img->height * img->components; i += img->components) {
-		int floatIdx = (i / img->components) * 3;
-		data[floatIdx + 0] = (float)img->data[i + 0] / 255.0f; // R
-		data[floatIdx + 1] = (float)img->data[i + 1] / 255.0f; // G
-		data[floatIdx + 2] = (float)img->data[i + 2] / 255.0f; // B
-	}
-
-	return data;
-}
-
-bool loadSkyBox(struct SkyBox *skyBox) { // Changed from void to bool
+bool loadSkyBox(struct SkyBox *skyBox) {
 	skyBox->right = load_jpeg("skybox/right.jpg");
 	skyBox->left = load_jpeg("skybox/left.jpg");
 	skyBox->top = load_jpeg("skybox/top.jpg");
