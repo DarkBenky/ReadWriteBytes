@@ -966,8 +966,7 @@ bool initRayTraceKernel(struct Scene *scene) {
 }
 
 void launchRayTraceKernel(struct Scene *scene, 
-						  float cameraPos[3], 
-						  float cameraDir[3], 
+						  struct Camera camera,
 						  float fov,
 						  int screenWidth,
 						  int screenHeight,
@@ -981,8 +980,8 @@ void launchRayTraceKernel(struct Scene *scene,
 	}
 
 	cl_int err = 0;
-	cl_float3 camPos = {cameraPos[0], cameraPos[1], cameraPos[2]};
-	cl_float3 camDir = {cameraDir[0], cameraDir[1], cameraDir[2]};
+	cl_float3 camPos = {camera.ray.origin[0], camera.ray.origin[1], camera.ray.origin[2]};
+	cl_float3 camDir = {camera.ray.direction[0], camera.ray.direction[1], camera.ray.direction[2]};
 	cl_float3 sunDirection = {sunDir[0], sunDir[1], sunDir[2]};
 	cl_float3 sunColorVec = {sunColor[0], sunColor[1], sunColor[2]};
 	
@@ -995,7 +994,7 @@ void launchRayTraceKernel(struct Scene *scene,
 	err |= clSetKernelArg(scene->rayTraceScene, 3, sizeof(cl_mem), &scene->buffer_screen_colors);
 	err |= clSetKernelArg(scene->rayTraceScene, 4, sizeof(cl_float3), &camPos);
 	err |= clSetKernelArg(scene->rayTraceScene, 5, sizeof(cl_float3), &camDir);
-	err |= clSetKernelArg(scene->rayTraceScene, 6, sizeof(cl_float), &fov);
+	err |= clSetKernelArg(scene->rayTraceScene, 6, sizeof(cl_float), &camera.fov);
 	err |= clSetKernelArg(scene->rayTraceScene, 7, sizeof(cl_int), &screenWidth);
 	err |= clSetKernelArg(scene->rayTraceScene, 8, sizeof(cl_int), &screenHeight);
 	err |= clSetKernelArg(scene->rayTraceScene, 9, sizeof(cl_mem), &scene->buffer_skybox_top);
