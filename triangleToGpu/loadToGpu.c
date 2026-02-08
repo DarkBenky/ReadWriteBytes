@@ -4,10 +4,13 @@
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
+#include <string.h>
+#include <stdbool.h>
 #include <CL/cl.h>
 #include "../openGlShaders/gpuStruct.h"
 #include "../mapGeneration/loadMap.h"
 #include "../utils/image.h"
+#include "../utils/bbox.h"
 
 struct Volume {
 	float BBoxMin[3];
@@ -48,6 +51,7 @@ struct Scene {
 	struct SkyBox SkyBox;
 	cl_context context;
 	cl_command_queue queue;
+	cl_device_id device;
 	cl_mem buffer_sceneRegion;
 	cl_kernel rayTraceScene;
 	cl_mem buffer_distances;	 // ScreenWidth * ScreenHeight * sizeof(float)
@@ -710,6 +714,12 @@ void initGpuBuffers(struct Scene *scene, cl_context context, cl_command_queue qu
 	scene->queue = queue;
 
 	cl_int err;
+	err = clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(cl_device_id), &scene->device, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Failed to get device from command queue: %d\n", err);
+		return;
+	}
+
 	size_t regionSize = sizeof(struct Region);
 	scene->buffer_sceneRegion = clCreateBuffer(scene->context, CL_MEM_READ_ONLY, regionSize, NULL, &err);
 	if (err != CL_SUCCESS) {
@@ -880,6 +890,144 @@ void resetScene(struct Scene *scene) {
 		return;
 	}
 	memcpy(&scene->dynamicGeometry, &scene->staticGeometry, sizeof(struct Region));
+}
+
+bool initRayTraceKernel(struct Scene *scene) {
+	if (!scene || !scene->context || !scene->queue) {
+		printf("Invalid input to initRayTraceKernel\n");
+		return false;
+	}
+
+	FILE *file = fopen("triangleToGpu/rayTrace.cl", "r");
+	if (!file) {
+		file = fopen("rayTrace.cl", "r");
+		if (!file) {
+			printf("Error opening rayTrace.cl kernel file\n");
+			return false;
+		}
+	}
+
+	fseek(file, 0, SEEK_END);
+	size_t source_size = ftell(file);
+	fseek(file, 0, SEEK_SET);
+
+	char *source = (char *)malloc(source_size + 1);
+	if (!source) {
+		printf("Failed to allocate memory for kernel source\n");
+		fclose(file);
+		return false;
+	}
+	size_t bytes_read = fread(source, 1, source_size, file);
+	fclose(file);
+	if (bytes_read != source_size) {
+		printf("Failed to read complete kernel source (read %zu of %zu bytes)\n", bytes_read, source_size);
+		free(source);
+		return false;
+	}
+	source[source_size] = '\0';
+
+	cl_int err;
+	cl_program program = clCreateProgramWithSource(scene->context, 1, (const char **)&source, &source_size, &err);
+	free(source);
+	if (err != CL_SUCCESS) {
+		printf("Error creating rayTrace OpenCL program: %d\n", err);
+		return false;
+	}
+
+	err = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error building rayTrace OpenCL program: %d\n", err);
+		
+		size_t log_size;
+		clGetProgramBuildInfo(program, scene->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+		char *log = (char *)malloc(log_size);
+		if (!log) {
+			printf("Failed to allocate memory for build log\n");
+			clReleaseProgram(program);
+			return false;
+		}
+		clGetProgramBuildInfo(program, scene->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+		printf("Build log: %s\n", log);
+		free(log);
+		clReleaseProgram(program);
+		return false;
+	}
+
+	scene->rayTraceScene = clCreateKernel(program, "rayTraceScene", &err);
+	if (err != CL_SUCCESS) {
+		printf("Error creating rayTraceScene kernel: %d\n", err);
+		clReleaseProgram(program);
+		return false;
+	}
+
+	clReleaseProgram(program);
+	printf("Ray trace kernel initialized successfully\n");
+	return true;
+}
+
+void launchRayTraceKernel(struct Scene *scene, 
+						  float cameraPos[3], 
+						  float cameraDir[3], 
+						  float fov,
+						  int screenWidth,
+						  int screenHeight,
+						  float sunDir[3],
+						  float sunColor[3],
+						  float sunIntensity,
+						  int maxBounces) {
+	if (!scene || !scene->rayTraceScene) {
+		printf("Invalid input to launchRayTraceKernel or kernel not initialized\n");
+		return;
+	}
+
+	cl_int err = 0;
+	cl_float3 camPos = {cameraPos[0], cameraPos[1], cameraPos[2]};
+	cl_float3 camDir = {cameraDir[0], cameraDir[1], cameraDir[2]};
+	cl_float3 sunDirection = {sunDir[0], sunDir[1], sunDir[2]};
+	cl_float3 sunColorVec = {sunColor[0], sunColor[1], sunColor[2]};
+	
+	int skyBoxWidth = scene->SkyBox.right ? scene->SkyBox.right->width : 0;
+	int skyBoxHeight = scene->SkyBox.right ? scene->SkyBox.right->height : 0;
+
+	err |= clSetKernelArg(scene->rayTraceScene, 0, sizeof(cl_mem), &scene->buffer_sceneRegion);
+	err |= clSetKernelArg(scene->rayTraceScene, 1, sizeof(cl_mem), &scene->buffer_distances);
+	err |= clSetKernelArg(scene->rayTraceScene, 2, sizeof(cl_mem), &scene->buffer_normals);
+	err |= clSetKernelArg(scene->rayTraceScene, 3, sizeof(cl_mem), &scene->buffer_screen_colors);
+	err |= clSetKernelArg(scene->rayTraceScene, 4, sizeof(cl_float3), &camPos);
+	err |= clSetKernelArg(scene->rayTraceScene, 5, sizeof(cl_float3), &camDir);
+	err |= clSetKernelArg(scene->rayTraceScene, 6, sizeof(cl_float), &fov);
+	err |= clSetKernelArg(scene->rayTraceScene, 7, sizeof(cl_int), &screenWidth);
+	err |= clSetKernelArg(scene->rayTraceScene, 8, sizeof(cl_int), &screenHeight);
+	err |= clSetKernelArg(scene->rayTraceScene, 9, sizeof(cl_mem), &scene->buffer_skybox_top);
+	err |= clSetKernelArg(scene->rayTraceScene, 10, sizeof(cl_mem), &scene->buffer_skybox_bottom);
+	err |= clSetKernelArg(scene->rayTraceScene, 11, sizeof(cl_mem), &scene->buffer_skybox_left);
+	err |= clSetKernelArg(scene->rayTraceScene, 12, sizeof(cl_mem), &scene->buffer_skybox_right);
+	err |= clSetKernelArg(scene->rayTraceScene, 13, sizeof(cl_mem), &scene->buffer_skybox_front);
+	err |= clSetKernelArg(scene->rayTraceScene, 14, sizeof(cl_mem), &scene->buffer_skybox_back);
+	err |= clSetKernelArg(scene->rayTraceScene, 15, sizeof(cl_int), &skyBoxWidth);
+	err |= clSetKernelArg(scene->rayTraceScene, 16, sizeof(cl_int), &skyBoxHeight);
+	err |= clSetKernelArg(scene->rayTraceScene, 17, sizeof(cl_float3), &sunDirection);
+	err |= clSetKernelArg(scene->rayTraceScene, 18, sizeof(cl_float3), &sunColorVec);
+	err |= clSetKernelArg(scene->rayTraceScene, 19, sizeof(cl_float), &sunIntensity);
+	err |= clSetKernelArg(scene->rayTraceScene, 20, sizeof(cl_int), &maxBounces);
+
+	if (err != CL_SUCCESS) {
+		printf("Error setting kernel arguments: %d\n", err);
+		return;
+	}
+
+	size_t global_work_size[2] = {screenWidth, screenHeight};
+	err = clEnqueueNDRangeKernel(scene->queue, scene->rayTraceScene, 2, NULL, global_work_size, NULL, 0, NULL, NULL);
+	if (err != CL_SUCCESS) {
+		printf("Error launching rayTraceScene kernel: %d\n", err);
+		return;
+	}
+
+	err = clFinish(scene->queue);
+	if (err != CL_SUCCESS) {
+		printf("Error finishing ray trace kernel execution: %d\n", err);
+		return;
+	}
 }
 
 int main() {
