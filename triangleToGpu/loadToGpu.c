@@ -716,7 +716,7 @@ void initGpuBuffers(struct Scene *scene, cl_context context, cl_command_queue qu
 	cl_int err;
 	err = clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(cl_device_id), &scene->device, NULL);
 	if (err != CL_SUCCESS) {
-		printf("Failed to get device from queue: %d\n", err);
+		printf("Failed to get device from command queue: %d\n", err);
 		return;
 	}
 
@@ -900,8 +900,11 @@ bool initRayTraceKernel(struct Scene *scene) {
 
 	FILE *file = fopen("triangleToGpu/rayTrace.cl", "r");
 	if (!file) {
-		printf("Error opening rayTrace.cl kernel file\n");
-		return false;
+		file = fopen("rayTrace.cl", "r");
+		if (!file) {
+			printf("Error opening rayTrace.cl kernel file\n");
+			return false;
+		}
 	}
 
 	fseek(file, 0, SEEK_END);
@@ -909,9 +912,19 @@ bool initRayTraceKernel(struct Scene *scene) {
 	fseek(file, 0, SEEK_SET);
 
 	char *source = (char *)malloc(source_size + 1);
-	fread(source, 1, source_size, file);
-	source[source_size] = '\0';
+	if (!source) {
+		printf("Failed to allocate memory for kernel source\n");
+		fclose(file);
+		return false;
+	}
+	size_t bytes_read = fread(source, 1, source_size, file);
 	fclose(file);
+	if (bytes_read != source_size) {
+		printf("Failed to read complete kernel source (read %zu of %zu bytes)\n", bytes_read, source_size);
+		free(source);
+		return false;
+	}
+	source[source_size] = '\0';
 
 	cl_int err;
 	cl_program program = clCreateProgramWithSource(scene->context, 1, (const char **)&source, &source_size, &err);
@@ -928,6 +941,11 @@ bool initRayTraceKernel(struct Scene *scene) {
 		size_t log_size;
 		clGetProgramBuildInfo(program, scene->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
 		char *log = (char *)malloc(log_size);
+		if (!log) {
+			printf("Failed to allocate memory for build log\n");
+			clReleaseProgram(program);
+			return false;
+		}
 		clGetProgramBuildInfo(program, scene->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
 		printf("Build log: %s\n", log);
 		free(log);
