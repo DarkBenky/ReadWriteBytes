@@ -5560,6 +5560,8 @@ int main() {
 		return 1;
 	}
 
+	USE RAY TRACING KERNEL
+
 	while (!glfwWindowShouldClose(window) && !exit) {
 		// sleep(1);
 		// Update key states at the start of each frame
