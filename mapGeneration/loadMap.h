@@ -13,101 +13,100 @@
 #define LOD_LOW_DISTANCE 50000.0f
 
 typedef enum {
-    LOD_NONE = 0,
-    LOD_LOW = 1,
-    LOD_MEDIUM = 2,
-    LOD_HIGH = 3
+	LOD_NONE = 0,
+	LOD_LOW = 1,
+	LOD_MEDIUM = 2,
+	LOD_HIGH = 3
 } LODLevel;
 
 struct MapTile {
-    int x;
-    int y;
-    char name[64];
-    char filepath_high[512];
-    struct Triangles terrainHigh;
-    struct BoundingBox *terrainHighBoundingBoxes; // BBoxMin BBoxMax triangleIndex
-    char filepath_med[512];
-    struct Triangles terrainMed;
-    struct BoundingBox *terrainMedBoundingBoxes; // BBoxMin BBoxMax triangleIndex
-    char filepath_low[512];
-    struct Triangles terrainLow;
-    struct BoundingBox *terrainLowBoundingBoxes; // BBoxMin BBoxMax triangleIndex
-    LODLevel current_lod;
-    int is_loaded;
+	int x;
+	int y;
+	char name[64];
+	char filepath_high[512];
+	struct Triangles terrainHigh;
+	struct BoundingBox *terrainHighBoundingBoxes; // BBoxMin BBoxMax triangleIndex
+	char filepath_med[512];
+	struct Triangles terrainMed;
+	struct BoundingBox *terrainMedBoundingBoxes; // BBoxMin BBoxMax triangleIndex
+	char filepath_low[512];
+	struct Triangles terrainLow;
+	struct BoundingBox *terrainLowBoundingBoxes; // BBoxMin BBoxMax triangleIndex
+	LODLevel current_lod;
+	int is_loaded;
 };
 
 struct Map {
-    struct MapTile *tiles;
-    float posX;
-    float posY;
-    float posZ;
-    float tileSizeX;
-    float tileSizeY;
-    float tileSizeZ;
-    int tilesX;
-    int tilesY;
-    float mapSizeX;
-    float mapSizeY;
-    float mapSizeZ;
-    char dir_high[512];
-    char dir_med[512];
-    char dir_low[512];
+	struct MapTile *tiles;
+	float posX;
+	float posY;
+	float posZ;
+	float tileSizeX;
+	float tileSizeY;
+	float tileSizeZ;
+	int tilesX;
+	int tilesY;
+	float mapSizeX;
+	float mapSizeY;
+	float mapSizeZ;
+	char dir_high[512];
+	char dir_med[512];
+	char dir_low[512];
 };
 
 struct MapGPU {
-    int numberOfTiles;
-    float posX;
-    float posY;
-    float posZ;
-    float tileSizeX;
-    float tileSizeY;
-    float tileSizeZ;
-    int tilesX;
-    int tilesY;
-    float mapSizeX;
-    float mapSizeY;
-    float mapSizeZ;
-    int chunkStartHigh[CHUNK_COUNT];
-    int chunkStartMed[CHUNK_COUNT];
-    int chunkStartLow[CHUNK_COUNT];
-    int chunkEndHigh[CHUNK_COUNT];
-    int chunkEndMed[CHUNK_COUNT];
-    int chunkEndLow[CHUNK_COUNT];
-    float chunkBBoxMin[CHUNK_COUNT * 3]; // minX, minY, minZ
-    float chunkBBoxMax[CHUNK_COUNT * 3]; // maxX, maxY, maxZ
+	int numberOfTiles;
+	float posX;
+	float posY;
+	float posZ;
+	float tileSizeX;
+	float tileSizeY;
+	float tileSizeZ;
+	int tilesX;
+	int tilesY;
+	float mapSizeX;
+	float mapSizeY;
+	float mapSizeZ;
+	int chunkStartHigh[CHUNK_COUNT];
+	int chunkStartMed[CHUNK_COUNT];
+	int chunkStartLow[CHUNK_COUNT];
+	int chunkEndHigh[CHUNK_COUNT];
+	int chunkEndMed[CHUNK_COUNT];
+	int chunkEndLow[CHUNK_COUNT];
+	float chunkBBoxMin[CHUNK_COUNT * 3]; // minX, minY, minZ
+	float chunkBBoxMax[CHUNK_COUNT * 3]; // maxX, maxY, maxZ
 
-    float chunkHighTrianglesData[HIGH_RES_TRIANGLE_COUNT * 9];
-    float chunkHighRoughnessData[HIGH_RES_TRIANGLE_COUNT];
-    float chunkHighMetallicData[HIGH_RES_TRIANGLE_COUNT];
-    float chunkHighEmissionData[HIGH_RES_TRIANGLE_COUNT];
-    float chunkHighNormalsData[HIGH_RES_TRIANGLE_COUNT * 3];
-    float chunkHighColorsData[HIGH_RES_TRIANGLE_COUNT * 3];
+	float chunkHighTrianglesData[HIGH_RES_TRIANGLE_COUNT * 9];
+	float chunkHighRoughnessData[HIGH_RES_TRIANGLE_COUNT];
+	float chunkHighMetallicData[HIGH_RES_TRIANGLE_COUNT];
+	float chunkHighEmissionData[HIGH_RES_TRIANGLE_COUNT];
+	float chunkHighNormalsData[HIGH_RES_TRIANGLE_COUNT * 3];
+	float chunkHighColorsData[HIGH_RES_TRIANGLE_COUNT * 3];
 
-    float chunkMedTrianglesData[MID_RES_TRIANGLE_COUNT * 9];
-    float chunkMedRoughnessData[MID_RES_TRIANGLE_COUNT];
-    float chunkMedMetallicData[MID_RES_TRIANGLE_COUNT];
-    float chunkMedEmissionData[MID_RES_TRIANGLE_COUNT];
-    float chunkMedNormalsData[MID_RES_TRIANGLE_COUNT * 3];
-    float chunkMedColorsData[MID_RES_TRIANGLE_COUNT * 3];
+	float chunkMedTrianglesData[MID_RES_TRIANGLE_COUNT * 9];
+	float chunkMedRoughnessData[MID_RES_TRIANGLE_COUNT];
+	float chunkMedMetallicData[MID_RES_TRIANGLE_COUNT];
+	float chunkMedEmissionData[MID_RES_TRIANGLE_COUNT];
+	float chunkMedNormalsData[MID_RES_TRIANGLE_COUNT * 3];
+	float chunkMedColorsData[MID_RES_TRIANGLE_COUNT * 3];
 
-    float chunkLowTrianglesData[LOW_RES_TRIANGLE_COUNT * 9];
-    float chunkLowRoughnessData[LOW_RES_TRIANGLE_COUNT];
-    float chunkLowMetallicData[LOW_RES_TRIANGLE_COUNT];
-    float chunkLowEmissionData[LOW_RES_TRIANGLE_COUNT];
-    float chunkLowNormalsData[LOW_RES_TRIANGLE_COUNT * 3];
-    float chunkLowColorsData[LOW_RES_TRIANGLE_COUNT * 3];
-
+	float chunkLowTrianglesData[LOW_RES_TRIANGLE_COUNT * 9];
+	float chunkLowRoughnessData[LOW_RES_TRIANGLE_COUNT];
+	float chunkLowMetallicData[LOW_RES_TRIANGLE_COUNT];
+	float chunkLowEmissionData[LOW_RES_TRIANGLE_COUNT];
+	float chunkLowNormalsData[LOW_RES_TRIANGLE_COUNT * 3];
+	float chunkLowColorsData[LOW_RES_TRIANGLE_COUNT * 3];
 };
 
 void init_terrain_map(char *dir_high, char *dir_med, char *dir_low, struct Map *map,
-                      float scale, float translate[3], 
-                      float rotXDeg, float rotYDeg, float rotZDeg, float posX, float posY, float posZ);
+					  float scale, float translate[3],
+					  float rotXDeg, float rotYDeg, float rotZDeg, float posX, float posY, float posZ);
 void loadCurrentMap(struct Map *map, struct Camera *camera, struct Triangles *sceneTriangles);
-struct MapTile* get_tile(struct Map *map, int world_x, int world_y);
+struct MapTile *get_tile(struct Map *map, int world_x, int world_y);
 void free_map(struct Map *map);
 void initMapGPU(struct MapGPU *mapGpu, struct Map *map);
 void calculateBoundingBoxMapTile(struct MapTile *tile);
 void calculateBoundingBoxesMap(struct Map *map);
 void updateBBoxWithTriangle(float v1[3], float v2[3], float v3[3], float minBB[3], float maxBB[3]);
-
+void dumpMap(struct Map *map, struct Triangles *out, LODLevel lod);
 #endif

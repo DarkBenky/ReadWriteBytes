@@ -212,6 +212,8 @@ enum RenderMode {
 	renderCompositedDistance,
 	renderTemperatures,
 	renderDebugMode,
+	renderRayTraced,
+	// renderMixed,
 	RENDER_MODE_COUNT // Total number of render modes
 };
 

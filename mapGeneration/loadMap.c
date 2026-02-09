@@ -1107,3 +1107,92 @@ void calculateClosesSurfacesForWholeMap(struct Map *map, struct Ray *ray, float 
 		*hitTriangleIndex = -1;
 	}
 }
+
+void dumpMap(struct Map *map, struct Triangles *out, LODLevel lod) {
+	for (int i = 0; i < CHUNK_COUNT; i++) {
+		struct MapTile *tile = get_tile_by_index(map, i);
+		if (!tile) continue;
+
+		int chunkCount = 0;
+		if (lod == LOD_HIGH) {
+			chunkCount = tile->terrainHigh.count;
+		} else if (lod == LOD_MEDIUM) {
+			chunkCount = tile->terrainMed.count;
+		} else if (lod == LOD_LOW) {
+			chunkCount = tile->terrainLow.count;
+		}
+
+		int triangleOffset = out->count;
+		for (int j = 0; j < chunkCount && triangleOffset + j < NUMBER_OF_TRIANGLES; j++) {
+			int srcIdx = j * 3;
+			if (lod == LOD_HIGH) {
+				out->v1[triangleOffset * 3 + 0] = tile->terrainHigh.v1[srcIdx + 0];
+				out->v1[triangleOffset * 3 + 1] = tile->terrainHigh.v1[srcIdx + 1];
+				out->v1[triangleOffset * 3 + 2] = tile->terrainHigh.v1[srcIdx + 2];
+
+				out->v2[triangleOffset * 3 + 0] = tile->terrainHigh.v2[srcIdx + 0];
+				out->v2[triangleOffset * 3 + 1] = tile->terrainHigh.v2[srcIdx + 1];
+				out->v2[triangleOffset * 3 + 2] = tile->terrainHigh.v2[srcIdx + 2];
+
+				out->v3[triangleOffset * 3 + 0] = tile->terrainHigh.v3[srcIdx + 0];
+				out->v3[triangleOffset * 3 + 1] = tile->terrainHigh.v3[srcIdx + 1];
+				out->v3[triangleOffset * 3 + 2] = tile->terrainHigh.v3[srcIdx + 2];
+
+				out->colors[triangleOffset * 3 + 0] = tile->terrainHigh.colors[srcIdx + 0];
+				out->colors[triangleOffset * 3 + 1] = tile->terrainHigh.colors[srcIdx + 1];
+				out->colors[triangleOffset * 3 + 2] = tile->terrainHigh.colors[srcIdx + 2];
+				out->normals[triangleOffset * 3 + 0] = tile->terrainHigh.normals[srcIdx + 0];
+				out->normals[triangleOffset * 3 + 1] = tile->terrainHigh.normals[srcIdx + 1];
+				out->normals[triangleOffset * 3 + 2] = tile->terrainHigh.normals[srcIdx + 2];
+				out->Roughness[triangleOffset + j] = tile->terrainHigh.Roughness[j];
+				out->Metallic[triangleOffset + j] = tile->terrainHigh.Metallic[j];
+				out->Emission[triangleOffset + j] = tile->terrainHigh.Emission[j];
+			} else if (lod == LOD_MEDIUM) {
+				out->v1[triangleOffset * 3 + 0] = tile->terrainMed.v1[srcIdx + 0];
+				out->v1[triangleOffset * 3 + 1] = tile->terrainMed.v1[srcIdx + 1];
+				out->v1[triangleOffset * 3 + 2] = tile->terrainMed.v1[srcIdx + 2];
+
+				out->v2[triangleOffset * 3 + 0] = tile->terrainMed.v2[srcIdx + 0];
+				out->v2[triangleOffset * 3 + 1] = tile->terrainMed.v2[srcIdx + 1];
+				out->v2[triangleOffset * 3 + 2] = tile->terrainMed.v2[srcIdx + 2];
+
+				out->v3[triangleOffset * 3 + 0] = tile->terrainMed.v3[srcIdx + 0];
+				out->v3[triangleOffset * 3 + 1] = tile->terrainMed.v3[srcIdx + 1];
+				out->v3[triangleOffset * 3 + 2] = tile->terrainMed.v3[srcIdx + 2];
+
+				out->colors[triangleOffset * 3 + 0] = tile->terrainMed.colors[srcIdx + 0];
+				out->colors[triangleOffset * 3 + 1] = tile->terrainMed.colors[srcIdx + 1];
+				out->colors[triangleOffset * 3 + 2] = tile->terrainMed.colors[srcIdx + 2];
+				out->normals[triangleOffset * 3 + 0] = tile->terrainMed.normals[srcIdx + 0];
+				out->normals[triangleOffset * 3 + 1] = tile->terrainMed.normals[srcIdx + 1];
+				out->normals[triangleOffset * 3 + 2] = tile->terrainMed.normals[srcIdx + 2];
+				out->Roughness[triangleOffset + j] = tile->terrainMed.Roughness[j];
+				out->Metallic[triangleOffset + j] = tile->terrainMed.Metallic[j];
+				out->Emission[triangleOffset + j] = tile->terrainMed.Emission[j];
+			} else if (lod == LOD_LOW) {
+				out->v1[triangleOffset * 3 + 0] = tile->terrainLow.v1[srcIdx + 0];
+				out->v1[triangleOffset * 3 + 1] = tile->terrainLow.v1[srcIdx + 1];
+				out->v1[triangleOffset * 3 + 2] = tile->terrainLow.v1[srcIdx + 2];
+
+				out->v2[triangleOffset * 3 + 0] = tile->terrainLow.v2[srcIdx + 0];
+				out->v2[triangleOffset * 3 + 1] = tile->terrainLow.v2[srcIdx + 1];
+				out->v2[triangleOffset * 3 + 2] = tile->terrainLow.v2[srcIdx + 2];
+
+				out->v3[triangleOffset * 3 + 0] = tile->terrainLow.v3[srcIdx + 0];
+				out->v3[triangleOffset * 3 + 1] = tile->terrainLow.v3[srcIdx + 1];
+				out->v3[triangleOffset * 3 + 2] = tile->terrainLow.v3[srcIdx + 2];
+
+				out->colors[triangleOffset * 3 + 0] = tile->terrainLow.colors[srcIdx + 0];
+				out->colors[triangleOffset * 3 + 1] = tile->terrainLow.colors[srcIdx + 1];
+				out->colors[triangleOffset * 3 + 2] = tile->terrainLow.colors[srcIdx + 2];
+				out->normals[triangleOffset * 3 + 0] = tile->terrainLow.normals[srcIdx + 0];
+				out->normals[triangleOffset * 3 + 1] = tile->terrainLow.normals[srcIdx + 1];
+				out->normals[triangleOffset * 3 + 2] = tile->terrainLow.normals[srcIdx + 2];
+				out->Roughness[triangleOffset + j] = tile->terrainLow.Roughness[j];
+				out->Metallic[triangleOffset + j] = tile->terrainLow.Metallic[j];
+				out->Emission[triangleOffset + j] = tile->terrainLow.Emission[j];
+			}
+		}
+		out->count += chunkCount;
+	}
+}

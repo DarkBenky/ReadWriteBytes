@@ -1,82 +1,70 @@
-#define Capacity 1024
-#define BUFFER_PERCENTAGE 0.2f
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <math.h>
-#include <string.h>
-#include <stdbool.h>
-#include <CL/cl.h>
-#include "../openGlShaders/gpuStruct.h"
-#include "../mapGeneration/loadMap.h"
-#include "../utils/image.h"
-#include "../utils/bbox.h"
+#include "loadToGpu.h"
 
-struct Volume {
-	float BBoxMin[3];
-	float BBoxMax[3];
-	int count;
-	float v1[Capacity * 3];
-	float v2[Capacity * 3];
-	float v3[Capacity * 3];
-	float Roughness[Capacity];
-	float Metallic[Capacity];
-	float Emission[Capacity];
-	float normals[Capacity * 3];
-	float colors[Capacity * 3]; // RGB colors for each triangle
-};
+// struct Volume {
+// 	float BBoxMin[3];
+// 	float BBoxMax[3];
+// 	int count;
+// 	float v1[Capacity * 3];
+// 	float v2[Capacity * 3];
+// 	float v3[Capacity * 3];
+// 	float Roughness[Capacity];
+// 	float Metallic[Capacity];
+// 	float Emission[Capacity];
+// 	float normals[Capacity * 3];
+// 	float colors[Capacity * 3]; // RGB colors for each triangle
+// };
 
-struct Cluster {
-	float BBoxMin[3];
-	float BBoxMax[3];
-	struct Volume volumes[8]; // 8 volumes per cluster forming a 3D grid
-};
+// struct Cluster {
+// 	float BBoxMin[3];
+// 	float BBoxMax[3];
+// 	struct Volume volumes[8]; // 8 volumes per cluster forming a 3D grid
+// };
 
-struct Block {
-	float BBoxMin[3];
-	float BBoxMax[3];
-	struct Cluster clusters[8];
-};
+// struct Block {
+// 	float BBoxMin[3];
+// 	float BBoxMax[3];
+// 	struct Cluster clusters[8];
+// };
 
-struct Region {
-	float BBoxMin[3];
-	float BBoxMax[3];
-	struct Block blocks[8];
-};
+// struct Region {
+// 	float BBoxMin[3];
+// 	float BBoxMax[3];
+// 	struct Block blocks[8];
+// };
 
-struct Scene {
-	struct Region staticGeometry;
-	struct Triangles _tempTriangles; // Temporary storage for converting models to triangles
-	struct Region dynamicGeometry;
-	struct SkyBox SkyBox;
-	cl_context context;
-	cl_command_queue queue;
-	cl_device_id device;
-	cl_mem buffer_sceneRegion;
-	cl_kernel rayTraceScene;
-	cl_mem buffer_distances;	 // ScreenWidth * ScreenHeight * sizeof(float)
-	cl_mem buffer_normals;		 // ScreenWidth * ScreenHeight * sizeof(float) * 3
-	cl_mem buffer_screen_colors; // ScreenWidth * ScreenHeight * sizeof(float) * 3
-	cl_mem buffer_skybox_top;
-	cl_mem buffer_skybox_bottom;
-	cl_mem buffer_skybox_left;
-	cl_mem buffer_skybox_right;
-	cl_mem buffer_skybox_front;
-	cl_mem buffer_skybox_back;
-};
+// struct Scene {
+// 	struct Region staticGeometry;
+// 	struct Triangles _tempTriangles; // Temporary storage for converting models to triangles
+// 	struct Region dynamicGeometry;
+// 	struct SkyBox SkyBox;
+// 	cl_context context;
+// 	cl_command_queue queue;
+// 	cl_device_id device;
+// 	cl_mem buffer_sceneRegion;
+// 	cl_kernel rayTraceScene;
+// 	cl_mem buffer_distances;	 // ScreenWidth * ScreenHeight * sizeof(float)
+// 	cl_mem buffer_normals;		 // ScreenWidth * ScreenHeight * sizeof(float) * 3
+// 	cl_mem buffer_screen_colors; // ScreenWidth * ScreenHeight * sizeof(float) * 3
+// 	cl_mem buffer_skybox_top;
+// 	cl_mem buffer_skybox_bottom;
+// 	cl_mem buffer_skybox_left;
+// 	cl_mem buffer_skybox_right;
+// 	cl_mem buffer_skybox_front;
+// 	cl_mem buffer_skybox_back;
+// };
 
-struct HitInfo {
-	int hit;
-	float t;
-	float hitPoint[3];
-	float hitNormal[3];
-	float color[3];
-	float roughness;
-	float metallic;
-	float emission;
-	int volumeIdx;
-	int triangleIdx;
-};
+// struct HitInfo {
+// 	int hit;
+// 	float t;
+// 	float hitPoint[3];
+// 	float hitNormal[3];
+// 	float color[3];
+// 	float roughness;
+// 	float metallic;
+// 	float emission;
+// 	int volumeIdx;
+// 	int triangleIdx;
+// };
 
 bool loadSkyBoxForScene(struct Scene *scene) { // Changed from void to bool
 	scene->SkyBox.right = load_jpeg("../skybox/right.jpg");
@@ -937,7 +925,7 @@ bool initRayTraceKernel(struct Scene *scene) {
 	err = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
 	if (err != CL_SUCCESS) {
 		printf("Error building rayTrace OpenCL program: %d\n", err);
-		
+
 		size_t log_size;
 		clGetProgramBuildInfo(program, scene->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
 		char *log = (char *)malloc(log_size);
@@ -965,7 +953,7 @@ bool initRayTraceKernel(struct Scene *scene) {
 	return true;
 }
 
-void launchRayTraceKernel(struct Scene *scene, 
+void launchRayTraceKernel(struct Scene *scene,
 						  struct Camera camera,
 						  float fov,
 						  int screenWidth,
@@ -984,7 +972,7 @@ void launchRayTraceKernel(struct Scene *scene,
 	cl_float3 camDir = {camera.ray.direction[0], camera.ray.direction[1], camera.ray.direction[2]};
 	cl_float3 sunDirection = {sunDir[0], sunDir[1], sunDir[2]};
 	cl_float3 sunColorVec = {sunColor[0], sunColor[1], sunColor[2]};
-	
+
 	int skyBoxWidth = scene->SkyBox.right ? scene->SkyBox.right->width : 0;
 	int skyBoxHeight = scene->SkyBox.right ? scene->SkyBox.right->height : 0;
 

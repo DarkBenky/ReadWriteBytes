@@ -24,6 +24,7 @@
 #include "mapGeneration/loadMap.h"
 #include "utils/bbox.h"
 #include "utils/image.h"
+#include "triangleToGpu/loadToGpu.h"
 
 void *SharedMem = NULL;
 #define USE_GPU_LOD 1 // 1 = GPU LOD selection, 0 = CPU LOD selection
@@ -135,6 +136,7 @@ char *renderModesName[] = {
 	"renderCompositedDistance",
 	"renderTemperatures",
 	"renderDebugMode",
+	"renderRayTraced",
 };
 
 struct ImageFont {
@@ -5539,6 +5541,24 @@ int main() {
 	}
 
 	InitializeFireParticles(fireParticles);
+
+	struct Triangles *sceneTriangles = (struct Triangles *)malloc(sizeof(struct Triangles));
+	sceneTriangles->count = 0;
+	dumpMap(&terrain, sceneTriangles, LOD_LOW);
+
+	struct Scene *scene = (struct Scene *)malloc(sizeof(struct Scene));
+	memset(scene, 0, sizeof(struct Scene));
+
+	initGpuBuffers(scene, ocl.context, ocl.queue, ScreenWidth, ScreenHeight);
+	loadSkyBoxForScene(scene);
+	uploadSkyboxToGpu(scene);
+	initGeometry(scene, sceneTriangles);
+	uploadToGpu(scene);
+
+	if (!initRayTraceKernel(scene)) {
+		printf("Failed to initialize ray trace kernel\n");
+		return 1;
+	}
 
 	while (!glfwWindowShouldClose(window) && !exit) {
 		// sleep(1);
