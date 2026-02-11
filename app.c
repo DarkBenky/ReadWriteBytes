@@ -5351,11 +5351,33 @@ static void initCamera(struct Camera *camera) {
 	camera->advanceAntiAlias = false;
 }
 
+static void syncRenderContext(struct AppState *state) {
+	state->renderContext = (struct RenderContext){
+		.particles = state->particles,
+		.camera = &state->camera,
+		.timePartition = state->timePartition,
+		.particleIndexes = state->particleIndexes,
+		.openCLContext = &state->ocl,
+		.triangles = state->triangles,
+		.skyBox = &state->skyBox,
+		.gpuTimings = &state->gpuTimings,
+		.font = &state->font,
+		.fireParticles = state->fireParticles,
+		.missiles = &state->missiles,
+		.irst = &state->irst,
+	};
+}
+
+static bool initFailure(struct AppState *state) {
+	cleanupApp(state);
+	return false;
+}
+
 bool initializeApp(struct AppState *state) {
 	state->missileModel = (struct Triangles *)malloc(sizeof(struct Triangles));
 	if (!state->missileModel) {
 		perror("Failed to allocate memory for triangles");
-		return false;
+		return initFailure(state);
 	}
 	state->missileModel->count = 0;
 	readFileTriangles("missile/r27.bin", state->missileModel, 25.0f);
@@ -5383,7 +5405,7 @@ bool initializeApp(struct AppState *state) {
 	int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
 	if (fd == -1) {
 		perror("shm_open");
-		return false;
+		return initFailure(state);
 	}
 
 	ftruncate(fd, SIZE); // Set size
@@ -5391,20 +5413,20 @@ bool initializeApp(struct AppState *state) {
 	SharedMem = mmap(0, SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (SharedMem == MAP_FAILED) { // Fixed: was "ptr == MAP_FAILED"
 		perror("mmap");
-		return false;
+		return initFailure(state);
 	}
 
 	// load sky box texture
 	if (!loadSkyBox(&state->skyBox)) {
 		fprintf(stderr, "Failed to load skybox textures\n");
-		return false;
+		return initFailure(state);
 	}
 	printf("SkyBox loaded successfully\n");
 
 	state->triangles = (struct Triangles *)malloc(sizeof(struct Triangles));
 	if (!state->triangles) {
 		perror("Failed to allocate memory for triangles");
-		return false;
+		return initFailure(state);
 	}
 	state->triangles->count = 0;
 
@@ -5416,13 +5438,13 @@ bool initializeApp(struct AppState *state) {
 	state->particleIndexes = (struct ParticleIndexes *)malloc(sizeof(struct ParticleIndexes));
 	if (!state->particleIndexes) {
 		perror("Failed to allocate memory for particle indexes");
-		return false;
+		return initFailure(state);
 	}
 
 	state->particles = (struct PointSOA *)malloc(sizeof(struct PointSOA));
 	if (!state->particles) {
 		perror("Failed to allocate memory for particles");
-		return false;
+		return initFailure(state);
 	}
 
 	if (WATER_SIMULATION == 1) {
@@ -5452,7 +5474,7 @@ bool initializeApp(struct AppState *state) {
 	state->timePartition = (struct TimePartition *)malloc(sizeof(struct TimePartition));
 	if (!state->timePartition) {
 		perror("Failed to allocate memory for time partition");
-		return false;
+		return initFailure(state);
 	}
 
 	state->lastTime = clock();
@@ -5486,7 +5508,7 @@ bool initializeApp(struct AppState *state) {
 	state->mapGPU = (struct MapGPU *)malloc(sizeof(struct MapGPU));
 	if (!state->mapGPU) {
 		perror("Failed to allocate memory for mapGPU");
-		return false;
+		return initFailure(state);
 	}
 	initMapGPU(state->mapGPU, &state->terrain);
 
@@ -5494,7 +5516,7 @@ bool initializeApp(struct AppState *state) {
 
 	if (!glfwInit()) {
 		fprintf(stderr, "Failed to init GLFW\n");
-		return false;
+		return initFailure(state);
 	}
 
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -5505,7 +5527,7 @@ bool initializeApp(struct AppState *state) {
 	if (!state->window) {
 		fprintf(stderr, "Failed to create window\n");
 		glfwTerminate();
-		return false;
+		return initFailure(state);
 	}
 
 	glfwMakeContextCurrent(state->window);
@@ -5528,7 +5550,7 @@ bool initializeApp(struct AppState *state) {
 	state->fireParticles = malloc(sizeof(struct FireSOA));
 	if (!state->fireParticles) {
 		perror("Failed to allocate memory for fire particles");
-		return false;
+		return initFailure(state);
 	}
 
 	InitializeFireParticles(state->fireParticles);
@@ -5548,7 +5570,7 @@ bool initializeApp(struct AppState *state) {
 
 	if (!initRayTraceKernel(state->scene)) {
 		printf("Failed to initialize ray trace kernel\n");
-		return false;
+		return initFailure(state);
 	}
 
 	USE RAY TRACING KERNEL
@@ -5556,20 +5578,7 @@ bool initializeApp(struct AppState *state) {
 	state->yaw = 0.0f;
 	state->pitch = 0.0f;
 
-	state->renderContext = (struct RenderContext){
-		.particles = state->particles,
-		.camera = &state->camera,
-		.timePartition = state->timePartition,
-		.particleIndexes = state->particleIndexes,
-		.openCLContext = &state->ocl,
-		.triangles = state->triangles,
-		.skyBox = &state->skyBox,
-		.gpuTimings = &state->gpuTimings,
-		.font = &state->font,
-		.fireParticles = state->fireParticles,
-		.missiles = &state->missiles,
-		.irst = &state->irst,
-	};
+	syncRenderContext(state);
 
 	return true;
 }
@@ -5718,6 +5727,7 @@ void runAppFrame(struct AppState *state) {
 							  MISSILE_SEEKER_SIZE, MISSILE_SEEKER_SIZE, &tempTimeTookMs);
 
 	IRSearchAndTrackStep(missiles, irst, dt);
+	syncRenderContext(state);
 	render(&state->renderContext);
 	clock_t endRenderTime = clock();
 	clock_gettime(CLOCK_MONOTONIC, &end);
@@ -5850,22 +5860,40 @@ void cleanupApp(struct AppState *state) {
 	printf("Cleaning up...\n");
 
 	// Free terrain map
-	free_map(&state->terrain);
+	if (state->terrain.tiles) {
+		free_map(&state->terrain);
+	}
 
 	// Free triangles and other resources
-	free(state->triangles);
-	free(state->particles);
-	free(state->particleIndexes);
-	free(state->timePartition);
-	free(state->missileModel);
+	if (state->triangles) {
+		free(state->triangles);
+	}
+	if (state->particles) {
+		free(state->particles);
+	}
+	if (state->particleIndexes) {
+		free(state->particleIndexes);
+	}
+	if (state->timePartition) {
+		free(state->timePartition);
+	}
+	if (state->missileModel) {
+		free(state->missileModel);
+	}
 
 	// Free fire particles
-	free(state->fireParticles);
+	if (state->fireParticles) {
+		free(state->fireParticles);
+	}
 
 	// Cleanup OpenCL
-	cleanupOpenCL(&state->ocl);
+	if (state->ocl.context) {
+		cleanupOpenCL(&state->ocl);
+	}
 
 	// Cleanup GLFW
-	glfwDestroyWindow(state->window);
-	glfwTerminate();
+	if (state->window) {
+		glfwDestroyWindow(state->window);
+		glfwTerminate();
+	}
 }
